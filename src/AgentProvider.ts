@@ -21,7 +21,11 @@ const TOOL_ARG_FIELDS: Record<string, string> = {
 const extractErrorMessage = (obj: any): string | undefined => {
   const err = obj.error;
   if (typeof err === "string") return err;
-  if (typeof err === "object" && err !== null && typeof err.message === "string") {
+  if (
+    typeof err === "object" &&
+    err !== null &&
+    typeof err.message === "string"
+  ) {
     return err.message;
   }
   if (typeof obj.message === "string") return obj.message;
@@ -332,6 +336,157 @@ export const opencode = (
     return [];
   },
 });
+
+// ---------------------------------------------------------------------------
+// Cursor CLI agent provider (`agent` — https://cursor.com/docs/cli/overview)
+// ---------------------------------------------------------------------------
+
+/** Best-effort label + arg string for Cursor stream-json tool_call (schema may evolve). */
+const describeCursorToolCall = (
+  toolCall: unknown,
+): { name: string; args: string } | undefined => {
+  if (!toolCall || typeof toolCall !== "object") return undefined;
+  const tc = toolCall as Record<string, unknown>;
+  const shell = tc.shellToolCall as { args?: { command?: string } } | undefined;
+  if (typeof shell?.args?.command === "string") {
+    return { name: "Bash", args: shell.args.command };
+  }
+  const write = tc.writeToolCall as { args?: { path?: string } } | undefined;
+  if (typeof write?.args?.path === "string") {
+    return { name: "Write", args: write.args.path };
+  }
+  const read = tc.readToolCall as { args?: { path?: string } } | undefined;
+  if (typeof read?.args?.path === "string") {
+    return { name: "Read", args: read.args.path };
+  }
+  try {
+    return { name: "Tool", args: JSON.stringify(toolCall).slice(0, 500) };
+  } catch {
+    return undefined;
+  }
+};
+
+const parseCursorCliStreamLine = (line: string): ParsedStreamEvent[] => {
+  if (!line.startsWith("{")) return [];
+  try {
+    const obj = JSON.parse(line) as Record<string, unknown>;
+
+    if (
+      obj.type === "system" &&
+      obj.subtype === "init" &&
+      typeof obj.session_id === "string"
+    ) {
+      return [{ type: "session_id", sessionId: obj.session_id }];
+    }
+
+    if (
+      obj.type === "assistant" &&
+      obj.message &&
+      typeof obj.message === "object"
+    ) {
+      const msg = obj.message as { content?: unknown };
+      if (!Array.isArray(msg.content)) return [];
+      const events: ParsedStreamEvent[] = [];
+      for (const block of msg.content as { type?: string; text?: string }[]) {
+        if (block.type === "text" && typeof block.text === "string") {
+          events.push({ type: "text", text: block.text });
+        }
+      }
+      return events;
+    }
+
+    if (obj.type === "tool_call" && obj.subtype === "started") {
+      const described = describeCursorToolCall(obj.tool_call);
+      if (described) {
+        return [
+          {
+            type: "tool_call",
+            name: described.name,
+            args: described.args,
+          },
+        ];
+      }
+      return [];
+    }
+
+    if (obj.type === "result") {
+      if (obj.is_error === true) {
+        const r = obj.result;
+        const msg =
+          typeof r === "string"
+            ? r
+            : (extractErrorMessage(obj) ?? String(r ?? "error"));
+        return [{ type: "result", result: msg }];
+      }
+      if (typeof obj.result === "string") {
+        return [{ type: "result", result: obj.result }];
+      }
+      return [];
+    }
+
+    if (obj.type === "error") {
+      const msg = extractErrorMessage(obj);
+      return msg ? [{ type: "result", result: msg }] : [];
+    }
+  } catch {
+    // Not valid JSON — skip
+  }
+  return [];
+};
+
+/** Options for the Cursor CLI (`agent`) agent provider. */
+export interface CursorAgentOptions {
+  /** Environment variables injected by this agent provider. */
+  readonly env?: Record<string, string>;
+  /**
+   * When true (default), pass `--stream-partial-output` with `--output-format stream-json`
+   * for incremental assistant deltas. Disable if you need fewer stdout lines.
+   */
+  readonly streamPartialOutput?: boolean;
+}
+
+export const cursorAgent = (
+  model: string,
+  options?: CursorAgentOptions,
+): AgentProvider => {
+  const streamPartial = options?.streamPartialOutput !== false;
+  return {
+    name: "cursor-cli",
+    env: options?.env ?? {},
+    captureSessions: false,
+
+    buildPrintCommand({
+      prompt,
+      dangerouslySkipPermissions,
+      resumeSession,
+    }: AgentCommandOptions): PrintCommand {
+      const forceFlag = dangerouslySkipPermissions ? " --force" : "";
+      const streamFlag = streamPartial ? " --stream-partial-output" : "";
+      const resumeFlag = resumeSession
+        ? ` --resume ${shellEscape(resumeSession)}`
+        : "";
+      // --trust is required for non-interactive print runs without workspace prompts (CLI docs).
+      return {
+        command: `agent -p --trust --output-format stream-json${streamFlag} --model ${shellEscape(model)}${forceFlag}${resumeFlag}`,
+        stdin: prompt,
+      };
+    },
+
+    buildInteractiveArgs({
+      prompt,
+      dangerouslySkipPermissions,
+    }: AgentCommandOptions): string[] {
+      const args = ["agent", "--model", model];
+      if (dangerouslySkipPermissions) args.push("--force");
+      if (prompt) args.push(prompt);
+      return args;
+    },
+
+    parseStreamLine(line: string): ParsedStreamEvent[] {
+      return parseCursorCliStreamLine(line);
+    },
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Claude Code agent provider

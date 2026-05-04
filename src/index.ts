@@ -45,7 +45,13 @@ export {
 export type { SandboxHooks } from "./SandboxLifecycle.js";
 export type { MountConfig } from "./MountConfig.js";
 export { CwdError } from "./resolveCwd.js";
-export { claudeCode, codex, opencode, pi } from "./AgentProvider.js";
+export {
+  claudeCode,
+  codex,
+  cursorAgent,
+  opencode,
+  pi,
+} from "./AgentProvider.js";
 export type {
   AgentProvider,
   AgentCommandOptions,
@@ -54,6 +60,7 @@ export type {
   CodexOptions,
   OpenCodeOptions,
   PiOptions,
+  CursorAgentOptions,
 } from "./AgentProvider.js";
 export {
   createBindMountSandboxProvider,

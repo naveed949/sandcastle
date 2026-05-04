@@ -231,7 +231,12 @@ export const createWorktree = async (
       baseBranch,
     });
     if (options.copyToWorktree && options.copyToWorktree.length > 0) {
-      yield* copyToWorktree(options.copyToWorktree, hostRepoDir, info.path, options.timeouts?.copyToWorktreeMs);
+      yield* copyToWorktree(
+        options.copyToWorktree,
+        hostRepoDir,
+        info.path,
+        options.timeouts?.copyToWorktreeMs,
+      );
     }
     // Run host.onWorktreeReady hooks after copyToWorktree, before sandbox creation
     if (options.hooks?.host?.onWorktreeReady?.length) {
@@ -481,7 +486,7 @@ export const createWorktree = async (
       );
     }
 
-    if (opts.resumeSession) {
+    if (opts.resumeSession && provider.name === "claude-code") {
       const hStore = hostSessionStore(hostRepoDir);
       const sessionPath = hStore.sessionFilePath(opts.resumeSession);
       if (!existsSync(sessionPath)) {

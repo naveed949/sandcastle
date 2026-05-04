@@ -127,9 +127,7 @@ const invokeAgent = (
           errorDetail = resultText;
         }
         if (!errorDetail.trim()) {
-          const lines = execResult.stdout
-            .split("\n")
-            .filter((l) => l.trim());
+          const lines = execResult.stdout.split("\n").filter((l) => l.trim());
           errorDetail = lines.slice(-20).join("\n");
         }
         return yield* Effect.fail(
@@ -279,7 +277,11 @@ export const orchestrate = (
                 // Resume session: transfer JSONL from host to sandbox before iteration 1
                 const iterationResumeSession =
                   i === 1 ? options.resumeSession : undefined;
-                if (iterationResumeSession && bindMountHandle) {
+                if (
+                  provider.captureSessions &&
+                  iterationResumeSession &&
+                  bindMountHandle
+                ) {
                   yield* display.status(label("Resuming session"), "info");
                   const sbStore = sandboxSessionStore(
                     ctx.sandboxRepoDir,

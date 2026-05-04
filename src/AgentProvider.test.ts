@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { claudeCode, codex, opencode, pi } from "./AgentProvider.js";
+import {
+  claudeCode,
+  codex,
+  cursorAgent,
+  opencode,
+  pi,
+} from "./AgentProvider.js";
 import type { AgentCommandOptions } from "./AgentProvider.js";
 
 /** Shorthand: build options with dangerouslySkipPermissions: true (mirrors existing sandbox callers). */
@@ -774,6 +780,141 @@ describe("opencode factory", () => {
   it("defaults env to empty object when not provided", () => {
     const provider = opencode("opencode/big-pickle");
     expect(provider.env).toEqual({});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cursorAgent factory (Cursor CLI)
+// ---------------------------------------------------------------------------
+
+describe("cursorAgent factory", () => {
+  it("returns a provider with name 'cursor-cli'", () => {
+    const provider = cursorAgent("composer-2");
+    expect(provider.name).toBe("cursor-cli");
+  });
+
+  it("sets captureSessions to false", () => {
+    const provider = cursorAgent("composer-2");
+    expect(provider.captureSessions).toBe(false);
+  });
+
+  it("buildPrintCommand uses agent -p stream-json, stdin prompt, --trust, --model", () => {
+    const provider = cursorAgent("composer-2");
+    const { command, stdin } = provider.buildPrintCommand(opts("hello"));
+    expect(command).toContain("agent -p");
+    expect(command).toContain("--trust");
+    expect(command).toContain("--output-format stream-json");
+    expect(command).toContain("--stream-partial-output");
+    expect(command).toContain("--model 'composer-2'");
+    expect(command).toContain("--force");
+    expect(stdin).toBe("hello");
+  });
+
+  it("buildPrintCommand omits --force when dangerouslySkipPermissions is false", () => {
+    const provider = cursorAgent("composer-2");
+    const { command } = provider.buildPrintCommand({
+      prompt: "x",
+      dangerouslySkipPermissions: false,
+    });
+    expect(command).not.toContain("--force");
+  });
+
+  it("buildPrintCommand omits --stream-partial-output when streamPartialOutput is false", () => {
+    const provider = cursorAgent("composer-2", { streamPartialOutput: false });
+    const { command } = provider.buildPrintCommand(opts("x"));
+    expect(command).not.toContain("--stream-partial-output");
+  });
+
+  it("buildPrintCommand includes --resume when resumeSession is set", () => {
+    const provider = cursorAgent("composer-2");
+    const { command } = provider.buildPrintCommand({
+      prompt: "x",
+      dangerouslySkipPermissions: true,
+      resumeSession: "d6415fc9-2b93-42c5-9702-1084905283fa",
+    });
+    expect(command).toContain(
+      "--resume 'd6415fc9-2b93-42c5-9702-1084905283fa'",
+    );
+  });
+
+  it("buildInteractiveArgs runs agent with model and optional prompt", () => {
+    const provider = cursorAgent("composer-2");
+    expect(
+      provider.buildInteractiveArgs!({
+        prompt: "",
+        dangerouslySkipPermissions: true,
+      }),
+    ).toEqual(["agent", "--model", "composer-2", "--force"]);
+    expect(
+      provider.buildInteractiveArgs!({
+        prompt: "fix bugs",
+        dangerouslySkipPermissions: false,
+      }),
+    ).toEqual(["agent", "--model", "composer-2", "fix bugs"]);
+  });
+
+  it("parseStreamLine maps stream-json lines", () => {
+    const provider = cursorAgent("composer-2");
+    expect(
+      provider.parseStreamLine(
+        JSON.stringify({
+          type: "system",
+          subtype: "init",
+          session_id: "sid-1",
+        }),
+      ),
+    ).toEqual([{ type: "session_id", sessionId: "sid-1" }]);
+
+    expect(
+      provider.parseStreamLine(
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "hi" }],
+          },
+        }),
+      ),
+    ).toEqual([{ type: "text", text: "hi" }]);
+
+    expect(
+      provider.parseStreamLine(
+        JSON.stringify({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: "final answer",
+        }),
+      ),
+    ).toEqual([{ type: "result", result: "final answer" }]);
+  });
+
+  it("parseStreamLine maps shell tool_call started", () => {
+    const provider = cursorAgent("composer-2");
+    const line = JSON.stringify({
+      type: "tool_call",
+      subtype: "started",
+      tool_call: {
+        shellToolCall: {
+          args: { command: "echo x" },
+        },
+      },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "tool_call", name: "Bash", args: "echo x" },
+    ]);
+  });
+
+  it("parseStreamLine returns empty for non-JSON", () => {
+    const provider = cursorAgent("composer-2");
+    expect(provider.parseStreamLine("nope")).toEqual([]);
+  });
+
+  it("accepts env option", () => {
+    const provider = cursorAgent("composer-2", {
+      env: { CURSOR_API_KEY: "test" },
+    });
+    expect(provider.env).toEqual({ CURSOR_API_KEY: "test" });
   });
 });
 

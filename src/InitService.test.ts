@@ -25,6 +25,7 @@ const claudeCodeAgent = getAgent("claude-code")!;
 const piAgent = getAgent("pi")!;
 const codexAgent = getAgent("codex")!;
 const opencodeAgent = getAgent("opencode")!;
+const cursorCliAgent = getAgent("cursor-cli")!;
 
 const defaultOptions: ScaffoldOptions = {
   agent: claudeCodeAgent,
@@ -107,6 +108,21 @@ describe("Agent registry", () => {
     expect(agent!.dockerfileTemplate).toContain("FROM");
     expect(agent!.dockerfileTemplate).toContain("opencode-ai");
   });
+
+  it("listAgents includes cursor-cli", () => {
+    const agents = listAgents();
+    expect(agents.some((a) => a.name === "cursor-cli")).toBe(true);
+  });
+
+  it("getAgent returns cursor-cli entry with expected fields", () => {
+    const agent = getAgent("cursor-cli");
+    expect(agent).toBeDefined();
+    expect(agent!.name).toBe("cursor-cli");
+    expect(agent!.defaultModel).toBe("composer-2");
+    expect(agent!.factoryImport).toBe("cursorAgent");
+    expect(agent!.dockerfileTemplate).toContain("FROM");
+    expect(agent!.dockerfileTemplate).toContain("cursor.com/install");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -152,6 +168,12 @@ describe("InitService scaffold", () => {
     {
       agent: opencodeAgent,
       expectedKey: "OPENCODE_API_KEY=",
+      unexpectedKey: "ANTHROPIC_API_KEY=",
+      expectIssue191Link: false,
+    },
+    {
+      agent: cursorCliAgent,
+      expectedKey: "CURSOR_API_KEY=",
       unexpectedKey: "ANTHROPIC_API_KEY=",
       expectIssue191Link: false,
     },
@@ -692,6 +714,37 @@ describe("InitService scaffold", () => {
       "utf-8",
     );
     expect(mainTs).toContain('codex("gpt-5.4-mini")');
+    expect(mainTs).not.toContain("claudeCode");
+  });
+
+  it("scaffolds cursor-cli agent with Cursor CLI Dockerfile", async () => {
+    const dir = await makeDir();
+    await runScaffold(dir, {
+      agent: cursorCliAgent,
+      model: "composer-2",
+    });
+
+    const dockerfile = await readFile(
+      join(dir, ".sandcastle", "Dockerfile"),
+      "utf-8",
+    );
+    expect(dockerfile).toContain("FROM node:22-bookworm");
+    expect(dockerfile).toContain("cursor.com/install");
+    expect(dockerfile).not.toContain("{{BACKLOG_MANAGER_TOOLS}}");
+  });
+
+  it("scaffolds main.mts with cursorAgent factory import when cursor-cli agent selected", async () => {
+    const dir = await makeDir();
+    await runScaffold(dir, {
+      agent: cursorCliAgent,
+      model: "composer-2",
+    });
+
+    const mainTs = await readFile(
+      join(dir, ".sandcastle", "main.mts"),
+      "utf-8",
+    );
+    expect(mainTs).toContain('cursorAgent("composer-2")');
     expect(mainTs).not.toContain("claudeCode");
   });
 

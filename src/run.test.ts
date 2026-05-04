@@ -15,7 +15,7 @@ import {
   type RunOptions,
   type RunResult,
 } from "./run.js";
-import { claudeCode } from "./AgentProvider.js";
+import { claudeCode, cursorAgent } from "./AgentProvider.js";
 import { defaultImageName } from "./sandboxes/docker.js";
 import * as sandcastle from "./SandboxProvider.js";
 import { createBindMountSandboxProvider } from "./SandboxProvider.js";
@@ -433,6 +433,18 @@ describe("resumeSession validation", () => {
         resumeSession: "abc-123",
       }),
     ).rejects.toThrow('resumeSession "abc-123" not found');
+  });
+
+  it("does not require a Claude session file when using cursorAgent resumeSession", async () => {
+    await expect(
+      run({
+        agent: cursorAgent("composer-2"),
+        sandbox: testSandbox,
+        prompt: "test",
+        branchStrategy: { type: "head" },
+        resumeSession: "00000000-0000-0000-0000-000000000000",
+      }),
+    ).resolves.toBeDefined();
   });
 });
 

@@ -334,8 +334,8 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
     resolveCwd(options.cwd).pipe(Effect.provide(NodeContext.layer)),
   );
 
-  // Validate: resumeSession file must exist on the host
-  if (options.resumeSession) {
+  // Validate: resumeSession file must exist on the host (Claude Code session JSONL only)
+  if (options.resumeSession && provider.name === "claude-code") {
     const hStore = hostSessionStore(hostRepoDir);
     const sessionPath = hStore.sessionFilePath(options.resumeSession);
     if (!existsSync(sessionPath)) {

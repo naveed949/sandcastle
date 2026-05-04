@@ -174,6 +174,34 @@ WORKDIR /home/agent
 ENTRYPOINT ["sleep", "infinity"]
 `;
 
+const CURSOR_CLI_DOCKERFILE = `FROM node:22-bookworm
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \\
+  git \\
+  curl \\
+  jq \\
+  ca-certificates \\
+  && rm -rf /var/lib/apt/lists/*
+
+{{BACKLOG_MANAGER_TOOLS}}
+
+# Rename the base image's "node" user (UID 1000) to "agent".
+RUN usermod -d /home/agent -m -l agent node
+
+# Install Cursor Agent CLI (https://cursor.com/docs/cli/overview) as root; expose for all users
+RUN curl -fsSL https://cursor.com/install | bash \\
+  && if [ -x /root/.local/bin/agent ]; then install -m 755 /root/.local/bin/agent /usr/local/bin/agent; fi
+
+USER agent
+
+WORKDIR /home/agent
+
+# In worktree sandbox mode, Sandcastle bind-mounts the git worktree at ${SANDBOX_REPO_DIR}
+# and overrides the working directory to ${SANDBOX_REPO_DIR} at container start.
+ENTRYPOINT ["sleep", "infinity"]
+`;
+
 const AGENT_REGISTRY: AgentEntry[] = [
   {
     name: "claude-code",
@@ -211,6 +239,15 @@ OPENAI_KEY=`,
     dockerfileTemplate: OPENCODE_DOCKERFILE,
     envExample: `# OpenCode API key
 OPENCODE_API_KEY=`,
+  },
+  {
+    name: "cursor-cli",
+    label: "Cursor Agent (CLI)",
+    defaultModel: "composer-2",
+    factoryImport: "cursorAgent",
+    dockerfileTemplate: CURSOR_CLI_DOCKERFILE,
+    envExample: `# Cursor API key (https://cursor.com/docs/cli/headless)
+CURSOR_API_KEY=`,
   },
 ];
 
