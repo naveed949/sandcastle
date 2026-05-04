@@ -189,9 +189,17 @@ RUN apt-get update && apt-get install -y \\
 # Rename the base image's "node" user (UID 1000) to "agent".
 RUN usermod -d /home/agent -m -l agent node
 
-# Install Cursor Agent CLI (https://cursor.com/docs/cli/overview) as root; expose for all users
+# Install Cursor Agent CLI (https://cursor.com/docs/cli/overview) as root.
+# The launcher is a shell script that runs node with index.js from the *same directory*
+# as the resolved cursor-agent binary. Copying only the wrapper to /usr/local/bin
+# breaks (node looks for /usr/local/bin/index.js). Install the full bundle to /opt
+# (readable by the non-root agent user) and symlink into PATH.
 RUN curl -fsSL https://cursor.com/install | bash \\
-  && if [ -x /root/.local/bin/agent ]; then install -m 755 /root/.local/bin/agent /usr/local/bin/agent; fi
+  && SRC="$(dirname "$(readlink -f /root/.local/bin/agent)")" \\
+  && mkdir -p /opt/cursor-agent \\
+  && cp -a "$SRC"/. /opt/cursor-agent/ \\
+  && chmod -R a+rX /opt/cursor-agent \\
+  && ln -sf /opt/cursor-agent/cursor-agent /usr/local/bin/agent
 
 USER agent
 

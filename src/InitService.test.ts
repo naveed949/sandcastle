@@ -730,6 +730,8 @@ describe("InitService scaffold", () => {
     );
     expect(dockerfile).toContain("FROM node:22-bookworm");
     expect(dockerfile).toContain("cursor.com/install");
+    expect(dockerfile).toContain("/opt/cursor-agent");
+    expect(dockerfile).toContain("readlink -f /root/.local/bin/agent");
     expect(dockerfile).not.toContain("{{BACKLOG_MANAGER_TOOLS}}");
   });
 
