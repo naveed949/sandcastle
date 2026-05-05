@@ -231,6 +231,16 @@ ANTHROPIC_API_KEY=`,
 ANTHROPIC_API_KEY=`,
   },
   {
+    name: "pi-minimax",
+    label: "Pi (MiniMax)",
+    defaultModel: "MiniMax-M2.7",
+    factoryImport: "pi",
+    dockerfileTemplate: PI_DOCKERFILE,
+    envExample: `# MiniMax API key
+# Get yours at https://platform.minimax.io/
+MINIMAX_API_KEY=`,
+  },
+  {
     name: "codex",
     label: "Codex",
     defaultModel: "gpt-5.4-mini",

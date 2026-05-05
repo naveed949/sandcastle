@@ -51,6 +51,10 @@ export {
   cursorAgent,
   opencode,
   pi,
+  MINIMAX_MODELS,
+  MINIMAX_DEFAULT_MODEL,
+  isMiniMaxModel,
+  MINIMAX_API_KEY,
 } from "./AgentProvider.js";
 export type {
   AgentProvider,
@@ -61,6 +65,7 @@ export type {
   OpenCodeOptions,
   PiOptions,
   CursorAgentOptions,
+  MiniMaxModel,
 } from "./AgentProvider.js";
 export {
   createBindMountSandboxProvider,

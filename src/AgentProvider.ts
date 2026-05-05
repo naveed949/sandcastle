@@ -128,6 +128,31 @@ export interface AgentProvider {
 export const DEFAULT_MODEL = "claude-opus-4-6";
 
 // ---------------------------------------------------------------------------
+// MiniMax model constants (for use with the pi agent provider)
+// ---------------------------------------------------------------------------
+
+/** MiniMax M2 series text models available via pi. */
+export const MINIMAX_MODELS = {
+  /** Flagship model — recursive self-improvement, strong code generation. */
+  M2_7: "MiniMax-M2.7",
+  /** Same performance as M2.7, faster inference (~100 tps). */
+  M2_7_HIGHSPEED: "MiniMax-M2.7-highspeed",
+  /** Peak performance, optimized for code generation and refactoring. */
+  M2_5: "MiniMax-M2.5",
+  /** Same performance as M2.5, faster inference (~100 tps). */
+  M2_5_HIGHSPEED: "MiniMax-M2.5-highspeed",
+} as const;
+
+export type MiniMaxModel = (typeof MINIMAX_MODELS)[keyof typeof MINIMAX_MODELS];
+
+/** Default MiniMax model. */
+export const MINIMAX_DEFAULT_MODEL = MINIMAX_MODELS.M2_7;
+
+/** Whether a model ID is a MiniMax model (detected by the "MiniMax-" prefix). */
+export const isMiniMaxModel = (model: string): boolean =>
+  model.startsWith("MiniMax-");
+
+// ---------------------------------------------------------------------------
 // Pi agent provider
 // ---------------------------------------------------------------------------
 
@@ -193,32 +218,49 @@ const parsePiStreamLine = (line: string): ParsedStreamEvent[] => {
 
 /** Options for the pi agent provider. */
 export interface PiOptions {
-  /** Environment variables injected by this agent provider. */
+  /**
+   * Environment variables injected by this agent provider.
+   * When using a MiniMax model, `MINIMAX_API_KEY` is injected automatically
+   * unless overridden here.
+   */
   readonly env?: Record<string, string>;
 }
 
-export const pi = (model: string, options?: PiOptions): AgentProvider => ({
-  name: "pi",
-  env: options?.env ?? {},
-  captureSessions: false,
+/** Env var name for MiniMax API key (used by pi when a MiniMax model is selected). */
+export const MINIMAX_API_KEY = "MINIMAX_API_KEY";
 
-  buildPrintCommand({ prompt }: AgentCommandOptions): PrintCommand {
-    return {
-      command: `pi -p --mode json --no-session --model ${shellEscape(model)}`,
-      stdin: prompt,
-    };
-  },
+export const pi = (model: string, options?: PiOptions): AgentProvider => {
+  const minimax = isMiniMaxModel(model);
+  const extraEnv: Record<string, string> = minimax
+    ? { [MINIMAX_API_KEY]: "" }
+    : {};
+  const env: Record<string, string> = { ...extraEnv, ...options?.env };
 
-  buildInteractiveArgs({ prompt }: AgentCommandOptions): string[] {
-    const args = ["pi", "--model", model];
-    if (prompt) args.push(prompt);
-    return args;
-  },
+  return {
+    name: "pi",
+    env,
+    captureSessions: false,
 
-  parseStreamLine(line: string): ParsedStreamEvent[] {
-    return parsePiStreamLine(line);
-  },
-});
+    buildPrintCommand({ prompt }: AgentCommandOptions): PrintCommand {
+      const providerFlag = minimax ? " --provider minimax" : "";
+      return {
+        command: `pi -p --mode json --no-session --model ${shellEscape(model)}${providerFlag}`,
+        stdin: prompt,
+      };
+    },
+
+    buildInteractiveArgs({ prompt }: AgentCommandOptions): string[] {
+      const args = ["pi", "--model", model];
+      if (minimax) args.push("--provider", "minimax");
+      if (prompt) args.push(prompt);
+      return args;
+    },
+
+    parseStreamLine(line: string): ParsedStreamEvent[] {
+      return parsePiStreamLine(line);
+    },
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Codex agent provider
