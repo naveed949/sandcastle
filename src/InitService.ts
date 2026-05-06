@@ -103,6 +103,14 @@ RUN apt-get update && apt-get install -y \\
 # --user 1000:1000 (Docker) map to the correct home directory owner.
 RUN usermod -d /home/agent -m -l agent node
 
+# Sandcastle's Docker provider runs the container as the host UID/GID (see docker.js:
+# \`user: \${hostUid}:\${hostGid}\`). On macOS that is often not 1000, while this image's
+# \`/home/agent\` is owned by uid 1000 — then \`git config --global\` cannot lock ~/.gitconfig.
+# Make the home directory writable by any UID so the runtime user can create ~/.gitconfig.
+# Use numeric 1000:1000: \`usermod -l agent\` renames the user but the primary group stays \`node\`.
+RUN chown -R 1000:1000 /home/agent \
+  && chmod 777 /home/agent
+
 # Install pi coding agent (run as root before USER agent)
 RUN npm install -g @mariozechner/pi-coding-agent
 

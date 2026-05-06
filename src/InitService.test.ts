@@ -677,6 +677,9 @@ describe("InitService scaffold", () => {
     );
     expect(dockerfile).toContain("FROM node:22-bookworm");
     expect(dockerfile).toContain("@mariozechner/pi-coding-agent");
+    // chown/chmod so runtime user (host UID/GID) can write ~/.gitconfig
+    expect(dockerfile).toContain("chown -R 1000:1000 /home/agent");
+    expect(dockerfile).toContain("chmod 777 /home/agent");
     expect(dockerfile).not.toContain("{{BACKLOG_MANAGER_TOOLS}}");
   });
 
