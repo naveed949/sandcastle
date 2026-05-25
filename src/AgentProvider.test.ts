@@ -466,6 +466,96 @@ describe("pi factory", () => {
     const provider = pi("claude-sonnet-4-6");
     expect(provider.env).toEqual({});
   });
+
+  // --- thinking level tests ---
+
+  it("buildPrintCommand includes --thinking when embedded in model string", () => {
+    const provider = pi("sonnet:high");
+    const { command } = provider.buildPrintCommand(opts("do something"));
+    expect(command).toContain("--model 'sonnet'");
+    expect(command).toContain("--thinking 'high'");
+  });
+
+  it("buildPrintCommand includes --thinking when passed as explicit option", () => {
+    const provider = pi("sonnet", { thinking: "high" });
+    const { command } = provider.buildPrintCommand(opts("do something"));
+    expect(command).toContain("--model 'sonnet'");
+    expect(command).toContain("--thinking 'high'");
+  });
+
+  it("buildPrintCommand --thinking wins when both embedded and explicit option provided", () => {
+    const provider = pi("sonnet:low", { thinking: "high" });
+    const { command } = provider.buildPrintCommand(opts("do something"));
+    expect(command).toContain("--model 'sonnet'");
+    expect(command).toContain("--thinking 'high'");
+    expect(command).not.toContain("'low'");
+  });
+
+  it("buildPrintCommand omits --thinking when neither embedded nor explicit", () => {
+    const provider = pi("sonnet");
+    const { command } = provider.buildPrintCommand(opts("do something"));
+    expect(command).not.toContain("--thinking");
+  });
+
+  it("buildPrintCommand omits --thinking when option is empty object", () => {
+    const provider = pi("sonnet", {});
+    const { command } = provider.buildPrintCommand(opts("do something"));
+    expect(command).not.toContain("--thinking");
+  });
+
+  it("buildPrintCommand shell-escapes the thinking value", () => {
+    const provider = pi("sonnet", { thinking: "it's tricky" });
+    const { command } = provider.buildPrintCommand(opts("do something"));
+    // shellEscape turns "it's tricky" → "it'\\''s tricky" → wrapped: "'it'\\''s tricky'"
+    expect(command).toContain("--thinking 'it'\\''s tricky'");
+  });
+
+  it("buildPrintCommand treats colon in model as suffix delimiter (last colon wins)", () => {
+    // "sonnet:high" → model="sonnet", thinking="high"
+    const provider = pi("anthropic/sonnet:high");
+    const { command } = provider.buildPrintCommand(opts("do something"));
+    expect(command).toContain("--model 'anthropic/sonnet'");
+    expect(command).toContain("--thinking 'high'");
+  });
+
+  it("buildInteractiveArgs includes --thinking when embedded in model string", () => {
+    const provider = pi("sonnet:high");
+    const args = provider.buildInteractiveArgs!(opts("do something"));
+    expect(args).toContain("--thinking");
+    expect(args).toContain("high");
+    expect(args).toContain("--model");
+    expect(args).toContain("sonnet");
+  });
+
+  it("buildInteractiveArgs includes --thinking when passed as explicit option", () => {
+    const provider = pi("sonnet", { thinking: "xhigh" });
+    const args = provider.buildInteractiveArgs!(opts("do something"));
+    expect(args).toContain("--thinking");
+    expect(args).toContain("xhigh");
+  });
+
+  it("buildInteractiveArgs omits --thinking when not specified", () => {
+    const provider = pi("sonnet");
+    const args = provider.buildInteractiveArgs!(opts("do something"));
+    expect(args).not.toContain("--thinking");
+  });
+
+  it("buildInteractiveArgs passes through arbitrary thinking values without validation", () => {
+    for (const thinking of [
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "custom-value",
+    ] as const) {
+      const provider = pi("sonnet", { thinking });
+      const args = provider.buildInteractiveArgs!(opts("test"));
+      expect(args).toContain("--thinking");
+      expect(args).toContain(thinking);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -759,7 +849,9 @@ describe("opencode factory", () => {
   });
 
   it("buildPrintCommand shell-escapes the variant value", () => {
-    const provider = opencode("opencode/big-pickle", { variant: "it's tricky" });
+    const provider = opencode("opencode/big-pickle", {
+      variant: "it's tricky",
+    });
     const { command } = provider.buildPrintCommand(opts("test"));
     expect(command).toContain("--variant 'it'\\''s tricky'");
   });

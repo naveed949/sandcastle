@@ -21,7 +21,11 @@ const TOOL_ARG_FIELDS: Record<string, string> = {
 const extractErrorMessage = (obj: any): string | undefined => {
   const err = obj.error;
   if (typeof err === "string") return err;
-  if (typeof err === "object" && err !== null && typeof err.message === "string") {
+  if (
+    typeof err === "object" &&
+    err !== null &&
+    typeof err.message === "string"
+  ) {
     return err.message;
   }
   if (typeof obj.message === "string") return obj.message;
@@ -191,30 +195,48 @@ const parsePiStreamLine = (line: string): ParsedStreamEvent[] => {
 export interface PiOptions {
   /** Environment variables injected by this agent provider. */
   readonly env?: Record<string, string>;
+  /** Thinking level passed to --thinking. Can also be embedded in the model string (e.g. "sonnet:high"). */
+  readonly thinking?: string;
 }
 
-export const pi = (model: string, options?: PiOptions): AgentProvider => ({
-  name: "pi",
-  env: options?.env ?? {},
-  captureSessions: false,
+export const pi = (model: string, options?: PiOptions): AgentProvider => {
+  // Parse thinking level from model string suffix (e.g. "sonnet:high" → model="sonnet", thinking="high")
+  const colonIdx = model.lastIndexOf(":");
+  const modelBase = colonIdx !== -1 ? model.slice(0, colonIdx) : model;
+  const modelThinking = colonIdx !== -1 ? model.slice(colonIdx + 1) : undefined;
+  // Explicit option wins over embedded
+  const effectiveThinking = options?.thinking ?? modelThinking;
 
-  buildPrintCommand({ prompt }: AgentCommandOptions): PrintCommand {
-    return {
-      command: `pi -p --mode json --no-session --model ${shellEscape(model)}`,
-      stdin: prompt,
-    };
-  },
+  const thinkingFlag = effectiveThinking
+    ? ` --thinking ${shellEscape(effectiveThinking)}`
+    : "";
 
-  buildInteractiveArgs({ prompt }: AgentCommandOptions): string[] {
-    const args = ["pi", "--model", model];
-    if (prompt) args.push(prompt);
-    return args;
-  },
+  return {
+    name: "pi",
+    env: options?.env ?? {},
+    captureSessions: false,
 
-  parseStreamLine(line: string): ParsedStreamEvent[] {
-    return parsePiStreamLine(line);
-  },
-});
+    buildPrintCommand({ prompt }: AgentCommandOptions): PrintCommand {
+      return {
+        command: `pi -p --mode json --no-session --model ${shellEscape(modelBase)}${thinkingFlag}`,
+        stdin: prompt,
+      };
+    },
+
+    buildInteractiveArgs({ prompt }: AgentCommandOptions): string[] {
+      const args = ["pi", "--model", modelBase];
+      if (effectiveThinking) {
+        args.push("--thinking", effectiveThinking);
+      }
+      if (prompt) args.push(prompt);
+      return args;
+    },
+
+    parseStreamLine(line: string): ParsedStreamEvent[] {
+      return parsePiStreamLine(line);
+    },
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Codex agent provider
