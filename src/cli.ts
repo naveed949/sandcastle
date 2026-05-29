@@ -18,16 +18,20 @@ import {
   listTemplates,
   listAgents,
   getAgent,
-  listBacklogManagers,
-  getBacklogManager,
+  listIssueTrackers,
+  getIssueTracker,
   listSandboxProviders,
   getSandboxProvider,
   getNextStepsLines,
+  detectPackageManager,
+  addDependencyCommand,
+  hostHasDependency,
+  getTemplateDependencies,
 } from "./InitService.js";
 import { defaultImageName } from "./sandboxes/docker.js";
 import type {
   AgentEntry,
-  BacklogManagerEntry,
+  IssueTrackerEntry,
   SandboxProviderEntry,
 } from "./InitService.js";
 import { ConfigDirError, InitError } from "./errors.js";
@@ -101,6 +105,11 @@ const initModelOption = Options.text("model").pipe(
   Options.optional,
 );
 
+const sandboxOption = Options.text("sandbox").pipe(
+  Options.withDescription("Sandbox provider to use (e.g. docker, podman)"),
+  Options.optional,
+);
+
 const initCommand = Command.make(
   "init",
   {
@@ -108,12 +117,14 @@ const initCommand = Command.make(
     template: templateOption,
     agent: agentOption,
     model: initModelOption,
+    sandbox: sandboxOption,
   },
   ({
     imageName: imageNameFlag,
     template,
     agent: agentFlag,
     model: modelFlag,
+    sandbox: sandboxFlag,
   }) =>
     Effect.gen(function* () {
       const d = yield* Display;
@@ -129,6 +140,20 @@ const initCommand = Command.make(
           yield* Effect.fail(
             new InitError({
               message: `Unknown template "${template.value}". Available: ${names}`,
+            }),
+          );
+        }
+      }
+
+      if (sandboxFlag._tag === "Some") {
+        const valid = getSandboxProvider(sandboxFlag.value);
+        if (!valid) {
+          const names = listSandboxProviders()
+            .map((p) => p.name)
+            .join(", ");
+          yield* Effect.fail(
+            new InitError({
+              message: `Unknown sandbox provider "${sandboxFlag.value}". Available: ${names}`,
             }),
           );
         }
@@ -174,10 +199,12 @@ const initCommand = Command.make(
           ? modelFlag.value
           : selectedAgent.defaultModel;
 
-      // Resolve sandbox provider: interactive select (no default — user must choose)
+      // Resolve sandbox provider: CLI flag > interactive select (no default — user must choose)
       const sandboxProviders = listSandboxProviders();
       let selectedSandboxProvider: SandboxProviderEntry;
-      {
+      if (sandboxFlag._tag === "Some") {
+        selectedSandboxProvider = getSandboxProvider(sandboxFlag.value)!;
+      } else {
         const selected = yield* Effect.promise(() =>
           clack.select({
             message: "Select a sandbox provider:",
@@ -197,15 +224,15 @@ const initCommand = Command.make(
         selectedSandboxProvider = getSandboxProvider(selected as string)!;
       }
 
-      // Resolve backlog manager: interactive select
-      const backlogManagers = listBacklogManagers();
-      let selectedBacklogManager: BacklogManagerEntry;
+      // Resolve issue tracker: interactive select
+      const issueTrackers = listIssueTrackers();
+      let selectedIssueTracker: IssueTrackerEntry;
       {
         const selected = yield* Effect.promise(() =>
           clack.select({
-            message: "Select a backlog manager:",
+            message: "Select an issue tracker:",
             initialValue: "github-issues",
-            options: backlogManagers.map((b) => ({
+            options: issueTrackers.map((b) => ({
               value: b.name,
               label: b.label,
             })),
@@ -214,11 +241,11 @@ const initCommand = Command.make(
         if (clack.isCancel(selected)) {
           yield* Effect.fail(
             new InitError({
-              message: "Backlog manager selection cancelled.",
+              message: "Issue tracker selection cancelled.",
             }),
           );
         }
-        selectedBacklogManager = getBacklogManager(selected as string)!;
+        selectedIssueTracker = getIssueTracker(selected as string)!;
       }
 
       // Resolve template: CLI flag > interactive select (already validated above)
@@ -245,9 +272,9 @@ const initCommand = Command.make(
         selectedTemplate = selected as string;
       }
 
-      // Offer to create the "Sandcastle" label on the repo (skip for non-GitHub backlog managers)
+      // Offer to create the "Sandcastle" label on the repo (skip for non-GitHub issue trackers)
       let shouldCreateLabel: boolean | symbol = false;
-      if (selectedBacklogManager.name === "github-issues") {
+      if (selectedIssueTracker.name === "github-issues") {
         shouldCreateLabel = yield* Effect.promise(() =>
           clack.confirm({
             message:
@@ -275,7 +302,7 @@ const initCommand = Command.make(
           model: selectedModel,
           templateName: selectedTemplate,
           createLabel: shouldCreateLabel === true,
-          backlogManager: selectedBacklogManager,
+          issueTracker: selectedIssueTracker,
           sandboxProvider: selectedSandboxProvider,
         }).pipe(
           Effect.mapError(
@@ -287,42 +314,95 @@ const initCommand = Command.make(
         ),
       );
 
-      // Prompt user before building image
-      const providerLabel = selectedSandboxProvider.label;
-      const shouldBuild = yield* Effect.promise(() =>
-        clack.confirm({
-          message: `Build the default ${providerLabel} image now?`,
-          initialValue: true,
-        }),
-      );
+      // Detect the host package manager so the zod offer below and the next
+      // steps below both use the right install command.
+      const packageManager = yield* detectPackageManager(cwd);
 
-      if (shouldBuild === true) {
-        const containerfileDir = join(cwd, CONFIG_DIR);
-        if (selectedSandboxProvider.name === "podman") {
-          yield* d.spinner(
-            `Building ${providerLabel} image '${imageName}'...`,
-            podmanBuildImage(imageName, containerfileDir),
-          );
-        } else {
-          yield* d.spinner(
-            `Building ${providerLabel} image '${imageName}'...`,
-            buildImage(imageName, containerfileDir, {
-              buildArgs: defaultUidBuildArgs(),
+      // If the chosen template imports zod on the host (the planner templates
+      // build their <plan> output schema with it) and the host doesn't already
+      // declare it, offer to install it. Without this, the very first
+      // `npx tsx .sandcastle/main.ts` crashes with ERR_MODULE_NOT_FOUND.
+      if (getTemplateDependencies(selectedTemplate).includes("zod")) {
+        const alreadyInstalled = yield* hostHasDependency(cwd, "zod");
+        if (!alreadyInstalled) {
+          const installCmd = addDependencyCommand(packageManager, "zod");
+          const shouldInstall = yield* Effect.promise(() =>
+            clack.confirm({
+              message: `The ${selectedTemplate} template needs a schema validator. Install zod now (\`${installCmd}\`)?`,
+              initialValue: true,
             }),
           );
+          if (shouldInstall === true) {
+            const installed = yield* Effect.sync(() => {
+              try {
+                execSync(installCmd, { cwd, stdio: "ignore" });
+                return true;
+              } catch {
+                return false;
+              }
+            });
+            yield* installed
+              ? d.status(`Installed zod with ${packageManager}.`, "success")
+              : d.status(
+                  `Couldn't install zod automatically. Run \`${installCmd}\` before running the agent.`,
+                  "warn",
+                );
+          }
         }
-        yield* d.status("Init complete! Image built successfully.", "success");
-      } else {
+      }
+
+      // Prompt user before building image. The custom issue tracker scaffolds
+      // an intentionally unfinished Dockerfile (the install block is a TODO),
+      // so there is nothing valid to build yet — skip the build prompt entirely
+      // and let the next steps point the user at the setup doc.
+      const providerLabel = selectedSandboxProvider.label;
+      if (selectedIssueTracker.name === "custom") {
         yield* d.status(
-          `Init complete! Run \`sandcastle ${selectedSandboxProvider.cliNamespace} build-image\` to build the ${providerLabel} image later.`,
+          "Init complete! Your custom issue tracker isn't configured yet — see the steps below before building.",
           "success",
         );
+      } else {
+        const shouldBuild = yield* Effect.promise(() =>
+          clack.confirm({
+            message: `Build the default ${providerLabel} image now?`,
+            initialValue: true,
+          }),
+        );
+
+        if (shouldBuild === true) {
+          const containerfileDir = join(cwd, CONFIG_DIR);
+          if (selectedSandboxProvider.name === "podman") {
+            yield* d.spinner(
+              `Building ${providerLabel} image '${imageName}'...`,
+              podmanBuildImage(imageName, containerfileDir),
+            );
+          } else {
+            yield* d.spinner(
+              `Building ${providerLabel} image '${imageName}'...`,
+              buildImage(imageName, containerfileDir, {
+                buildArgs: defaultUidBuildArgs(),
+              }),
+            );
+          }
+          yield* d.status(
+            "Init complete! Image built successfully.",
+            "success",
+          );
+        } else {
+          yield* d.status(
+            `Init complete! Run \`sandcastle ${selectedSandboxProvider.cliNamespace} build-image\` to build the ${providerLabel} image later.`,
+            "success",
+          );
+        }
       }
 
       // Show template-specific next steps
       const nextSteps = getNextStepsLines(
         selectedTemplate,
         scaffoldResult.mainFilename,
+        selectedIssueTracker,
+        selectedAgent,
+        packageManager,
       );
       for (const [i, line] of nextSteps.entries()) {
         yield* d.text(i === 0 ? line : styleText("dim", line));

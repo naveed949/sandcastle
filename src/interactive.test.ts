@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
@@ -587,6 +587,29 @@ describe("interactive()", () => {
     });
 
     expect(executionOrder).toEqual(["interactive-after-hook"]);
+  });
+
+  it("removes the worktree when sandbox start fails (no orphan)", async () => {
+    const provider = createBindMountSandboxProvider({
+      name: "failing-create",
+      create: async () => {
+        throw new Error("Image 'sandcastle:test' not found locally");
+      },
+    });
+
+    await expect(
+      interactive({
+        agent: claudeCode("claude-opus-4-7"),
+        sandbox: provider,
+        prompt: "test",
+        branchStrategy: { type: "merge-to-head" },
+      }),
+    ).rejects.toThrow();
+
+    // The worktree must not be left orphaned on disk.
+    const worktreesDir = join(hostDir, ".sandcastle", "worktrees");
+    const leftover = existsSync(worktreesDir) ? readdirSync(worktreesDir) : [];
+    expect(leftover).toHaveLength(0);
   });
 
   // --- copyToWorktree tests ---

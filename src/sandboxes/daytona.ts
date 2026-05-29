@@ -13,6 +13,7 @@ import {
   type IsolatedSandboxHandle,
   type IsolatedSandboxProvider,
 } from "../SandboxProvider.js";
+import { BoundedTail, MAX_TAIL_CHARS } from "../boundedTail.js";
 
 import type {
   Daytona as DaytonaClient,
@@ -51,6 +52,16 @@ export interface DaytonaOptions {
 
   /** Environment variables injected by this provider. Merged at launch time with env resolver and agent provider env. */
   readonly env?: Record<string, string>;
+
+  /**
+   * Maximum number of characters of streamed `exec` output retained per stream
+   * (stdout and stderr) when an `onLine` callback is supplied (default: 64KiB).
+   *
+   * Output is delivered live to `onLine` regardless; this only bounds the tail
+   * returned in `ExecResult`, preventing a long-running agent's output from
+   * overflowing V8's max string length and crashing the run.
+   */
+  readonly maxOutputTailChars?: number;
 }
 
 /**
@@ -71,6 +82,7 @@ export const daytona = (options?: DaytonaOptions): IsolatedSandboxProvider =>
     name: "daytona",
     env: options?.env,
     create: async (): Promise<IsolatedSandboxHandle> => {
+      const maxOutputTailChars = options?.maxOutputTailChars ?? MAX_TAIL_CHARS;
       const { Daytona } =
         (await import("@daytona/sdk")) as typeof import("@daytona/sdk");
 
@@ -115,8 +127,8 @@ export const daytona = (options?: DaytonaOptions): IsolatedSandboxProvider =>
 
               const cmdId = execResponse.cmdId!;
 
-              const stdoutLines: string[] = [];
-              const stderrChunks: string[] = [];
+              const stdoutTail = new BoundedTail(maxOutputTailChars, "\n");
+              const stderrTail = new BoundedTail(maxOutputTailChars, "");
               let partial = "";
 
               await sandbox.process.getSessionCommandLogs(
@@ -127,17 +139,17 @@ export const daytona = (options?: DaytonaOptions): IsolatedSandboxProvider =>
                   const lines = text.split("\n");
                   partial = lines.pop() ?? "";
                   for (const line of lines) {
-                    stdoutLines.push(line);
+                    stdoutTail.push(line);
                     onLine(line);
                   }
                 },
                 (chunk: string) => {
-                  stderrChunks.push(chunk);
+                  stderrTail.push(chunk);
                 },
               );
 
               if (partial) {
-                stdoutLines.push(partial);
+                stdoutTail.push(partial);
                 onLine(partial);
               }
 
@@ -147,8 +159,8 @@ export const daytona = (options?: DaytonaOptions): IsolatedSandboxProvider =>
               );
 
               return {
-                stdout: stdoutLines.join("\n"),
-                stderr: stderrChunks.join(""),
+                stdout: stdoutTail.toString(),
+                stderr: stderrTail.toString(),
                 exitCode: cmdInfo.exitCode ?? 0,
               };
             } finally {

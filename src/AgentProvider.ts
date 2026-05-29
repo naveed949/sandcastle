@@ -1,8 +1,24 @@
+import {
+  codexHostSessionStore,
+  codexSandboxSessionStore,
+  findClaudeSessionOnHost,
+  findCodexSessionOnHost,
+  hostSessionStore,
+  sandboxSessionStore,
+  transferClaudeSession,
+  transferCodexSession,
+  type HostSessionLookup,
+  type LocatableSessionStore,
+  type SessionStore,
+} from "./SessionStore.js";
+import type { BindMountSandboxHandle } from "./SandboxProvider.js";
+
 export type ParsedStreamEvent =
   | { type: "text"; text: string }
   | { type: "result"; result: string }
   | { type: "tool_call"; name: string; args: string }
-  | { type: "session_id"; sessionId: string };
+  | { type: "session_id"; sessionId: string }
+  | { type: "usage"; usage: IterationUsage };
 
 const shellEscape = (s: string): string => "'" + s.replace(/'/g, "'\\''") + "'";
 
@@ -16,17 +32,15 @@ const TOOL_ARG_FIELDS: Record<string, string> = {
 
 /**
  * Extract an error message from a parsed JSON error event.
- * Handles { error: "string" }, { error: { message: "string" } }, and { message: "string" }.
+ * Handles { error: "string" }, { error: { message: "string" } },
+ * { error: { data: { message: "string" } } }, and { message: "string" }.
  */
 const extractErrorMessage = (obj: any): string | undefined => {
   const err = obj.error;
   if (typeof err === "string") return err;
-  if (
-    typeof err === "object" &&
-    err !== null &&
-    typeof err.message === "string"
-  ) {
-    return err.message;
+  if (typeof err === "object" && err !== null) {
+    if (typeof err.message === "string") return err.message;
+    if (typeof err.data?.message === "string") return err.data.message;
   }
   if (typeof obj.message === "string") return obj.message;
   return undefined;
@@ -88,6 +102,85 @@ const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
   return [];
 };
 
+/**
+ * Cursor Agent CLI print mode passes the prompt as a positional argv argument; stdin is not
+ * documented for delivering the prompt. Linux enforces a per-argument limit (~128 KiB, ARG_MAX
+ * stack). Stay slightly under so users get a clear error instead of spawn E2BIG.
+ */
+const CURSOR_PRINT_PROMPT_MAX_BYTES = 120 * 1024;
+
+function assertCursorPrintPromptFitsArgv(prompt: string): void {
+  const n = Buffer.byteLength(prompt, "utf8");
+  if (n > CURSOR_PRINT_PROMPT_MAX_BYTES) {
+    throw new Error(
+      `Cursor print-mode prompt is ${n} bytes (max ${CURSOR_PRINT_PROMPT_MAX_BYTES} bytes). The Cursor CLI accepts the prompt only as a command-line argument; shorten the prompt or split the work. Other Sandcastle providers use stdin for large prompts.`,
+    );
+  }
+}
+
+/** Cursor stream-json emits top-level `tool_call` events (see Cursor CLI output-format docs). */
+const parseCursorToolCallStarted = (
+  obj: Record<string, unknown>,
+): ParsedStreamEvent[] => {
+  if (obj.type !== "tool_call" || obj.subtype !== "started") return [];
+  const toolCall = obj.tool_call;
+  if (!toolCall || typeof toolCall !== "object") return [];
+
+  const tc = toolCall as Record<string, unknown>;
+
+  const readToolCall = tc.readToolCall as
+    | { args?: { path?: unknown } }
+    | undefined;
+  if (readToolCall?.args && typeof readToolCall.args.path === "string") {
+    return [{ type: "tool_call", name: "Read", args: readToolCall.args.path }];
+  }
+
+  const writeToolCall = tc.writeToolCall as
+    | { args?: { path?: unknown } }
+    | undefined;
+  if (writeToolCall?.args && typeof writeToolCall.args.path === "string") {
+    return [
+      { type: "tool_call", name: "Write", args: writeToolCall.args.path },
+    ];
+  }
+
+  const fn = tc.function as { name?: unknown; arguments?: unknown } | undefined;
+  if (fn && typeof fn.name === "string") {
+    const rawArgs = typeof fn.arguments === "string" ? fn.arguments : "";
+    if (rawArgs) {
+      try {
+        const parsedArgs = JSON.parse(rawArgs) as Record<string, unknown>;
+        if (typeof parsedArgs.command === "string") {
+          return [
+            { type: "tool_call", name: "Bash", args: parsedArgs.command },
+          ];
+        }
+      } catch {
+        // Use raw arguments string for display.
+      }
+      return [{ type: "tool_call", name: fn.name, args: rawArgs }];
+    }
+    return [{ type: "tool_call", name: fn.name, args: "" }];
+  }
+
+  return [];
+};
+
+const parseCursorStreamLine = (line: string): ParsedStreamEvent[] => {
+  if (!line.startsWith("{")) return [];
+  let obj: Record<string, unknown>;
+  try {
+    obj = JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    // Not valid JSON — skip
+    return [];
+  }
+  if (obj.type === "tool_call") {
+    return parseCursorToolCallStarted(obj);
+  }
+  return parseStreamJsonLine(line);
+};
+
 /** Options passed to buildPrintCommand and buildInteractiveArgs. */
 export interface AgentCommandOptions {
   readonly prompt: string;
@@ -112,12 +205,28 @@ export interface IterationUsage {
   readonly outputTokens: number;
 }
 
+export interface AgentSessionStorage {
+  hostStore(cwd: string): SessionStore;
+  sandboxStore(cwd: string, handle: BindMountSandboxHandle): SessionStore;
+  transfer(from: SessionStore, to: SessionStore, id: string): Promise<void>;
+  /**
+   * Locate a session on the host by its unique id, independent of cwd encoding.
+   * Used by the no-sandbox resume precheck, where the agent runs on the host and
+   * writes the session in place under a cwd-derived directory Sandcastle cannot
+   * reliably reconstruct. Returns the located path (or `undefined`) plus the
+   * directory that was searched (for not-found errors).
+   */
+  findByIdOnHost(id: string): Promise<HostSessionLookup>;
+}
+
 export interface AgentProvider {
   readonly name: string;
   /** Environment variables injected by this agent provider. Merged at launch time with env resolver and sandbox provider env. */
   readonly env: Record<string, string>;
   /** When true, session capture is enabled for this provider. Default: true for Claude Code, false for others. */
   readonly captureSessions: boolean;
+  /** Provider-owned storage and transfer behavior for resumable agent sessions. */
+  readonly sessionStorage?: AgentSessionStorage;
   buildPrintCommand(options: AgentCommandOptions): PrintCommand;
   buildInteractiveArgs?(options: AgentCommandOptions): string[];
   parseStreamLine(line: string): ParsedStreamEvent[];
@@ -242,10 +351,42 @@ export const pi = (model: string, options?: PiOptions): AgentProvider => {
 // Codex agent provider
 // ---------------------------------------------------------------------------
 
+/**
+ * Map a Codex `turn.completed` usage object to the Claude-shaped IterationUsage.
+ *
+ * OpenAI/Codex usage is `{ input_tokens, cached_input_tokens, output_tokens }`,
+ * where `input_tokens` is the *total* prompt tokens and `cached_input_tokens` is
+ * a subset already included in that total. There is no cache-creation concept.
+ * To avoid double-counting cached tokens in the context-window display (which
+ * sums input + cacheCreation + cacheRead), the cached portion maps to
+ * `cacheReadInputTokens` and the remainder to `inputTokens`.
+ */
+const parseCodexUsage = (usage: unknown): IterationUsage | undefined => {
+  if (typeof usage !== "object" || usage === null) return undefined;
+  const u = usage as Record<string, unknown>;
+  if (
+    typeof u.input_tokens !== "number" ||
+    typeof u.cached_input_tokens !== "number" ||
+    typeof u.output_tokens !== "number"
+  ) {
+    return undefined;
+  }
+  return {
+    inputTokens: u.input_tokens - u.cached_input_tokens,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: u.cached_input_tokens,
+    outputTokens: u.output_tokens,
+  };
+};
+
 const parseCodexStreamLine = (line: string): ParsedStreamEvent[] => {
   if (!line.startsWith("{")) return [];
   try {
     const obj = JSON.parse(line);
+
+    if (obj.type === "thread.started" && typeof obj.thread_id === "string") {
+      return [{ type: "session_id", sessionId: obj.thread_id }];
+    }
 
     // item.completed with agent_message → text + result
     if (
@@ -277,7 +418,11 @@ const parseCodexStreamLine = (line: string): ParsedStreamEvent[] => {
       return msg ? [{ type: "result", result: msg }] : [];
     }
 
-    // turn.completed → skip
+    // turn.completed carries token usage for the turn.
+    if (obj.type === "turn.completed") {
+      const usage = parseCodexUsage(obj.usage);
+      return usage ? [{ type: "usage", usage }] : [];
+    }
   } catch {
     // Not valid JSON — skip
   }
@@ -289,22 +434,56 @@ export interface CodexOptions {
   readonly effort?: "low" | "medium" | "high" | "xhigh";
   /** Environment variables injected by this agent provider. */
   readonly env?: Record<string, string>;
+  /** When false, session capture is disabled. Default: true. */
+  readonly captureSessions?: boolean;
+  /** Override Codex session directories for tests or non-standard installs. */
+  readonly sessionStorage?: {
+    readonly hostSessionsDir?: string;
+    readonly sandboxSessionsDir?: string;
+  };
 }
 
 export const codex = (
   model: string,
   options?: CodexOptions,
-): AgentProvider => ({
+): AgentProvider & { readonly sessionStorage: AgentSessionStorage } => ({
   name: "codex",
   env: options?.env ?? {},
-  captureSessions: false,
+  captureSessions: options?.captureSessions ?? true,
+  sessionStorage: {
+    hostStore: (cwd) =>
+      codexHostSessionStore(cwd, options?.sessionStorage?.hostSessionsDir),
+    sandboxStore: (cwd, handle) =>
+      codexSandboxSessionStore(
+        cwd,
+        handle,
+        options?.sessionStorage?.sandboxSessionsDir,
+      ),
+    // Both stores above are LocatableSessionStore by construction; the
+    // AgentSessionStorage seam types them as the narrower SessionStore.
+    transfer: (from, to, id) =>
+      transferCodexSession(
+        from as LocatableSessionStore,
+        to as LocatableSessionStore,
+        id,
+      ),
+    findByIdOnHost: (id) =>
+      findCodexSessionOnHost(id, options?.sessionStorage?.hostSessionsDir),
+  },
 
-  buildPrintCommand({ prompt }: AgentCommandOptions): PrintCommand {
+  buildPrintCommand({
+    prompt,
+    resumeSession,
+  }: AgentCommandOptions): PrintCommand {
     const effortFlag = options?.effort
       ? ` -c ${shellEscape(`model_reasoning_effort="${options.effort}"`)}`
       : "";
+    const base = resumeSession
+      ? `codex exec resume ${shellEscape(resumeSession)}`
+      : "codex exec";
+    const stdinArg = resumeSession ? " -" : "";
     return {
-      command: `codex exec --json --dangerously-bypass-approvals-and-sandbox -m ${shellEscape(model)}${effortFlag}`,
+      command: `${base} --json --dangerously-bypass-approvals-and-sandbox -m ${shellEscape(model)}${effortFlag}${stdinArg}`,
       stdin: prompt,
     };
   },
@@ -321,13 +500,133 @@ export const codex = (
 });
 
 // ---------------------------------------------------------------------------
+// Cursor agent provider
+// ---------------------------------------------------------------------------
+
+/** Options for the cursor agent provider. */
+export interface CursorOptions {
+  /** Environment variables injected by this agent provider. */
+  readonly env?: Record<string, string>;
+}
+
+export const cursor = (
+  model: string,
+  options?: CursorOptions,
+): AgentProvider => ({
+  name: "cursor",
+  env: options?.env ?? {},
+  captureSessions: false,
+
+  // Cursor has no filesystem-backed session storage (captureSessions: false, no
+  // sessionStorage), so it is non-resumable per ADR 0012/0016. resumeSession is
+  // ignored here — like pi and opencode — rather than wired to --resume.
+  buildPrintCommand({
+    prompt,
+    dangerouslySkipPermissions,
+  }: AgentCommandOptions): PrintCommand {
+    assertCursorPrintPromptFitsArgv(prompt);
+    const forceFlag = dangerouslySkipPermissions ? " --force" : "";
+
+    return {
+      command: `agent --print --output-format stream-json --model ${shellEscape(model)} ${forceFlag} ${shellEscape(prompt)}`,
+    };
+  },
+
+  buildInteractiveArgs({
+    prompt,
+    dangerouslySkipPermissions,
+  }: AgentCommandOptions): string[] {
+    const args = ["agent", "--model", model];
+    if (dangerouslySkipPermissions) args.push("--force");
+    if (prompt) args.push(prompt);
+    return args;
+  },
+
+  parseStreamLine(line: string): ParsedStreamEvent[] {
+    return parseCursorStreamLine(line);
+  },
+});
+
+// ---------------------------------------------------------------------------
 // OpenCode agent provider
 // ---------------------------------------------------------------------------
+
+/** Maps OpenCode tool names to the input field containing the friendly display
+ *  arg. Tools not listed here are still surfaced, falling back to a JSON dump of
+ *  the whole input. The tool name is surfaced as-is (OpenCode's lowercase names). */
+const OPENCODE_TOOL_ARG_FIELDS: Record<string, string> = {
+  bash: "command",
+  webfetch: "url",
+  task: "description",
+};
+
+const parseOpenCodeStreamLine = (line: string): ParsedStreamEvent[] => {
+  if (!line.startsWith("{")) return [];
+  try {
+    const obj = JSON.parse(line);
+    const part = obj.part;
+
+    // step_start carries the session ID for the run.
+    if (obj.type === "step_start" && typeof obj.sessionID === "string") {
+      return [{ type: "session_id", sessionId: obj.sessionID }];
+    }
+
+    // text event → assistant text. Emit both text (for streaming display) and
+    // result (final message; the last result wins in the Orchestrator).
+    if (
+      obj.type === "text" &&
+      part?.type === "text" &&
+      typeof part.text === "string"
+    ) {
+      return [
+        { type: "text", text: part.text },
+        { type: "result", result: part.text },
+      ];
+    }
+
+    // tool_use event → tool call. Tool name is in part.tool, args in
+    // part.state.input. Gate on the completed status so intermediate
+    // pending/running states don't surface duplicate tool calls.
+    if (obj.type === "tool_use" && part?.type === "tool") {
+      if (typeof part.tool !== "string") return [];
+      const state = part.state as
+        | { status?: string; input?: Record<string, unknown> }
+        | undefined;
+      if (state?.status !== "completed") return [];
+      const input = state.input;
+      if (!input) return [];
+      const argField = OPENCODE_TOOL_ARG_FIELDS[part.tool];
+      const argValue = argField !== undefined ? input[argField] : undefined;
+      const args =
+        typeof argValue === "string" ? argValue : JSON.stringify(input);
+      return [{ type: "tool_call", name: part.tool, args }];
+    }
+
+    // OpenCode emits error events on stdout (not stderr) for auth failures,
+    // rate limits, and API errors. Capture them as result events so the
+    // Orchestrator's stderr-empty fallback can surface them to the user.
+    if (obj.type === "error") {
+      const msg = extractErrorMessage(obj);
+      return msg ? [{ type: "result", result: msg }] : [];
+    }
+
+    // step_finish, tool output, etc. → skip
+  } catch {
+    // Not valid JSON — skip
+  }
+  return [];
+};
 
 /** Options for the opencode agent provider. */
 export interface OpenCodeOptions {
   /** Provider-specific reasoning effort variant (e.g. "high", "max", "low", "minimal"). */
   readonly variant?: string;
+  /**
+   * Named OpenCode agent/mode to run, mapped to OpenCode's own `--agent` flag
+   * (e.g. "build", "plan"). This is distinct from Sandcastle's `--agent`
+   * provider selector — it chooses an agent *inside* OpenCode.
+   */
+  readonly agent?: string;
   /** Environment variables injected by this agent provider. */
   readonly env?: Record<string, string>;
 }
@@ -340,23 +639,184 @@ export const opencode = (
   env: options?.env ?? {},
   captureSessions: false,
 
-  buildPrintCommand({ prompt }: AgentCommandOptions): PrintCommand {
+  buildPrintCommand({
+    prompt,
+    dangerouslySkipPermissions,
+  }: AgentCommandOptions): PrintCommand {
     const variantFlag = options?.variant
       ? ` --variant ${shellEscape(options.variant)}`
       : "";
+    const agentFlag = options?.agent
+      ? ` --agent ${shellEscape(options.agent)}`
+      : "";
+    const permissionsFlag = dangerouslySkipPermissions
+      ? " --dangerously-skip-permissions"
+      : "";
     return {
-      command: `opencode run --model ${shellEscape(model)}${variantFlag} ${shellEscape(prompt)}`,
+      command: `opencode run --format json --model ${shellEscape(model)}${variantFlag}${agentFlag}${permissionsFlag} ${shellEscape(prompt)}`,
     };
   },
 
   buildInteractiveArgs({ prompt }: AgentCommandOptions): string[] {
     const args = ["opencode", "--model", model];
+    if (options?.agent) args.push("--agent", options.agent);
     if (prompt) args.push("-p", prompt);
     return args;
   },
 
-  parseStreamLine(_line: string): ParsedStreamEvent[] {
-    return [];
+  parseStreamLine(line: string): ParsedStreamEvent[] {
+    return parseOpenCodeStreamLine(line);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// GitHub Copilot CLI agent provider
+// ---------------------------------------------------------------------------
+
+/**
+ * Copilot CLI print mode passes the prompt as the `-p` argv argument. (The CLI
+ * can also read a prompt piped on stdin — `echo "..." | copilot` — but we use
+ * the `-p` argv form here for parity with the tested print-command path.) Linux
+ * enforces a per-argument limit (~128 KiB, ARG_MAX stack). Stay slightly under
+ * so users get a clear error instead of spawn E2BIG. Mirrors the Cursor guard.
+ */
+const COPILOT_PRINT_PROMPT_MAX_BYTES = 120 * 1024;
+
+function assertCopilotPrintPromptFitsArgv(prompt: string): void {
+  const n = Buffer.byteLength(prompt, "utf8");
+  if (n > COPILOT_PRINT_PROMPT_MAX_BYTES) {
+    throw new Error(
+      `Copilot print-mode prompt is ${n} bytes (max ${COPILOT_PRINT_PROMPT_MAX_BYTES} bytes). This provider passes the prompt as a command-line argument; shorten the prompt or split the work. Other Sandcastle providers use stdin for large prompts.`,
+    );
+  }
+}
+
+/**
+ * Parse one line of `copilot --output-format json` JSONL output.
+ *
+ * Schema (observed via `copilot -p ... --output-format json --model ...`):
+ *
+ * - `assistant.message_delta` — `{ data: { messageId, deltaContent } }`
+ *   Streaming chunks of assistant text. Mapped to `text` events.
+ *
+ * - `assistant.message` — `{ data: { messageId, content, toolRequests, ... } }`
+ *   The complete assistant message. We surface its `content` as a `result`
+ *   event so the Orchestrator's "last result wins" buffer ends up holding
+ *   the final assistant text. (Tool calls in `toolRequests` are surfaced
+ *   separately via `tool.execution_start` events.)
+ *
+ * - `tool.execution_start` — `{ data: { toolCallId, toolName, arguments } }`
+ *   Mapped to `tool_call` events for allowlisted tools. Copilot uses lowercase
+ *   `bash`; we normalise to the existing `Bash` allowlist entry.
+ *
+ * - `result` — `{ sessionId, exitCode, usage }`
+ *   Terminal event. We surface `sessionId` as a `session_id` event.
+ *
+ * - `error` / `agent_error` — defensive: surface as a `result` event the same
+ *   way Pi/Codex do, so the Orchestrator's stderr-empty fallback can show it.
+ */
+const parseCopilotStreamLine = (line: string): ParsedStreamEvent[] => {
+  if (!line.startsWith("{")) return [];
+  try {
+    const obj = JSON.parse(line);
+
+    // Streaming text deltas
+    if (
+      obj.type === "assistant.message_delta" &&
+      typeof obj.data?.deltaContent === "string"
+    ) {
+      return [{ type: "text", text: obj.data.deltaContent }];
+    }
+
+    // Tool execution start → tool_call (allowlisted tools only)
+    if (obj.type === "tool.execution_start") {
+      const rawName = obj.data?.toolName;
+      if (typeof rawName !== "string") return [];
+      // Copilot CLI uses lowercase "bash"; normalise to the shared allowlist.
+      const toolName = rawName === "bash" ? "Bash" : rawName;
+      const argField = TOOL_ARG_FIELDS[toolName];
+      if (argField === undefined) return [];
+      const args = obj.data?.arguments as Record<string, unknown> | undefined;
+      if (!args) return [];
+      const argValue = args[argField];
+      if (typeof argValue !== "string") return [];
+      return [{ type: "tool_call", name: toolName, args: argValue }];
+    }
+
+    // Final assistant message → result. Each assistant turn emits one of
+    // these with the complete text; the Orchestrator's resultText is
+    // last-write-wins, so the final turn ends up surfaced to callers.
+    if (
+      obj.type === "assistant.message" &&
+      typeof obj.data?.content === "string" &&
+      obj.data.content.length > 0
+    ) {
+      return [{ type: "result", result: obj.data.content }];
+    }
+
+    // Terminal result event carries the session id
+    if (obj.type === "result" && typeof obj.sessionId === "string") {
+      return [{ type: "session_id", sessionId: obj.sessionId }];
+    }
+
+    // Defensive: surface error events as result events (matches Pi/Codex)
+    if (obj.type === "error" || obj.type === "agent_error") {
+      const msg = extractErrorMessage(obj);
+      return msg ? [{ type: "result", result: msg }] : [];
+    }
+  } catch {
+    // Not valid JSON — skip
+  }
+  return [];
+};
+
+/** Options for the GitHub Copilot CLI agent provider. */
+export interface CopilotOptions {
+  /** Reasoning effort level. Maps to the CLI's --effort flag. */
+  readonly effort?: "low" | "medium" | "high";
+  /** Environment variables injected by this agent provider. */
+  readonly env?: Record<string, string>;
+}
+
+export const copilot = (
+  model: string,
+  options?: CopilotOptions,
+): AgentProvider => ({
+  name: "copilot",
+  env: options?.env ?? {},
+  captureSessions: false,
+
+  // Copilot CLI does expose `--resume <id>`, but its session state is indexed by
+  // a SQLite database alongside the JSONL files in ~/.copilot/session-state/, so
+  // transferring a single session file between host and sandbox is not enough to
+  // make resume work (see ADR 0016). Until the round-trip is verified end-to-end,
+  // copilot is non-resumable: captureSessions is false, there is no sessionStorage,
+  // and resumeSession is ignored here — like cursor, pi, and opencode.
+  buildPrintCommand({
+    prompt,
+    dangerouslySkipPermissions,
+  }: AgentCommandOptions): PrintCommand {
+    assertCopilotPrintPromptFitsArgv(prompt);
+    const allowAll = dangerouslySkipPermissions ? " --allow-all-tools" : "";
+    const effortFlag = options?.effort ? ` --effort ${options.effort}` : "";
+    return {
+      command: `copilot -p ${shellEscape(prompt)} --output-format json --model ${shellEscape(model)}${allowAll}${effortFlag}`,
+    };
+  },
+
+  buildInteractiveArgs({ prompt }: AgentCommandOptions): string[] {
+    const args = ["copilot", "--model", model];
+    // Seed the interactive session with `-i`/`--interactive`, NOT `-p`. The
+    // `-p`/`--prompt` flag runs the prompt programmatically and exits after
+    // completion; since interactive() attaches these args to the real TTY,
+    // `-p` would print-and-exit instead of launching the TUI. `-i` starts an
+    // interactive session and auto-executes the prompt without exiting.
+    if (prompt) args.push("-i", prompt);
+    return args;
+  },
+
+  parseStreamLine(line: string): ParsedStreamEvent[] {
+    return parseCopilotStreamLine(line);
   },
 });
 
@@ -365,20 +825,39 @@ export const opencode = (
 // ---------------------------------------------------------------------------
 
 export interface ClaudeCodeOptions {
-  readonly effort?: "low" | "medium" | "high" | "max";
+  readonly effort?: "low" | "medium" | "high" | "xhigh" | "max";
   /** Environment variables injected by this agent provider. */
   readonly env?: Record<string, string>;
   /** When false, session capture is disabled. Default: true. */
   readonly captureSessions?: boolean;
+  /** Override Claude session directories for tests or non-standard installs. */
+  readonly sessionStorage?: {
+    readonly hostProjectsDir?: string;
+    readonly sandboxProjectsDir?: string;
+  };
 }
 
 export const claudeCode = (
   model: string,
   options?: ClaudeCodeOptions,
-): AgentProvider => ({
+): AgentProvider & { readonly sessionStorage: AgentSessionStorage } => ({
   name: "claude-code",
   env: options?.env ?? {},
   captureSessions: options?.captureSessions ?? true,
+  sessionStorage: {
+    hostStore: (cwd) =>
+      hostSessionStore(cwd, options?.sessionStorage?.hostProjectsDir),
+    sandboxStore: (cwd, handle) =>
+      sandboxSessionStore(
+        cwd,
+        handle,
+        options?.sessionStorage?.sandboxProjectsDir ??
+          "/home/agent/.claude/projects",
+      ),
+    transfer: transferClaudeSession,
+    findByIdOnHost: (id) =>
+      findClaudeSessionOnHost(id, options?.sessionStorage?.hostProjectsDir),
+  },
 
   buildPrintCommand({
     prompt,

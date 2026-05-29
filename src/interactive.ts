@@ -258,73 +258,86 @@ export const interactive = async (
           ),
         ),
       );
-
-      // Copy files to worktree (bind-mount and no-sandbox, non-head)
-      if (
-        (sandboxProvider.tag === "bind-mount" ||
-          sandboxProvider.tag === "none") &&
-        options.copyToWorktree &&
-        options.copyToWorktree.length > 0
-      ) {
-        yield* d.taskLog("Copying files to worktree", () =>
-          copyToWorktree(
-            options.copyToWorktree!,
-            hostRepoDir,
-            worktreeInfo!.path,
-            options.timeouts?.copyToWorktreeMs,
-          ),
-        );
-      }
-
-      // Run host.onWorktreeReady hooks
-      if (hooks?.host?.onWorktreeReady?.length) {
-        yield* runHostHooks(hooks.host.onWorktreeReady, worktreeInfo!.path);
-      }
-    } else if (hooks?.host?.onWorktreeReady?.length) {
-      // Head strategy: cwd is the host repo root
-      yield* runHostHooks(hooks.host.onWorktreeReady, hostRepoDir);
     }
 
-    // 6. Start sandbox
-    let handle:
+    // 6. Prepare the worktree and start the sandbox. If any step fails after the
+    // worktree exists (copying, hooks, or sandbox start), remove the worktree so
+    // it is not orphaned on disk.
+    const handle:
       | BindMountSandboxHandle
       | IsolatedSandboxHandle
-      | NoSandboxHandle;
+      | NoSandboxHandle = yield* Effect.gen(function* () {
+      if (!isHeadMode) {
+        // Copy files to worktree (bind-mount and no-sandbox, non-head)
+        if (
+          (sandboxProvider.tag === "bind-mount" ||
+            sandboxProvider.tag === "none") &&
+          options.copyToWorktree &&
+          options.copyToWorktree.length > 0
+        ) {
+          yield* d.taskLog("Copying files to worktree", () =>
+            copyToWorktree(
+              options.copyToWorktree!,
+              hostRepoDir,
+              worktreeInfo!.path,
+              options.timeouts?.copyToWorktreeMs,
+            ),
+          );
+        }
 
-    if (sandboxProvider.tag === "none") {
-      // No-sandbox: run directly on the host, no container
-      const worktreePath = isHeadMode ? hostRepoDir : worktreeInfo!.path;
-      handle = yield* Effect.promise(() =>
-        sandboxProvider.create({
-          worktreePath,
-          env: effectiveEnv,
-        }),
-      );
-    } else if (sandboxProvider.tag === "isolated") {
-      const startResult = yield* d.taskLog("Starting sandbox", () =>
-        startSandbox({
-          provider: sandboxProvider,
-          hostRepoDir: worktreeInfo!.path,
-          env: effectiveEnv,
-          copyPaths: options.copyToWorktree,
-        }),
-      );
-      handle = startResult.handle;
-    } else {
-      const gitPath = join(hostRepoDir, ".git");
-      const gitMounts = yield* resolveGitMounts(gitPath);
-      const startResult = yield* d.taskLog("Starting sandbox", () =>
-        startSandbox({
-          provider: sandboxProvider,
-          hostRepoDir,
-          env: effectiveEnv,
-          worktreeOrRepoPath: isHeadMode ? hostRepoDir : worktreeInfo!.path,
-          gitMounts,
-          repoDir: SANDBOX_REPO_DIR,
-        }),
-      );
-      handle = startResult.handle;
-    }
+        // Run host.onWorktreeReady hooks
+        if (hooks?.host?.onWorktreeReady?.length) {
+          yield* runHostHooks(hooks.host.onWorktreeReady, worktreeInfo!.path);
+        }
+      } else if (hooks?.host?.onWorktreeReady?.length) {
+        // Head strategy: cwd is the host repo root
+        yield* runHostHooks(hooks.host.onWorktreeReady, hostRepoDir);
+      }
+
+      // Start sandbox
+      if (sandboxProvider.tag === "none") {
+        // No-sandbox: run directly on the host, no container
+        const worktreePath = isHeadMode ? hostRepoDir : worktreeInfo!.path;
+        return yield* Effect.promise(() =>
+          sandboxProvider.create({
+            worktreePath,
+            env: effectiveEnv,
+          }),
+        );
+      } else if (sandboxProvider.tag === "isolated") {
+        const startResult = yield* d.taskLog("Starting sandbox", () =>
+          startSandbox({
+            provider: sandboxProvider,
+            hostRepoDir: worktreeInfo!.path,
+            env: effectiveEnv,
+            copyPaths: options.copyToWorktree,
+          }),
+        );
+        return startResult.handle;
+      } else {
+        const gitPath = join(hostRepoDir, ".git");
+        const gitMounts = yield* resolveGitMounts(gitPath);
+        const startResult = yield* d.taskLog("Starting sandbox", () =>
+          startSandbox({
+            provider: sandboxProvider,
+            hostRepoDir,
+            env: effectiveEnv,
+            worktreeOrRepoPath: isHeadMode ? hostRepoDir : worktreeInfo!.path,
+            gitMounts,
+            repoDir: SANDBOX_REPO_DIR,
+          }),
+        );
+        return startResult.handle;
+      }
+    }).pipe(
+      Effect.tapError(() =>
+        worktreeInfo
+          ? WorktreeManager.remove(worktreeInfo.path).pipe(
+              Effect.catchAll(() => Effect.void),
+            )
+          : Effect.void,
+      ),
+    );
 
     // Run lifecycle with guaranteed cleanup of handle and worktree
     return yield* Effect.gen(function* () {
@@ -354,6 +367,7 @@ export const interactive = async (
           branch: lifecycleBranch,
           hostWorktreePath: isHeadMode ? hostRepoDir : worktreeInfo?.path,
           applyToHost,
+          timeouts: options.timeouts,
         },
         (ctx) =>
           Effect.gen(function* () {

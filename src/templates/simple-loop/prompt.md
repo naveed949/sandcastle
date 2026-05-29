@@ -4,6 +4,8 @@
 
 !`{{LIST_TASKS_COMMAND}}`
 
+The list above has already been filtered to issues ready for work. Do not run your own unfiltered query to find more issues — if the list is empty, there is nothing to do.
+
 ## Recent RALPH commits (last 10)
 
 !`git log --oneline --grep="RALPH" -10`

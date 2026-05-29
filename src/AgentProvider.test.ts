@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { claudeCode, codex, opencode, pi } from "./AgentProvider.js";
+import {
+  claudeCode,
+  codex,
+  copilot,
+  cursor,
+  opencode,
+  pi,
+} from "./AgentProvider.js";
 import type { AgentCommandOptions } from "./AgentProvider.js";
 
 /** Shorthand: build options with dangerouslySkipPermissions: true (mirrors existing sandbox callers). */
@@ -121,7 +128,7 @@ describe("claudeCode factory", () => {
   });
 
   it("supports all effort levels", () => {
-    for (const effort of ["low", "medium", "high", "max"] as const) {
+    for (const effort of ["low", "medium", "high", "xhigh", "max"] as const) {
       const provider = claudeCode("claude-opus-4-7", { effort });
       expect(provider.buildPrintCommand(opts("test")).command).toContain(
         `--effort ${effort}`,
@@ -600,6 +607,21 @@ describe("codex factory", () => {
     expect(command).toContain(`-c 'model_reasoning_effort="high"'`);
   });
 
+  it("buildPrintCommand resumes with stdin prompt when resumeSession is set", () => {
+    const provider = codex("gpt-5.4-mini", { effort: "high" });
+    const { command, stdin } = provider.buildPrintCommand({
+      prompt: "continue",
+      dangerouslySkipPermissions: true,
+      resumeSession: "abc-123",
+    });
+    expect(command).toContain("codex exec resume 'abc-123'");
+    expect(command).toContain("--json");
+    expect(command).toContain("-m 'gpt-5.4-mini'");
+    expect(command).toContain(`-c 'model_reasoning_effort="high"'`);
+    expect(command.endsWith(" -")).toBe(true);
+    expect(stdin).toBe("continue");
+  });
+
   it("buildPrintCommand omits model reasoning effort config when not specified", () => {
     const provider = codex("gpt-5.4-mini");
     const { command } = provider.buildPrintCommand(opts("do something"));
@@ -614,6 +636,21 @@ describe("codex factory", () => {
       );
     }
   });
+
+  it("parseStreamLine extracts session id from thread.started", () => {
+    const provider = codex("gpt-5.4-mini");
+    const line = JSON.stringify({
+      type: "thread.started",
+      thread_id: "9ba1c695-2222-4444-8888-e7e847bf34dd",
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      {
+        type: "session_id",
+        sessionId: "9ba1c695-2222-4444-8888-e7e847bf34dd",
+      },
+    ]);
+  });
+
   it("parseStreamLine extracts text and result from item.completed agent_message", () => {
     const provider = codex("gpt-5.4-mini");
     const line = JSON.stringify({
@@ -637,9 +674,45 @@ describe("codex factory", () => {
     ]);
   });
 
-  it("parseStreamLine skips turn.completed events", () => {
+  it("parseStreamLine skips turn.completed events without usage", () => {
     const provider = codex("gpt-5.4-mini");
     const line = JSON.stringify({ type: "turn.completed" });
+    expect(provider.parseStreamLine(line)).toEqual([]);
+  });
+
+  it("parseStreamLine extracts usage from turn.completed", () => {
+    const provider = codex("gpt-5.4-mini");
+    const line = JSON.stringify({
+      type: "turn.completed",
+      usage: {
+        input_tokens: 8497,
+        cached_input_tokens: 8448,
+        output_tokens: 51,
+      },
+    });
+    // OpenAI semantics: input_tokens is the total prompt count and
+    // cached_input_tokens is a subset already included. Map cached tokens to
+    // cache-read and the remainder to input so the context-window display does
+    // not double-count them.
+    expect(provider.parseStreamLine(line)).toEqual([
+      {
+        type: "usage",
+        usage: {
+          inputTokens: 49,
+          cacheCreationInputTokens: 0,
+          cacheReadInputTokens: 8448,
+          outputTokens: 51,
+        },
+      },
+    ]);
+  });
+
+  it("parseStreamLine skips turn.completed with malformed usage", () => {
+    const provider = codex("gpt-5.4-mini");
+    const line = JSON.stringify({
+      type: "turn.completed",
+      usage: { input_tokens: "lots", output_tokens: 51 },
+    });
     expect(provider.parseStreamLine(line)).toEqual([]);
   });
 
@@ -778,6 +851,180 @@ describe("codex factory", () => {
 });
 
 // ---------------------------------------------------------------------------
+// cursor factory
+// ---------------------------------------------------------------------------
+
+describe("cursor factory", () => {
+  it("returns a provider with name 'cursor'", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    expect(provider.name).toBe("cursor");
+  });
+
+  it("does not expose envManifest or dockerfileTemplate", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    expect(provider).not.toHaveProperty("envManifest");
+    expect(provider).not.toHaveProperty("dockerfileTemplate");
+  });
+
+  it("buildPrintCommand includes stream-json flags and model", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    const { command } = provider.buildPrintCommand(opts("do something"));
+    expect(command).toContain("--print");
+    expect(command).toContain("--output-format stream-json");
+    expect(command).toContain("--force");
+    expect(command).toContain("--model 'claude-sonnet-4-6'");
+  });
+
+  it("buildPrintCommand passes prompt as a positional shell-escaped argument", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    const { command, stdin } = provider.buildPrintCommand(opts("it's a test"));
+    expect(command.endsWith("'it'\\''s a test'")).toBe(true);
+    expect(command).not.toContain(" -p ");
+    expect(stdin).toBeUndefined();
+  });
+
+  it("buildPrintCommand rejects prompts larger than the argv-safe limit", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    const huge = "x".repeat(120 * 1024 + 1);
+    expect(() => provider.buildPrintCommand(opts(huge))).toThrow(
+      /Cursor print-mode prompt/,
+    );
+  });
+
+  it("buildInteractiveArgs includes binary, model and prompt", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    const args = provider.buildInteractiveArgs!({
+      prompt: "test prompt",
+      dangerouslySkipPermissions: true,
+    });
+    expect(args).toEqual([
+      "agent",
+      "--model",
+      "claude-sonnet-4-6",
+      "--force",
+      "test prompt",
+    ]);
+  });
+
+  it("buildInteractiveArgs omits prompt when empty", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    const args = provider.buildInteractiveArgs!({
+      prompt: "",
+      dangerouslySkipPermissions: true,
+    });
+    expect(args).toEqual(["agent", "--model", "claude-sonnet-4-6", "--force"]);
+  });
+
+  // Orchestrator.invokeAgent always passes dangerouslySkipPermissions: true in print mode;
+  // this branch is still used by interactive mode and direct provider.buildPrintCommand callers.
+  it("buildPrintCommand does not include --force when dangerouslySkipPermissions is false", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    const { command } = provider.buildPrintCommand({
+      prompt: "do something",
+      dangerouslySkipPermissions: false,
+    });
+    expect(command).not.toContain("--force");
+  });
+
+  it("parseStreamLine extracts text from assistant message", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    const line = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "Hello from Cursor" }] },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "text", text: "Hello from Cursor" },
+    ]);
+  });
+
+  it("parseStreamLine extracts tool_use block (Bash → command arg)", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    const line = JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", name: "Bash", input: { command: "npm test" } },
+        ],
+      },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "tool_call", name: "Bash", args: "npm test" },
+    ]);
+  });
+
+  it("parseStreamLine extracts top-level tool_call readToolCall (Cursor stream-json)", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    const line = JSON.stringify({
+      type: "tool_call",
+      subtype: "started",
+      call_id: "toolu_vrtx_01",
+      tool_call: {
+        readToolCall: { args: { path: "README.md" } },
+      },
+      session_id: "c6b62c6f-7ead-4fd6-9922-e952131177ff",
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "tool_call", name: "Read", args: "README.md" },
+    ]);
+  });
+
+  it("parseStreamLine extracts top-level tool_call writeToolCall (Cursor stream-json)", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    const line = JSON.stringify({
+      type: "tool_call",
+      subtype: "started",
+      call_id: "toolu_vrtx_02",
+      tool_call: {
+        writeToolCall: { args: { path: "src/index.ts" } },
+      },
+      session_id: "c6b62c6f-7ead-4fd6-9922-e952131177ff",
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "tool_call", name: "Write", args: "src/index.ts" },
+    ]);
+  });
+
+  it("parseStreamLine ignores tool_call completed events", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    const line = JSON.stringify({
+      type: "tool_call",
+      subtype: "completed",
+      call_id: "toolu_vrtx_01",
+      tool_call: {
+        readToolCall: {
+          args: { path: "README.md" },
+          result: { success: { content: "hello" } },
+        },
+      },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([]);
+  });
+
+  it("parseStreamLine extracts result event", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    const line = JSON.stringify({
+      type: "result",
+      result: "Done <promise>COMPLETE</promise>",
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "result", result: "Done <promise>COMPLETE</promise>" },
+    ]);
+  });
+
+  it("accepts an env option and exposes it on the provider", () => {
+    const provider = cursor("claude-sonnet-4-6", {
+      env: { CURSOR_API_KEY: "cursor-key" },
+    });
+    expect(provider.env).toEqual({ CURSOR_API_KEY: "cursor-key" });
+  });
+
+  it("defaults env to empty object when not provided", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    expect(provider.env).toEqual({});
+  });
+});
+
+// ---------------------------------------------------------------------------
 // opencode factory
 // ---------------------------------------------------------------------------
 
@@ -802,11 +1049,28 @@ describe("opencode factory", () => {
     expect(stdin).toBeUndefined();
   });
 
-  it("buildPrintCommand does not include --format json", () => {
+  it("buildPrintCommand includes --format json so the parser receives JSON events", () => {
     const provider = opencode("opencode/big-pickle");
     const { command } = provider.buildPrintCommand(opts("do something"));
-    expect(command).not.toContain("--format json");
-    expect(command).not.toContain("--format");
+    expect(command).toContain("--format json");
+  });
+
+  it("buildPrintCommand includes --dangerously-skip-permissions when requested", () => {
+    const provider = opencode("opencode/big-pickle");
+    const { command } = provider.buildPrintCommand({
+      prompt: "do something",
+      dangerouslySkipPermissions: true,
+    });
+    expect(command).toContain("--dangerously-skip-permissions");
+  });
+
+  it("buildPrintCommand omits --dangerously-skip-permissions when not requested", () => {
+    const provider = opencode("opencode/big-pickle");
+    const { command } = provider.buildPrintCommand({
+      prompt: "do something",
+      dangerouslySkipPermissions: false,
+    });
+    expect(command).not.toContain("--dangerously-skip-permissions");
   });
 
   it("buildPrintCommand shell-escapes the prompt", () => {
@@ -856,18 +1120,266 @@ describe("opencode factory", () => {
     expect(command).toContain("--variant 'it'\\''s tricky'");
   });
 
-  it("parseStreamLine returns empty array for all input (raw passthrough)", () => {
+  it("buildPrintCommand includes --agent when specified", () => {
+    const provider = opencode("opencode/big-pickle", { agent: "build" });
+    const { command } = provider.buildPrintCommand(opts("do something"));
+    expect(command).toContain("--agent 'build'");
+  });
+
+  it("buildPrintCommand omits --agent when not specified", () => {
     const provider = opencode("opencode/big-pickle");
-    expect(provider.parseStreamLine("some output text")).toEqual([]);
-    expect(provider.parseStreamLine("")).toEqual([]);
-    expect(
-      provider.parseStreamLine(JSON.stringify({ type: "text", text: "hi" })),
-    ).toEqual([]);
+    const { command } = provider.buildPrintCommand(opts("do something"));
+    expect(command).not.toContain("--agent");
+  });
+
+  it("buildPrintCommand omits --agent when options is empty", () => {
+    const provider = opencode("opencode/big-pickle", {});
+    const { command } = provider.buildPrintCommand(opts("do something"));
+    expect(command).not.toContain("--agent");
+  });
+
+  it("passes through arbitrary agent values to the CLI flag", () => {
+    for (const agent of ["build", "plan", "general", "custom-agent"]) {
+      const provider = opencode("opencode/big-pickle", { agent });
+      expect(provider.buildPrintCommand(opts("test")).command).toContain(
+        "--agent",
+      );
+    }
+  });
+
+  it("buildPrintCommand shell-escapes the agent value", () => {
+    const provider = opencode("opencode/big-pickle", {
+      agent: "it's tricky",
+    });
+    const { command } = provider.buildPrintCommand(opts("test"));
+    expect(command).toContain("--agent 'it'\\''s tricky'");
+  });
+
+  it("buildInteractiveArgs includes --agent when specified", () => {
+    const provider = opencode("opencode/big-pickle", { agent: "build" });
+    const args = provider.buildInteractiveArgs!(opts("do something"));
+    expect(args).toEqual([
+      "opencode",
+      "--model",
+      "opencode/big-pickle",
+      "--agent",
+      "build",
+      "-p",
+      "do something",
+    ]);
+  });
+
+  it("buildInteractiveArgs omits --agent when not specified", () => {
+    const provider = opencode("opencode/big-pickle");
+    const args = provider.buildInteractiveArgs!(opts("do something"));
+    expect(args).not.toContain("--agent");
+  });
+
+  it("parseStreamLine extracts session id from step_start", () => {
+    const provider = opencode("opencode/big-pickle");
+    const line = JSON.stringify({
+      type: "step_start",
+      sessionID: "ses_19cb8236effe4lu1aSmQyzbeP2",
+      part: {
+        type: "step-start",
+        sessionID: "ses_19cb8236effe4lu1aSmQyzbeP2",
+      },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "session_id", sessionId: "ses_19cb8236effe4lu1aSmQyzbeP2" },
+    ]);
+  });
+
+  it("parseStreamLine extracts text and result from a text event", () => {
+    const provider = opencode("opencode/big-pickle");
+    const line = JSON.stringify({
+      type: "text",
+      sessionID: "ses_abc",
+      part: { type: "text", text: "Hello world <promise>COMPLETE</promise>" },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "text", text: "Hello world <promise>COMPLETE</promise>" },
+      { type: "result", result: "Hello world <promise>COMPLETE</promise>" },
+    ]);
+  });
+
+  it("parseStreamLine extracts tool call from tool_use (bash → command)", () => {
+    const provider = opencode("opencode/big-pickle");
+    const line = JSON.stringify({
+      type: "tool_use",
+      sessionID: "ses_abc",
+      part: {
+        type: "tool",
+        tool: "bash",
+        callID: "call_00",
+        state: { status: "completed", input: { command: "npm test" } },
+      },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "tool_call", name: "bash", args: "npm test" },
+    ]);
+  });
+
+  it("parseStreamLine extracts tool call from tool_use (webfetch → url)", () => {
+    const provider = opencode("opencode/big-pickle");
+    const line = JSON.stringify({
+      type: "tool_use",
+      sessionID: "ses_abc",
+      part: {
+        type: "tool",
+        tool: "webfetch",
+        state: { status: "completed", input: { url: "https://example.com" } },
+      },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "tool_call", name: "webfetch", args: "https://example.com" },
+    ]);
+  });
+
+  it("parseStreamLine extracts tool call from tool_use (task → description)", () => {
+    const provider = opencode("opencode/big-pickle");
+    const line = JSON.stringify({
+      type: "tool_use",
+      sessionID: "ses_abc",
+      part: {
+        type: "tool",
+        tool: "task",
+        state: {
+          status: "completed",
+          input: { description: "Explore the repo" },
+        },
+      },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "tool_call", name: "task", args: "Explore the repo" },
+    ]);
+  });
+
+  it("parseStreamLine falls back to JSON.stringify(input) for read (not specially mapped)", () => {
+    const provider = opencode("opencode/big-pickle");
+    const line = JSON.stringify({
+      type: "tool_use",
+      sessionID: "ses_abc",
+      part: {
+        type: "tool",
+        tool: "read",
+        state: { status: "completed", input: { filePath: "/some/file" } },
+      },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "tool_call", name: "read", args: '{"filePath":"/some/file"}' },
+    ]);
+  });
+
+  it("parseStreamLine falls back to JSON.stringify(input) for grep (not specially mapped)", () => {
+    const provider = opencode("opencode/big-pickle");
+    const line = JSON.stringify({
+      type: "tool_use",
+      sessionID: "ses_abc",
+      part: {
+        type: "tool",
+        tool: "grep",
+        state: { status: "completed", input: { pattern: "TODO" } },
+      },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "tool_call", name: "grep", args: '{"pattern":"TODO"}' },
+    ]);
+  });
+
+  it("parseStreamLine falls back to JSON.stringify(input) for unknown tools", () => {
+    const provider = opencode("opencode/big-pickle");
+    const line = JSON.stringify({
+      type: "tool_use",
+      sessionID: "ses_abc",
+      part: {
+        type: "tool",
+        tool: "mystery",
+        state: { status: "completed", input: { foo: "bar" } },
+      },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "tool_call", name: "mystery", args: '{"foo":"bar"}' },
+    ]);
+  });
+
+  it("parseStreamLine falls back to JSON.stringify(input) when the known arg field is absent", () => {
+    const provider = opencode("opencode/big-pickle");
+    const line = JSON.stringify({
+      type: "tool_use",
+      sessionID: "ses_abc",
+      part: {
+        type: "tool",
+        tool: "bash",
+        state: { status: "completed", input: { description: "no command" } },
+      },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "tool_call", name: "bash", args: '{"description":"no command"}' },
+    ]);
+  });
+
+  it("parseStreamLine skips tool_use with a missing tool name", () => {
+    const provider = opencode("opencode/big-pickle");
+    const line = JSON.stringify({
+      type: "tool_use",
+      sessionID: "ses_abc",
+      part: {
+        type: "tool",
+        state: { status: "completed", input: { command: "npm test" } },
+      },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([]);
+  });
+
+  it("parseStreamLine skips tool_use that has not completed", () => {
+    const provider = opencode("opencode/big-pickle");
+    const line = JSON.stringify({
+      type: "tool_use",
+      sessionID: "ses_abc",
+      part: {
+        type: "tool",
+        tool: "bash",
+        state: { status: "running", input: { command: "npm test" } },
+      },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([]);
+  });
+
+  it("parseStreamLine extracts error message from an error event", () => {
+    const provider = opencode("opencode/big-pickle");
+    const line = JSON.stringify({
+      type: "error",
+      error: {
+        name: "ProviderAuthError",
+        data: { message: "Invalid API key" },
+      },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "result", result: "Invalid API key" },
+    ]);
+  });
+
+  it("parseStreamLine skips step_finish events", () => {
+    const provider = opencode("opencode/big-pickle");
+    const line = JSON.stringify({
+      type: "step_finish",
+      sessionID: "ses_abc",
+      part: { type: "step-finish", tokens: { total: 100 } },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([]);
+  });
+
+  it("parseStreamLine returns empty array for unrecognized event types", () => {
+    const provider = opencode("opencode/big-pickle");
+    const line = JSON.stringify({ type: "unknown_event", data: "foo" });
+    expect(provider.parseStreamLine(line)).toEqual([]);
   });
 
   it("parseStreamLine returns empty array for non-JSON lines", () => {
     const provider = opencode("opencode/big-pickle");
     expect(provider.parseStreamLine("not json")).toEqual([]);
+    expect(provider.parseStreamLine("")).toEqual([]);
   });
 
   it("parseStreamLine returns empty array for malformed JSON", () => {
@@ -914,15 +1426,14 @@ describe("resumeSession on non-Claude providers", () => {
     expect(command).not.toContain("abc-123");
   });
 
-  it("codex ignores resumeSession in buildPrintCommand", () => {
+  it("codex uses resumeSession in buildPrintCommand", () => {
     const provider = codex("gpt-5.4-mini");
     const { command } = provider.buildPrintCommand({
       prompt: "test",
       dangerouslySkipPermissions: true,
       resumeSession: "abc-123",
     });
-    expect(command).not.toContain("--resume");
-    expect(command).not.toContain("abc-123");
+    expect(command).toContain("codex exec resume 'abc-123'");
   });
 
   it("opencode ignores resumeSession in buildPrintCommand", () => {
@@ -934,6 +1445,354 @@ describe("resumeSession on non-Claude providers", () => {
     });
     expect(command).not.toContain("--resume");
     expect(command).not.toContain("abc-123");
+  });
+
+  it("cursor ignores resumeSession in buildPrintCommand", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    const { command } = provider.buildPrintCommand({
+      prompt: "test",
+      dangerouslySkipPermissions: true,
+      resumeSession: "abc-123",
+    });
+    expect(command).not.toContain("--resume");
+    expect(command).not.toContain("abc-123");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// copilot factory
+// ---------------------------------------------------------------------------
+
+describe("copilot factory", () => {
+  it("returns a provider with name 'copilot'", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    expect(provider.name).toBe("copilot");
+  });
+
+  it("does not capture sessions by default", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    expect(provider.captureSessions).toBe(false);
+  });
+
+  it("buildPrintCommand includes the model and -p prompt", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    const { command } = provider.buildPrintCommand(opts("do something"));
+    expect(command).toContain("copilot -p");
+    expect(command).toContain("'do something'");
+    expect(command).toContain("--model 'claude-sonnet-4.5'");
+    expect(command).toContain("--output-format json");
+  });
+  it("buildPrintCommand includes --allow-all-tools when dangerouslySkipPermissions is true", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    const { command } = provider.buildPrintCommand({
+      prompt: "test",
+      dangerouslySkipPermissions: true,
+    });
+    expect(command).toContain("--allow-all-tools");
+  });
+
+  it("buildPrintCommand omits --allow-all-tools when dangerouslySkipPermissions is false", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    const { command } = provider.buildPrintCommand({
+      prompt: "test",
+      dangerouslySkipPermissions: false,
+    });
+    expect(command).not.toContain("--allow-all-tools");
+  });
+
+  it("buildPrintCommand shell-escapes the prompt", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    const { command } = provider.buildPrintCommand(opts("it's a test"));
+    expect(command).toContain("'it'\\''s a test'");
+  });
+
+  it("buildPrintCommand rejects prompts larger than the argv-safe limit", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    const huge = "x".repeat(120 * 1024 + 1);
+    expect(() => provider.buildPrintCommand(opts(huge))).toThrow(
+      /Copilot print-mode prompt/,
+    );
+  });
+
+  it("buildPrintCommand includes --effort when specified", () => {
+    const provider = copilot("claude-sonnet-4.5", { effort: "high" });
+    const { command } = provider.buildPrintCommand(opts("test"));
+    expect(command).toContain("--effort high");
+  });
+
+  it("buildPrintCommand omits --effort when not specified", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    const { command } = provider.buildPrintCommand(opts("test"));
+    expect(command).not.toContain("--effort");
+  });
+
+  it("buildPrintCommand ignores resumeSession (resume not yet supported)", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    const { command } = provider.buildPrintCommand({
+      prompt: "test",
+      dangerouslySkipPermissions: true,
+      resumeSession: "abc-123",
+    });
+    expect(command).not.toContain("--resume");
+    expect(command).not.toContain("abc-123");
+  });
+
+  it("buildInteractiveArgs includes copilot binary, --model, and prompt", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    const args = provider.buildInteractiveArgs!(opts("hello"));
+    expect(args[0]).toBe("copilot");
+    expect(args).toContain("--model");
+    expect(args).toContain("claude-sonnet-4.5");
+    expect(args).toContain("hello");
+  });
+
+  it("buildInteractiveArgs seeds the prompt with -i, not -p", () => {
+    // `-p`/`--prompt` runs programmatically and exits; interactive sessions
+    // must use `-i`/`--interactive` to launch the TUI without exiting.
+    const provider = copilot("claude-sonnet-4.5");
+    const args = provider.buildInteractiveArgs!(opts("hello"));
+    expect(args).toContain("-i");
+    expect(args).not.toContain("-p");
+    // The prompt immediately follows the -i flag.
+    expect(args[args.indexOf("-i") + 1]).toBe("hello");
+  });
+
+  it("parseStreamLine returns empty array for non-JSON and unrecognised input", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    expect(provider.parseStreamLine("some output text")).toEqual([]);
+    expect(provider.parseStreamLine("")).toEqual([]);
+    expect(
+      provider.parseStreamLine(JSON.stringify({ type: "text", text: "hi" })),
+    ).toEqual([]);
+  });
+
+  it("parseStreamLine extracts text from assistant.message_delta event", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    const line = JSON.stringify({
+      type: "assistant.message_delta",
+      data: { messageId: "m1", deltaContent: "hello" },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "text", text: "hello" },
+    ]);
+  });
+
+  it("parseStreamLine extracts tool call from tool.execution_start (bash → Bash)", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    const line = JSON.stringify({
+      type: "tool.execution_start",
+      data: {
+        toolCallId: "t1",
+        toolName: "bash",
+        arguments: { command: "ls /", description: "list root" },
+        turnId: "0",
+      },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "tool_call", name: "Bash", args: "ls /" },
+    ]);
+  });
+
+  it("parseStreamLine skips non-allowlisted tools (e.g. report_intent)", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    const line = JSON.stringify({
+      type: "tool.execution_start",
+      data: {
+        toolCallId: "t1",
+        toolName: "report_intent",
+        arguments: { intent: "doing things" },
+      },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([]);
+  });
+
+  it("parseStreamLine extracts result from assistant.message content", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    const line = JSON.stringify({
+      type: "assistant.message",
+      data: {
+        messageId: "m1",
+        content: "Final answer.",
+        toolRequests: [],
+        interactionId: "i1",
+        turnId: "0",
+      },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "result", result: "Final answer." },
+    ]);
+  });
+
+  it("parseStreamLine ignores assistant.message with empty content", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    const line = JSON.stringify({
+      type: "assistant.message",
+      data: { messageId: "m1", content: "", toolRequests: [] },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([]);
+  });
+
+  it("parseStreamLine extracts session_id from terminal result event", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    const line = JSON.stringify({
+      type: "result",
+      sessionId: "08f6db99-c0af-4d97-a927-a526b205de12",
+      exitCode: 0,
+      usage: { premiumRequests: 1 },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      {
+        type: "session_id",
+        sessionId: "08f6db99-c0af-4d97-a927-a526b205de12",
+      },
+    ]);
+  });
+
+  it("parseStreamLine ignores ephemeral session/lifecycle events", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    for (const type of [
+      "session.mcp_server_status_changed",
+      "session.mcp_servers_loaded",
+      "session.skills_loaded",
+      "session.tools_updated",
+      "user.message",
+      "assistant.turn_start",
+      "assistant.turn_end",
+      "assistant.message_start",
+      "assistant.reasoning_delta",
+      "assistant.reasoning",
+      "tool.execution_complete",
+    ]) {
+      expect(
+        provider.parseStreamLine(JSON.stringify({ type, data: {} })),
+      ).toEqual([]);
+    }
+  });
+
+  it("parseStreamLine returns empty array for malformed JSON", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    expect(provider.parseStreamLine("{bad json")).toEqual([]);
+  });
+
+  it("parseStreamLine surfaces error events as result (string error)", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    const line = JSON.stringify({
+      type: "error",
+      error: "Connection refused",
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "result", result: "Connection refused" },
+    ]);
+  });
+
+  it("parseStreamLine surfaces error events as result (object error)", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    const line = JSON.stringify({
+      type: "agent_error",
+      error: { message: "Rate limit exceeded", code: "rate_limit" },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "result", result: "Rate limit exceeded" },
+    ]);
+  });
+
+  it("parseStreamLine end-to-end: streams deltas, tool call, and final result from a captured fixture", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    // Fixture mirrors a real `copilot --output-format json` capture: two text
+    // deltas, an assistant.message that finalises the text and includes a
+    // tool request, the corresponding tool.execution_start, then the
+    // terminal result event with sessionId.
+    const lines = [
+      JSON.stringify({
+        type: "session.mcp_servers_loaded",
+        data: { servers: [] },
+      }),
+      JSON.stringify({ type: "assistant.turn_start", data: { turnId: "0" } }),
+      JSON.stringify({
+        type: "assistant.message_start",
+        data: { messageId: "m1" },
+      }),
+      JSON.stringify({
+        type: "assistant.message_delta",
+        data: { messageId: "m1", deltaContent: "I'll run " },
+      }),
+      JSON.stringify({
+        type: "assistant.message_delta",
+        data: { messageId: "m1", deltaContent: "ls /." },
+      }),
+      JSON.stringify({
+        type: "assistant.message",
+        data: {
+          messageId: "m1",
+          content: "I'll run ls /.",
+          toolRequests: [
+            {
+              toolCallId: "tc1",
+              name: "bash",
+              arguments: { command: "ls /" },
+              type: "function",
+            },
+          ],
+          interactionId: "i1",
+          turnId: "0",
+        },
+      }),
+      JSON.stringify({
+        type: "tool.execution_start",
+        data: {
+          toolCallId: "tc1",
+          toolName: "bash",
+          arguments: { command: "ls /", description: "list root" },
+          turnId: "0",
+        },
+      }),
+      JSON.stringify({
+        type: "tool.execution_complete",
+        data: { toolCallId: "tc1", success: true },
+      }),
+      JSON.stringify({ type: "assistant.turn_end", data: { turnId: "0" } }),
+      JSON.stringify({
+        type: "result",
+        sessionId: "sess-123",
+        exitCode: 0,
+        usage: {},
+      }),
+    ];
+
+    const events = lines.flatMap((l) => provider.parseStreamLine(l));
+    expect(events).toEqual([
+      { type: "text", text: "I'll run " },
+      { type: "text", text: "ls /." },
+      { type: "result", result: "I'll run ls /." },
+      { type: "tool_call", name: "Bash", args: "ls /" },
+      { type: "session_id", sessionId: "sess-123" },
+    ]);
+  });
+
+  it("accepts an env option and exposes it on the provider", () => {
+    const provider = copilot("claude-sonnet-4.5", {
+      env: { GITHUB_TOKEN: "ghp_test" },
+    });
+    expect(provider.env).toEqual({ GITHUB_TOKEN: "ghp_test" });
+  });
+
+  it("defaults env to empty object when not provided", () => {
+    const provider = copilot("claude-sonnet-4.5");
+    expect(provider.env).toEqual({});
+  });
+
+  it("bakes model into each provider instance independently", () => {
+    const provider1 = copilot("model-a");
+    const provider2 = copilot("model-b");
+    expect(provider1.buildPrintCommand(opts("test")).command).toContain(
+      "model-a",
+    );
+    expect(provider2.buildPrintCommand(opts("test")).command).toContain(
+      "model-b",
+    );
+    expect(provider1.buildPrintCommand(opts("test")).command).not.toContain(
+      "model-b",
+    );
   });
 });
 
@@ -1040,6 +1899,10 @@ describe("parseSessionUsage (Claude Code)", () => {
   it("is not defined on opencode provider", () => {
     expect(opencode("model").parseSessionUsage).toBeUndefined();
   });
+
+  it("is not defined on cursor provider", () => {
+    expect(cursor("model").parseSessionUsage).toBeUndefined();
+  });
 });
 
 describe("captureSessions flag", () => {
@@ -1057,11 +1920,21 @@ describe("captureSessions flag", () => {
     expect(pi("pi-model").captureSessions).toBe(false);
   });
 
-  it("codex has captureSessions false", () => {
-    expect(codex("codex-model").captureSessions).toBe(false);
+  it("codex defaults captureSessions to true", () => {
+    expect(codex("codex-model").captureSessions).toBe(true);
+  });
+
+  it("codex allows opting out of captureSessions", () => {
+    expect(
+      codex("codex-model", { captureSessions: false }).captureSessions,
+    ).toBe(false);
   });
 
   it("opencode has captureSessions false", () => {
     expect(opencode("opencode-model").captureSessions).toBe(false);
+  });
+
+  it("cursor has captureSessions false", () => {
+    expect(cursor("cursor-model").captureSessions).toBe(false);
   });
 });

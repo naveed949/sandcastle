@@ -18,6 +18,17 @@
 
 import * as sandcastle from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+import { z } from "zod";
+
+// The planner emits its plan as JSON inside <plan> tags; Output.object extracts
+// and validates it against this schema. We use Zod here, but any Standard
+// Schema validator works just as well — Valibot, ArkType, etc. See
+// https://standardschema.dev.
+const planSchema = z.object({
+  issues: z.array(
+    z.object({ id: z.string(), title: z.string(), branch: z.string() }),
+  ),
+});
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -52,32 +63,25 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   // builds a dependency graph, and selects the issues that can be worked in
   // parallel right now (i.e., no blocking dependencies on other open issues).
   //
-  // It outputs a <plan> JSON block — we parse that to drive Phase 2.
+  // It outputs a <plan> JSON block — Output.object parses and validates it.
   // -------------------------------------------------------------------------
   const plan = await sandcastle.run({
     hooks,
     sandbox: docker(),
     name: "planner",
     // One iteration is enough: the planner just needs to read and reason,
-    // not write code.
+    // not write code. (Structured output requires maxIterations: 1.)
     maxIterations: 1,
     // Opus for planning: dependency analysis benefits from deeper reasoning.
     agent: sandcastle.claudeCode("claude-opus-4-7"),
     promptFile: "./.sandcastle/plan-prompt.md",
+    // Extract and validate the <plan> JSON into a typed object. Throws
+    // StructuredOutputError if the tag is missing, the JSON is malformed, or
+    // validation fails — which aborts the loop.
+    output: sandcastle.Output.object({ tag: "plan", schema: planSchema }),
   });
 
-  // Extract the <plan>…</plan> block from the agent's stdout.
-  const planMatch = plan.stdout.match(/<plan>([\s\S]*?)<\/plan>/);
-  if (!planMatch) {
-    throw new Error(
-      "Planning agent did not produce a <plan> tag.\n\n" + plan.stdout,
-    );
-  }
-
-  // The plan JSON contains an array of issues, each with id, title, branch.
-  const { issues } = JSON.parse(planMatch[1]!) as {
-    issues: { id: string; title: string; branch: string }[];
-  };
+  const issues = plan.output.issues;
 
   if (issues.length === 0) {
     // No unblocked work — either everything is done or everything is blocked.
@@ -190,9 +194,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
       // A markdown list of branch names, one per line.
       BRANCHES: completedBranches.map((b) => `- ${b}`).join("\n"),
       // A markdown list of issue IDs and titles, one per line.
-      ISSUES: completedIssues
-        .map((i) => `- ${i.id}: ${i.title}`)
-        .join("\n"),
+      ISSUES: completedIssues.map((i) => `- ${i.id}: ${i.title}`).join("\n"),
     },
   });
 

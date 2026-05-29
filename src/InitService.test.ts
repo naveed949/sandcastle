@@ -7,15 +7,17 @@ import { describe, expect, it } from "vitest";
 import {
   scaffold,
   getNextStepsLines,
-  listAgents,
   getAgent,
   listTemplates,
-  listBacklogManagers,
-  getBacklogManager,
-  listSandboxProviders,
+  listIssueTrackers,
+  getIssueTracker,
   getSandboxProvider,
 } from "./InitService.js";
-import type { AgentEntry, ScaffoldOptions } from "./InitService.js";
+import type {
+  AgentEntry,
+  PackageManager,
+  ScaffoldOptions,
+} from "./InitService.js";
 import { SANDBOX_REPO_DIR } from "./SandboxFactory.js";
 import { SKELETON_PROMPT } from "./templates.js";
 
@@ -24,6 +26,7 @@ const makeDir = () => mkdtemp(join(tmpdir(), "init-service-"));
 const claudeCodeAgent = getAgent("claude-code")!;
 const piAgent = getAgent("pi")!;
 const codexAgent = getAgent("codex")!;
+const cursorAgent = getAgent("cursor")!;
 const opencodeAgent = getAgent("opencode")!;
 
 const defaultOptions: ScaffoldOptions = {
@@ -39,77 +42,6 @@ const runScaffold = (repoDir: string, options?: Partial<ScaffoldOptions>) =>
   );
 
 // ---------------------------------------------------------------------------
-// Agent registry
-// ---------------------------------------------------------------------------
-
-describe("Agent registry", () => {
-  it("listAgents returns at least claude-code", () => {
-    const agents = listAgents();
-    expect(agents.some((a) => a.name === "claude-code")).toBe(true);
-  });
-
-  it("getAgent returns claude-code entry with expected fields", () => {
-    const agent = getAgent("claude-code");
-    expect(agent).toBeDefined();
-    expect(agent!.name).toBe("claude-code");
-    expect(agent!.defaultModel).toBe("claude-opus-4-7");
-    expect(agent!.factoryImport).toBe("claudeCode");
-    expect(agent!.dockerfileTemplate).toContain("FROM");
-  });
-
-  it("getAgent returns undefined for unknown agent", () => {
-    expect(getAgent("nonexistent")).toBeUndefined();
-  });
-
-  it("listAgents includes pi", () => {
-    const agents = listAgents();
-    expect(agents.some((a) => a.name === "pi")).toBe(true);
-  });
-
-  it("getAgent returns pi entry with expected fields", () => {
-    const agent = getAgent("pi");
-    expect(agent).toBeDefined();
-    expect(agent!.name).toBe("pi");
-    expect(agent!.defaultModel).toBe("claude-sonnet-4-6");
-    expect(agent!.factoryImport).toBe("pi");
-    expect(agent!.dockerfileTemplate).toContain("FROM");
-    expect(agent!.dockerfileTemplate).toContain(
-      "@mariozechner/pi-coding-agent",
-    );
-  });
-
-  it("listAgents includes codex", () => {
-    const agents = listAgents();
-    expect(agents.some((a) => a.name === "codex")).toBe(true);
-  });
-
-  it("getAgent returns codex entry with expected fields", () => {
-    const agent = getAgent("codex");
-    expect(agent).toBeDefined();
-    expect(agent!.name).toBe("codex");
-    expect(agent!.defaultModel).toBe("gpt-5.4-mini");
-    expect(agent!.factoryImport).toBe("codex");
-    expect(agent!.dockerfileTemplate).toContain("FROM");
-    expect(agent!.dockerfileTemplate).toContain("@openai/codex");
-  });
-
-  it("listAgents includes opencode", () => {
-    const agents = listAgents();
-    expect(agents.some((a) => a.name === "opencode")).toBe(true);
-  });
-
-  it("getAgent returns opencode entry with expected fields", () => {
-    const agent = getAgent("opencode");
-    expect(agent).toBeDefined();
-    expect(agent!.name).toBe("opencode");
-    expect(agent!.defaultModel).toBe("opencode/big-pickle");
-    expect(agent!.factoryImport).toBe("opencode");
-    expect(agent!.dockerfileTemplate).toContain("FROM");
-    expect(agent!.dockerfileTemplate).toContain("opencode-ai");
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Scaffold
 // ---------------------------------------------------------------------------
 
@@ -122,10 +54,10 @@ describe("InitService scaffold", () => {
       join(dir, ".sandcastle", "Dockerfile"),
       "utf-8",
     );
-    // Template has {{BACKLOG_MANAGER_TOOLS}} replaced — should contain GitHub CLI (default backlog manager)
+    // Template has {{ISSUE_TRACKER_TOOLS}} replaced — should contain GitHub CLI (default issue tracker)
     expect(dockerfile).toContain("FROM node:22-bookworm");
     expect(dockerfile).toContain("GitHub CLI");
-    expect(dockerfile).not.toContain("{{BACKLOG_MANAGER_TOOLS}}");
+    expect(dockerfile).not.toContain("{{ISSUE_TRACKER_TOOLS}}");
   });
 
   // --- Dynamic .env.example generation ---
@@ -155,6 +87,12 @@ describe("InitService scaffold", () => {
       unexpectedKey: "ANTHROPIC_API_KEY=",
       expectIssue191Link: false,
     },
+    {
+      agent: cursorAgent,
+      expectedKey: "CURSOR_API_KEY=",
+      unexpectedKey: "ANTHROPIC_API_KEY=",
+      expectIssue191Link: false,
+    },
   ])(
     "generates .env.example with $agent.name env var",
     async ({ agent, expectedKey, unexpectedKey, expectIssue191Link }) => {
@@ -175,10 +113,10 @@ describe("InitService scaffold", () => {
     },
   );
 
-  it("generates .env.example with GH_TOKEN when backlog manager is github-issues", async () => {
+  it("generates .env.example with GH_TOKEN when issue tracker is github-issues", async () => {
     const dir = await makeDir();
     await runScaffold(dir, {
-      backlogManager: getBacklogManager("github-issues"),
+      issueTracker: getIssueTracker("github-issues"),
     });
 
     const envExample = await readFile(
@@ -186,12 +124,17 @@ describe("InitService scaffold", () => {
       "utf-8",
     );
     expect(envExample).toContain("GH_TOKEN=");
+    expect(envExample).toContain(
+      "https://github.com/settings/personal-access-tokens/new",
+    );
+    expect(envExample).toContain("Issues");
+    expect(envExample).toContain("Metadata");
   });
 
-  it("generates .env.example without GH_TOKEN when backlog manager is beads", async () => {
+  it("generates .env.example without GH_TOKEN when issue tracker is beads", async () => {
     const dir = await makeDir();
     await runScaffold(dir, {
-      backlogManager: getBacklogManager("beads"),
+      issueTracker: getIssueTracker("beads"),
     });
 
     const envExample = await readFile(
@@ -245,6 +188,23 @@ describe("InitService scaffold", () => {
     );
     expect(dockerfile).toContain(SANDBOX_REPO_DIR);
   });
+
+  it.each([claudeCodeAgent, piAgent, codexAgent, opencodeAgent])(
+    "$name Dockerfile aligns UID/GID with -o so a host GID colliding with a reserved base-image GID (e.g. macOS staff=20) doesn't fail the build",
+    async (agent) => {
+      const dir = await makeDir();
+      await runScaffold(dir, { agent, model: agent.defaultModel });
+
+      const dockerfile = await readFile(
+        join(dir, ".sandcastle", "Dockerfile"),
+        "utf-8",
+      );
+      expect(dockerfile).toContain("groupmod -o -g $AGENT_GID node");
+      expect(dockerfile).toContain(
+        "usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node",
+      );
+    },
+  );
 
   it("claude-code Dockerfile template does not install pnpm or enable corepack", async () => {
     const dir = await makeDir();
@@ -486,6 +446,20 @@ describe("InitService scaffold", () => {
       expect(prompt).not.toContain("{{BRANCH}}");
     });
 
+    it("implement-prompt.md hints the issue list is pre-filtered and discourages unfiltered re-query", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { templateName: "sequential-reviewer" });
+
+      const prompt = await readFile(
+        join(dir, ".sandcastle", "implement-prompt.md"),
+        "utf-8",
+      );
+      expect(prompt).toContain(
+        "already been filtered to issues ready for work",
+      );
+      expect(prompt).toContain("Do not run your own unfiltered query");
+    });
+
     it("review-prompt.md contains {{BRANCH}} prompt argument", async () => {
       const dir = await makeDir();
       await runScaffold(dir, { templateName: "sequential-reviewer" });
@@ -528,7 +502,7 @@ describe("InitService scaffold", () => {
       expect(prompt).toContain("@.sandcastle/CODING_STANDARDS.md");
     });
 
-    it("review-prompt.md uses {{SOURCE_BRANCH}} instead of hardcoded main", async () => {
+    it("review-prompt.md diffs against {{TARGET_BRANCH}} (the fork point), not the branch itself", async () => {
       const dir = await makeDir();
       await runScaffold(dir, { templateName: "sequential-reviewer" });
 
@@ -536,10 +510,43 @@ describe("InitService scaffold", () => {
         join(dir, ".sandcastle", "review-prompt.md"),
         "utf-8",
       );
-      expect(prompt).toContain("git diff {{SOURCE_BRANCH}}...{{BRANCH}}");
-      expect(prompt).toContain("git log {{SOURCE_BRANCH}}..{{BRANCH}}");
+      expect(prompt).toContain("git diff {{TARGET_BRANCH}}...{{BRANCH}}");
+      expect(prompt).toContain("git log {{TARGET_BRANCH}}..{{BRANCH}}");
+      // SOURCE_BRANCH equals BRANCH at run time, so diffing against it is
+      // always empty — the prompt must use TARGET_BRANCH instead.
+      expect(prompt).not.toContain("{{SOURCE_BRANCH}}");
       expect(prompt).not.toContain("git diff main");
       expect(prompt).not.toContain("git log main");
+    });
+
+    it("main.mts runs the implementer for a single iteration (one issue per outer pass)", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { templateName: "sequential-reviewer" });
+
+      const mainTs = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+      const implementerSection = mainTs.slice(
+        mainTs.indexOf('name: "implementer"'),
+        mainTs.indexOf('name: "implementer"') + 200,
+      );
+      expect(implementerSection).toContain("maxIterations: 1");
+      expect(implementerSection).not.toContain("maxIterations: 100");
+    });
+
+    it("main.mts stops the loop when the implementer produces no commits", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { templateName: "sequential-reviewer" });
+
+      const mainTs = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+      const noCommitIndex = mainTs.indexOf("!implement.commits.length");
+      const section = mainTs.slice(noCommitIndex, noCommitIndex + 400);
+      expect(section).toContain("break");
+      expect(section).not.toContain("continue");
     });
   });
 
@@ -560,8 +567,25 @@ describe("InitService scaffold", () => {
   });
 
   describe("getNextStepsLines", () => {
+    const ghIssues = getIssueTracker("github-issues")!;
+    const customManager = getIssueTracker("custom")!;
+    // Non-custom issue tracker keeps the template-driven next steps; the
+    // custom branch is exercised separately below.
+    const next = (
+      template: string,
+      mainFilename: string,
+      packageManager: PackageManager = "npm",
+    ) =>
+      getNextStepsLines(
+        template,
+        mainFilename,
+        ghIssues,
+        claudeCodeAgent,
+        packageManager,
+      );
+
     it("blank template returns steps mentioning .env and main filename (not npx sandcastle run)", () => {
-      const lines = getNextStepsLines("blank", "main.mts");
+      const lines = next("blank", "main.mts");
       expect(lines.length).toBeGreaterThanOrEqual(2);
       const joined = lines.join("\n");
       expect(joined).toContain(".env");
@@ -570,7 +594,7 @@ describe("InitService scaffold", () => {
     });
 
     it("non-blank template returns steps mentioning .env, package.json scripts, and npm run sandcastle", () => {
-      const lines = getNextStepsLines("simple-loop", "main.mts");
+      const lines = next("simple-loop", "main.mts");
       const joined = lines.join("\n");
       expect(joined).toContain(".env");
       expect(joined).toContain("package.json");
@@ -578,81 +602,140 @@ describe("InitService scaffold", () => {
     });
 
     it("non-blank template includes a note about customizing the install command", () => {
-      const lines = getNextStepsLines("simple-loop", "main.mts");
+      const lines = next("simple-loop", "main.mts");
       const joined = lines.join("\n");
       expect(joined).toContain("npm install");
       expect(joined).toContain("onSandboxReady");
     });
 
     it("non-blank template mentions copyToWorktree and node_modules", () => {
-      const lines = getNextStepsLines("simple-loop", "main.mts");
+      const lines = next("simple-loop", "main.mts");
       const joined = lines.join("\n");
       expect(joined).toContain("copyToWorktree");
       expect(joined).toContain("node_modules");
     });
 
     it("blank template includes a step to customize prompt.md", () => {
-      const lines = getNextStepsLines("blank", "main.mts");
+      const lines = next("blank", "main.mts");
       const joined = lines.join("\n");
       expect(joined).toContain("prompt.md");
     });
 
     it("simple-loop template includes a step to read/customize prompt files", () => {
-      const lines = getNextStepsLines("simple-loop", "main.mts");
+      const lines = next("simple-loop", "main.mts");
       const joined = lines.join("\n");
       expect(joined).toContain("prompt");
       expect(joined).toMatch(/customiz|review|read/i);
     });
 
     it("sequential-reviewer template includes a step mentioning prompt files", () => {
-      const lines = getNextStepsLines("sequential-reviewer", "main.mts");
+      const lines = next("sequential-reviewer", "main.mts");
       const joined = lines.join("\n");
       expect(joined).toContain("prompt");
       expect(joined).toMatch(/customiz|review|read/i);
     });
 
     it("parallel-planner template includes a step mentioning prompt files", () => {
-      const lines = getNextStepsLines("parallel-planner", "main.mts");
+      const lines = next("parallel-planner", "main.mts");
       const joined = lines.join("\n");
       expect(joined).toContain("prompt");
       expect(joined).toMatch(/customiz|review|read/i);
     });
 
     it("returns at least 2 numbered steps for blank template", () => {
-      const lines = getNextStepsLines("blank", "main.mts");
+      const lines = next("blank", "main.mts");
       const numberedSteps = lines.filter((l) => /^\d+\./.test(l));
       expect(numberedSteps.length).toBeGreaterThanOrEqual(2);
     });
 
     it("returns at least 3 numbered steps for non-blank templates", () => {
-      const lines = getNextStepsLines("simple-loop", "main.mts");
+      const lines = next("simple-loop", "main.mts");
       const numberedSteps = lines.filter((l) => /^\d+\./.test(l));
       expect(numberedSteps.length).toBeGreaterThanOrEqual(3);
     });
 
     it("uses main.ts filename when passed", () => {
-      const lines = getNextStepsLines("blank", "main.ts");
+      const lines = next("blank", "main.ts");
       const joined = lines.join("\n");
       expect(joined).toContain("main.ts");
       expect(joined).not.toContain("main.mts");
     });
 
     it("reviewer template mentions CODING_STANDARDS.md customization", () => {
-      const lines = getNextStepsLines("sequential-reviewer", "main.mts");
+      const lines = next("sequential-reviewer", "main.mts");
       const joined = lines.join("\n");
       expect(joined).toContain("CODING_STANDARDS.md");
     });
 
     it("non-reviewer template does not mention CODING_STANDARDS.md", () => {
-      const lines = getNextStepsLines("simple-loop", "main.mts");
+      const lines = next("simple-loop", "main.mts");
       const joined = lines.join("\n");
       expect(joined).not.toContain("CODING_STANDARDS.md");
     });
 
     it("blank template does not mention CODING_STANDARDS.md", () => {
-      const lines = getNextStepsLines("blank", "main.mts");
+      const lines = next("blank", "main.mts");
       const joined = lines.join("\n");
       expect(joined).not.toContain("CODING_STANDARDS.md");
+    });
+
+    it("planner template includes a step to install a schema validator", () => {
+      const lines = next("parallel-planner", "main.mts");
+      const joined = lines.join("\n");
+      expect(joined).toContain("npm install zod");
+      expect(joined).toContain("standardschema.dev");
+    });
+
+    it("parallel-planner-with-review template includes the schema validator step", () => {
+      const lines = next("parallel-planner-with-review", "main.mts");
+      const joined = lines.join("\n");
+      expect(joined).toContain("npm install zod");
+    });
+
+    it("planner zod step uses the detected package manager's add command", () => {
+      expect(next("parallel-planner", "main.mts", "pnpm").join("\n")).toContain(
+        "pnpm add zod",
+      );
+      expect(next("parallel-planner", "main.mts", "yarn").join("\n")).toContain(
+        "yarn add zod",
+      );
+      expect(next("parallel-planner", "main.mts", "bun").join("\n")).toContain(
+        "bun add zod",
+      );
+    });
+
+    it("non-planner template does not mention installing zod", () => {
+      const lines = next("simple-loop", "main.mts");
+      const joined = lines.join("\n");
+      expect(joined).not.toContain("zod");
+    });
+
+    it("custom issue tracker points at the setup doc and the agent's setup command, regardless of template", () => {
+      const lines = getNextStepsLines(
+        "simple-loop",
+        "main.mts",
+        customManager,
+        claudeCodeAgent,
+        "npm",
+      );
+      const joined = lines.join("\n");
+      expect(joined).toContain("SETUP_ISSUE_TRACKER.md");
+      expect(joined).toContain(claudeCodeAgent.setupCommand);
+      // The template-driven steps must not leak into the custom branch.
+      expect(joined).not.toContain("npm run sandcastle");
+    });
+
+    it("custom issue tracker warns the setup command runs on the host", () => {
+      const lines = getNextStepsLines(
+        "blank",
+        "main.mts",
+        customManager,
+        getAgent("opencode")!,
+        "npm",
+      );
+      const joined = lines.join("\n");
+      expect(joined.toLowerCase()).toContain("host");
+      expect(joined).toContain(getAgent("opencode")!.setupCommand);
     });
   });
 
@@ -666,7 +749,7 @@ describe("InitService scaffold", () => {
     );
     expect(dockerfile).toContain("FROM node:22-bookworm");
     expect(dockerfile).toContain("@mariozechner/pi-coding-agent");
-    expect(dockerfile).not.toContain("{{BACKLOG_MANAGER_TOOLS}}");
+    expect(dockerfile).not.toContain("{{ISSUE_TRACKER_TOOLS}}");
   });
 
   it("scaffolds main.mts with pi factory import when pi agent selected", async () => {
@@ -691,7 +774,7 @@ describe("InitService scaffold", () => {
     );
     expect(dockerfile).toContain("FROM node:22-bookworm");
     expect(dockerfile).toContain("@openai/codex");
-    expect(dockerfile).not.toContain("{{BACKLOG_MANAGER_TOOLS}}");
+    expect(dockerfile).not.toContain("{{ISSUE_TRACKER_TOOLS}}");
   });
 
   it("scaffolds main.mts with codex factory import when codex agent selected", async () => {
@@ -703,6 +786,37 @@ describe("InitService scaffold", () => {
       "utf-8",
     );
     expect(mainTs).toContain('codex("gpt-5.4-mini")');
+    expect(mainTs).not.toContain("claudeCode");
+  });
+
+  it("scaffolds cursor agent with cursor Dockerfile", async () => {
+    const dir = await makeDir();
+    await runScaffold(dir, { agent: cursorAgent, model: "claude-sonnet-4-6" });
+
+    const dockerfile = await readFile(
+      join(dir, ".sandcastle", "Dockerfile"),
+      "utf-8",
+    );
+    expect(dockerfile).toContain("FROM node:22-bookworm");
+    expect(dockerfile).toContain("cursor.com/install");
+    expect(dockerfile).toContain('ENV PATH="/home/agent/.local/bin:$PATH"');
+    expect(dockerfile).toContain("ARG AGENT_UID=1000");
+    expect(dockerfile).toContain("ARG AGENT_GID=1000");
+    expect(dockerfile).toMatch(
+      /USER \$\{AGENT_UID\}:\$\{AGENT_GID\}[\s\S]*RUN curl https:\/\/cursor\.com\/install -fsS \| bash/,
+    );
+    expect(dockerfile).not.toContain("{{ISSUE_TRACKER_TOOLS}}");
+  });
+
+  it("scaffolds main.mts with cursor factory import when cursor agent selected", async () => {
+    const dir = await makeDir();
+    await runScaffold(dir, { agent: cursorAgent, model: "claude-sonnet-4-6" });
+
+    const mainTs = await readFile(
+      join(dir, ".sandcastle", "main.mts"),
+      "utf-8",
+    );
+    expect(mainTs).toContain('cursor("claude-sonnet-4-6")');
     expect(mainTs).not.toContain("claudeCode");
   });
 
@@ -902,13 +1016,13 @@ describe("InitService scaffold", () => {
       const configDir = join(dir, ".sandcastle");
       const dockerfile = await readFile(join(configDir, "Dockerfile"), "utf-8");
       expect(dockerfile).toContain("FROM node:22-bookworm");
-      expect(dockerfile).not.toContain("{{BACKLOG_MANAGER_TOOLS}}");
+      expect(dockerfile).not.toContain("{{ISSUE_TRACKER_TOOLS}}");
 
       const envExample = await readFile(
         join(configDir, ".env.example"),
         "utf-8",
       );
-      // Dynamic env: claude-code agent → ANTHROPIC_API_KEY, default backlog → GH_TOKEN
+      // Dynamic env: claude-code agent → ANTHROPIC_API_KEY, default issue tracker → GH_TOKEN
       expect(envExample).toContain("ANTHROPIC_API_KEY=");
       expect(envExample).toContain("GH_TOKEN=");
     });
@@ -1089,13 +1203,13 @@ describe("InitService scaffold", () => {
       const configDir = join(dir, ".sandcastle");
       const dockerfile = await readFile(join(configDir, "Dockerfile"), "utf-8");
       expect(dockerfile).toContain("FROM node:22-bookworm");
-      expect(dockerfile).not.toContain("{{BACKLOG_MANAGER_TOOLS}}");
+      expect(dockerfile).not.toContain("{{ISSUE_TRACKER_TOOLS}}");
 
       const envExample = await readFile(
         join(configDir, ".env.example"),
         "utf-8",
       );
-      // Dynamic env: claude-code agent → ANTHROPIC_API_KEY, default backlog → GH_TOKEN
+      // Dynamic env: claude-code agent → ANTHROPIC_API_KEY, default issue tracker → GH_TOKEN
       expect(envExample).toContain("ANTHROPIC_API_KEY=");
       expect(envExample).toContain("GH_TOKEN=");
     });
@@ -1134,7 +1248,7 @@ describe("InitService scaffold", () => {
       expect(prompt).toContain("@.sandcastle/CODING_STANDARDS.md");
     });
 
-    it("review-prompt.md uses {{SOURCE_BRANCH}} instead of hardcoded main", async () => {
+    it("review-prompt.md diffs against {{TARGET_BRANCH}} (the fork point), not the branch itself", async () => {
       const dir = await makeDir();
       await runScaffold(dir, { templateName: "parallel-planner-with-review" });
 
@@ -1142,24 +1256,27 @@ describe("InitService scaffold", () => {
         join(dir, ".sandcastle", "review-prompt.md"),
         "utf-8",
       );
-      expect(prompt).toContain("git diff {{SOURCE_BRANCH}}...{{BRANCH}}");
-      expect(prompt).toContain("git log {{SOURCE_BRANCH}}..{{BRANCH}}");
+      expect(prompt).toContain("git diff {{TARGET_BRANCH}}...{{BRANCH}}");
+      expect(prompt).toContain("git log {{TARGET_BRANCH}}..{{BRANCH}}");
+      // SOURCE_BRANCH equals BRANCH at run time, so diffing against it is
+      // always empty — the prompt must use TARGET_BRANCH instead.
+      expect(prompt).not.toContain("{{SOURCE_BRANCH}}");
       expect(prompt).not.toContain("git diff main");
       expect(prompt).not.toContain("git log main");
     });
   });
 
-  // --- Backlog manager ---
+  // --- Issue tracker ---
 
-  describe("Backlog manager registry", () => {
-    it("listBacklogManagers returns github-issues and beads", () => {
-      const managers = listBacklogManagers();
+  describe("Issue tracker registry", () => {
+    it("listIssueTrackers returns github-issues and beads", () => {
+      const managers = listIssueTrackers();
       expect(managers.some((m) => m.name === "github-issues")).toBe(true);
       expect(managers.some((m) => m.name === "beads")).toBe(true);
     });
 
-    it("getBacklogManager returns github-issues entry with expected templateArgs", () => {
-      const manager = getBacklogManager("github-issues");
+    it("getIssueTracker returns github-issues entry with expected templateArgs", () => {
+      const manager = getIssueTracker("github-issues");
       expect(manager).toBeDefined();
       expect(manager!.label).toBe("GitHub Issues");
       expect(manager!.templateArgs.LIST_TASKS_COMMAND).toContain(
@@ -1167,50 +1284,117 @@ describe("InitService scaffold", () => {
       );
       expect(manager!.templateArgs.LIST_TASKS_COMMAND).toContain("labels");
       expect(manager!.templateArgs.LIST_TASKS_COMMAND).toContain("comments");
+      expect(manager!.templateArgs.LIST_TASKS_COMMAND).toContain("--limit 100");
       expect(manager!.templateArgs.VIEW_TASK_COMMAND).toContain(
         "gh issue view",
       );
       expect(manager!.templateArgs.CLOSE_TASK_COMMAND).toContain(
         "gh issue close",
       );
-      expect(manager!.templateArgs.BACKLOG_MANAGER_TOOLS).toContain(
-        "GitHub CLI",
-      );
-      expect(manager!.templateArgs.BACKLOG_MANAGER_TOOLS).toContain("gh");
+      expect(manager!.templateArgs.ISSUE_TRACKER_TOOLS).toContain("GitHub CLI");
+      expect(manager!.templateArgs.ISSUE_TRACKER_TOOLS).toContain("gh");
     });
 
-    it("getBacklogManager returns beads entry with expected templateArgs", () => {
-      const manager = getBacklogManager("beads");
+    it("getIssueTracker returns beads entry with expected templateArgs", () => {
+      const manager = getIssueTracker("beads");
       expect(manager).toBeDefined();
       expect(manager!.label).toBe("Beads");
       expect(manager!.templateArgs.LIST_TASKS_COMMAND).toBe("bd ready --json");
       expect(manager!.templateArgs.VIEW_TASK_COMMAND).toContain("bd show");
       expect(manager!.templateArgs.CLOSE_TASK_COMMAND).toContain("bd close");
-      expect(manager!.templateArgs.BACKLOG_MANAGER_TOOLS).toContain("beads");
-      expect(manager!.templateArgs.BACKLOG_MANAGER_TOOLS).toContain("libicu72");
-      expect(manager!.templateArgs.BACKLOG_MANAGER_TOOLS).toContain(
+      expect(manager!.templateArgs.CLOSE_TASK_COMMAND).toContain("--reason=");
+      expect(manager!.templateArgs.ISSUE_TRACKER_TOOLS).toContain("beads");
+      expect(manager!.templateArgs.ISSUE_TRACKER_TOOLS).toContain("libicu72");
+      expect(manager!.templateArgs.ISSUE_TRACKER_TOOLS).toContain(
         "corepack enable",
       );
-      expect(manager!.templateArgs.BACKLOG_MANAGER_TOOLS).not.toContain("gh");
-      expect(manager!.templateArgs.BACKLOG_MANAGER_TOOLS).not.toContain(
+      expect(manager!.templateArgs.ISSUE_TRACKER_TOOLS).not.toContain("gh");
+      expect(manager!.templateArgs.ISSUE_TRACKER_TOOLS).not.toContain(
         "x86_64-linux-gnu",
       );
-      expect(manager!.templateArgs.BACKLOG_MANAGER_TOOLS).toContain(
+      expect(manager!.templateArgs.ISSUE_TRACKER_TOOLS).toContain(
         "dpkg-architecture -qDEB_HOST_MULTIARCH",
       );
     });
 
-    it("getBacklogManager returns undefined for unknown manager", () => {
-      expect(getBacklogManager("nonexistent")).toBeUndefined();
+    it("getIssueTracker returns custom entry with broken-until-configured templateArgs", () => {
+      const manager = getIssueTracker("custom");
+      expect(manager).toBeDefined();
+      expect(manager!.label).toBe("Custom");
+      // Only the list command is a real shell expression — it hard-fails the
+      // run (exit 1) and points at the setup doc.
+      expect(manager!.templateArgs.LIST_TASKS_COMMAND).toContain("exit 1");
+      expect(manager!.templateArgs.LIST_TASKS_COMMAND).toContain(
+        "SETUP_ISSUE_TRACKER.md",
+      );
+      expect(manager!.templateArgs.LIST_TASKS_COMMAND).toContain(">&2");
+      // View/close are inline text markers, not runnable commands.
+      expect(manager!.templateArgs.VIEW_TASK_COMMAND).toContain("view command");
+      expect(manager!.templateArgs.VIEW_TASK_COMMAND).toContain(
+        "SETUP_ISSUE_TRACKER.md",
+      );
+      expect(manager!.templateArgs.CLOSE_TASK_COMMAND).toContain(
+        "close command",
+      );
+      expect(manager!.templateArgs.CLOSE_TASK_COMMAND).toContain(
+        "SETUP_ISSUE_TRACKER.md",
+      );
+      // Dockerfile install block is a TODO comment pointing at the doc.
+      expect(manager!.templateArgs.ISSUE_TRACKER_TOOLS).toContain("TODO");
+      expect(manager!.templateArgs.ISSUE_TRACKER_TOOLS).toContain(
+        "SETUP_ISSUE_TRACKER.md",
+      );
+      expect(manager!.envExample).toContain("TODO");
+      expect(manager!.envExample).toContain("SETUP_ISSUE_TRACKER.md");
+    });
+
+    it("listIssueTrackers includes custom", () => {
+      const managers = listIssueTrackers();
+      expect(managers.some((m) => m.name === "custom")).toBe(true);
+    });
+
+    it("getIssueTracker returns undefined for unknown manager", () => {
+      expect(getIssueTracker("nonexistent")).toBeUndefined();
     });
   });
 
-  describe("Backlog manager scaffold", () => {
+  describe("Agent setupCommand", () => {
+    it.each([
+      {
+        name: "claude-code",
+        command: `claude "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"`,
+      },
+      {
+        name: "codex",
+        command: `codex "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"`,
+      },
+      {
+        name: "cursor",
+        command: `agent "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"`,
+      },
+      { name: "pi", command: `pi "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"` },
+      {
+        name: "opencode",
+        command: `opencode -p "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"`,
+      },
+      {
+        name: "copilot",
+        command: `copilot -i "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"`,
+      },
+    ])(
+      "$name has the expected interactive setupCommand",
+      ({ name, command }) => {
+        expect(getAgent(name)!.setupCommand).toBe(command);
+      },
+    );
+  });
+
+  describe("Issue tracker scaffold", () => {
     it("simple-loop with github-issues produces prompt with gh issue commands (richer version)", async () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "simple-loop",
-        backlogManager: getBacklogManager("github-issues"),
+        issueTracker: getIssueTracker("github-issues"),
       });
 
       const prompt = await readFile(
@@ -1229,7 +1413,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "simple-loop",
-        backlogManager: getBacklogManager("beads"),
+        issueTracker: getIssueTracker("beads"),
       });
 
       const prompt = await readFile(
@@ -1248,7 +1432,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "simple-loop",
-        backlogManager: getBacklogManager("beads"),
+        issueTracker: getIssueTracker("beads"),
       });
 
       const prompt = await readFile(
@@ -1262,7 +1446,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "simple-loop",
-        backlogManager: getBacklogManager("github-issues"),
+        issueTracker: getIssueTracker("github-issues"),
         createLabel: true,
       });
 
@@ -1277,7 +1461,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "simple-loop",
-        backlogManager: getBacklogManager("github-issues"),
+        issueTracker: getIssueTracker("github-issues"),
         createLabel: false,
       });
 
@@ -1289,7 +1473,7 @@ describe("InitService scaffold", () => {
       expect(prompt).toContain("gh issue list");
     });
 
-    it("scaffold without backlogManager defaults to github-issues", async () => {
+    it("scaffold without issueTracker defaults to github-issues", async () => {
       const dir = await makeDir();
       await runScaffold(dir, { templateName: "simple-loop" });
 
@@ -1313,13 +1497,131 @@ describe("InitService scaffold", () => {
       expect(prompt).not.toContain("GitHub issue");
     });
 
+    it("simple-loop prompt hints the issue list is pre-filtered and discourages unfiltered re-query", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { templateName: "simple-loop" });
+
+      const prompt = await readFile(
+        join(dir, ".sandcastle", "prompt.md"),
+        "utf-8",
+      );
+      expect(prompt).toContain(
+        "already been filtered to issues ready for work",
+      );
+      expect(prompt).toContain("Do not run your own unfiltered query");
+    });
+
+    // --- custom issue tracker ---
+
+    const customManager = getIssueTracker("custom");
+
+    it("custom scaffolds .sandcastle/SETUP_ISSUE_TRACKER.md", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        templateName: "simple-loop",
+        issueTracker: customManager,
+      });
+
+      const setup = await readFile(
+        join(dir, ".sandcastle", "SETUP_ISSUE_TRACKER.md"),
+        "utf-8",
+      );
+      // Goal + interview + the three commands the agent must produce.
+      expect(setup).toContain("list");
+      expect(setup).toContain("view");
+      expect(setup).toContain("close");
+      // It must explicitly tell the agent to remove the exit 1 sentinel.
+      expect(setup).toContain("exit 1");
+      // The markers the agent will actually find in the scaffolded files.
+      expect(setup).toContain(customManager!.templateArgs.VIEW_TASK_COMMAND);
+      expect(setup).toContain(customManager!.templateArgs.CLOSE_TASK_COMMAND);
+    });
+
+    it("custom SETUP doc references the chosen provider's build-image command", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        templateName: "simple-loop",
+        issueTracker: customManager,
+        sandboxProvider: getSandboxProvider("podman"),
+      });
+
+      const setup = await readFile(
+        join(dir, ".sandcastle", "SETUP_ISSUE_TRACKER.md"),
+        "utf-8",
+      );
+      expect(setup).toContain("sandcastle podman build-image");
+      expect(setup).not.toContain("sandcastle docker build-image");
+    });
+
+    it("non-custom issue trackers do not scaffold SETUP_ISSUE_TRACKER.md", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        templateName: "simple-loop",
+        issueTracker: getIssueTracker("github-issues"),
+      });
+
+      const { access } = await import("node:fs/promises");
+      await expect(
+        access(join(dir, ".sandcastle", "SETUP_ISSUE_TRACKER.md")),
+      ).rejects.toThrow();
+    });
+
+    it("custom Dockerfile leaves a TODO install block instead of a real CLI", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        templateName: "simple-loop",
+        issueTracker: customManager,
+      });
+
+      const dockerfile = await readFile(
+        join(dir, ".sandcastle", "Dockerfile"),
+        "utf-8",
+      );
+      expect(dockerfile).toContain("TODO");
+      expect(dockerfile).toContain("SETUP_ISSUE_TRACKER.md");
+      expect(dockerfile).not.toContain("{{ISSUE_TRACKER_TOOLS}}");
+      // No real issue-tracker CLI baked in yet.
+      expect(dockerfile).not.toContain("GitHub CLI");
+    });
+
+    it("custom simple-loop prompt hard-fails the list command with a pointer to the doc", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        templateName: "simple-loop",
+        issueTracker: customManager,
+      });
+
+      const prompt = await readFile(
+        join(dir, ".sandcastle", "prompt.md"),
+        "utf-8",
+      );
+      expect(prompt).toContain("exit 1");
+      expect(prompt).toContain("SETUP_ISSUE_TRACKER.md");
+      expect(prompt).not.toContain("{{LIST_TASKS_COMMAND}}");
+    });
+
+    it("custom .env.example carries a TODO for tracker env vars", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        templateName: "simple-loop",
+        issueTracker: customManager,
+      });
+
+      const envExample = await readFile(
+        join(dir, ".sandcastle", ".env.example"),
+        "utf-8",
+      );
+      expect(envExample).toContain("TODO");
+      expect(envExample).toContain("SETUP_ISSUE_TRACKER.md");
+    });
+
     // --- sequential-reviewer ---
 
     it("sequential-reviewer with github-issues produces implement-prompt with gh issue commands", async () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "sequential-reviewer",
-        backlogManager: getBacklogManager("github-issues"),
+        issueTracker: getIssueTracker("github-issues"),
       });
 
       const prompt = await readFile(
@@ -1338,7 +1640,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "sequential-reviewer",
-        backlogManager: getBacklogManager("beads"),
+        issueTracker: getIssueTracker("beads"),
       });
 
       const prompt = await readFile(
@@ -1370,7 +1672,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "blank",
-        backlogManager: getBacklogManager("github-issues"),
+        issueTracker: getIssueTracker("github-issues"),
       });
 
       const prompt = await readFile(
@@ -1385,7 +1687,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "blank",
-        backlogManager: getBacklogManager("beads"),
+        issueTracker: getIssueTracker("beads"),
       });
 
       const prompt = await readFile(
@@ -1403,7 +1705,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "parallel-planner",
-        backlogManager: getBacklogManager("github-issues"),
+        issueTracker: getIssueTracker("github-issues"),
       });
 
       const planPrompt = await readFile(
@@ -1420,7 +1722,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "parallel-planner",
-        backlogManager: getBacklogManager("beads"),
+        issueTracker: getIssueTracker("beads"),
       });
 
       const planPrompt = await readFile(
@@ -1442,11 +1744,29 @@ describe("InitService scaffold", () => {
         join(dir, ".sandcastle", "main.mts"),
         "utf-8",
       );
-      expect(main).toContain("id: string");
+      expect(main).toContain("id: z.string()");
       expect(main).toContain("TASK_ID: issue.id");
       expect(main).not.toContain("number: number");
       expect(main).not.toContain("ISSUE_NUMBER");
       expect(main).not.toContain("`  #${");
+    });
+
+    it("parallel-planner main.mts uses Output.object for the plan", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        templateName: "parallel-planner",
+      });
+
+      const main = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+      expect(main).toContain("Output.object");
+      expect(main).toContain('tag: "plan"');
+      expect(main).toContain("plan.output.issues");
+      expect(main).toContain('from "zod"');
+      expect(main).toContain("z.object");
+      expect(main).not.toContain("extractPlanIssues");
     });
 
     it("parallel-planner implement-prompt uses TASK_ID placeholder", async () => {
@@ -1467,7 +1787,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "parallel-planner",
-        backlogManager: getBacklogManager("github-issues"),
+        issueTracker: getIssueTracker("github-issues"),
       });
 
       const prompt = await readFile(
@@ -1482,7 +1802,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "parallel-planner",
-        backlogManager: getBacklogManager("beads"),
+        issueTracker: getIssueTracker("beads"),
       });
 
       const prompt = await readFile(
@@ -1498,7 +1818,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "parallel-planner",
-        backlogManager: getBacklogManager("github-issues"),
+        issueTracker: getIssueTracker("github-issues"),
       });
 
       const prompt = await readFile(
@@ -1513,7 +1833,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "parallel-planner",
-        backlogManager: getBacklogManager("beads"),
+        issueTracker: getIssueTracker("beads"),
       });
 
       const prompt = await readFile(
@@ -1556,7 +1876,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "parallel-planner-with-review",
-        backlogManager: getBacklogManager("github-issues"),
+        issueTracker: getIssueTracker("github-issues"),
       });
 
       const planPrompt = await readFile(
@@ -1573,7 +1893,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "parallel-planner-with-review",
-        backlogManager: getBacklogManager("beads"),
+        issueTracker: getIssueTracker("beads"),
       });
 
       const planPrompt = await readFile(
@@ -1595,11 +1915,29 @@ describe("InitService scaffold", () => {
         join(dir, ".sandcastle", "main.mts"),
         "utf-8",
       );
-      expect(main).toContain("id: string");
+      expect(main).toContain("id: z.string()");
       expect(main).toContain("TASK_ID: issue.id");
       expect(main).not.toContain("number: number");
       expect(main).not.toContain("ISSUE_NUMBER");
       expect(main).not.toContain("`  #${");
+    });
+
+    it("parallel-planner-with-review main.mts uses Output.object for the plan", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        templateName: "parallel-planner-with-review",
+      });
+
+      const main = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+      expect(main).toContain("Output.object");
+      expect(main).toContain('tag: "plan"');
+      expect(main).toContain("plan.output.issues");
+      expect(main).toContain('from "zod"');
+      expect(main).toContain("z.object");
+      expect(main).not.toContain("extractPlanIssues");
     });
 
     it("parallel-planner-with-review implement-prompt does not contain close-issue instruction", async () => {
@@ -1634,7 +1972,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "parallel-planner-with-review",
-        backlogManager: getBacklogManager("github-issues"),
+        issueTracker: getIssueTracker("github-issues"),
       });
 
       const prompt = await readFile(
@@ -1649,7 +1987,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "parallel-planner-with-review",
-        backlogManager: getBacklogManager("beads"),
+        issueTracker: getIssueTracker("beads"),
       });
 
       const prompt = await readFile(
@@ -1665,7 +2003,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "parallel-planner-with-review",
-        backlogManager: getBacklogManager("github-issues"),
+        issueTracker: getIssueTracker("github-issues"),
       });
 
       const prompt = await readFile(
@@ -1680,7 +2018,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       await runScaffold(dir, {
         templateName: "parallel-planner-with-review",
-        backlogManager: getBacklogManager("beads"),
+        issueTracker: getIssueTracker("beads"),
       });
 
       const prompt = await readFile(
@@ -1705,12 +2043,12 @@ describe("InitService scaffold", () => {
       expect(prompt).not.toContain("GitHub issue");
     });
 
-    // --- Dockerfile backlog manager tools ---
+    // --- Dockerfile issue tracker tools ---
 
     it("scaffold with github-issues produces Dockerfile with GitHub CLI install", async () => {
       const dir = await makeDir();
       await runScaffold(dir, {
-        backlogManager: getBacklogManager("github-issues"),
+        issueTracker: getIssueTracker("github-issues"),
       });
 
       const dockerfile = await readFile(
@@ -1719,13 +2057,13 @@ describe("InitService scaffold", () => {
       );
       expect(dockerfile).toContain("GitHub CLI");
       expect(dockerfile).toContain("gh");
-      expect(dockerfile).not.toContain("{{BACKLOG_MANAGER_TOOLS}}");
+      expect(dockerfile).not.toContain("{{ISSUE_TRACKER_TOOLS}}");
     });
 
     it("scaffold with beads produces Dockerfile with beads install (no GitHub CLI)", async () => {
       const dir = await makeDir();
       await runScaffold(dir, {
-        backlogManager: getBacklogManager("beads"),
+        issueTracker: getIssueTracker("beads"),
       });
 
       const dockerfile = await readFile(
@@ -1736,7 +2074,7 @@ describe("InitService scaffold", () => {
       expect(dockerfile).toContain("libicu72");
       expect(dockerfile).toContain("corepack enable");
       expect(dockerfile).not.toContain("GitHub CLI");
-      expect(dockerfile).not.toContain("{{BACKLOG_MANAGER_TOOLS}}");
+      expect(dockerfile).not.toContain("{{ISSUE_TRACKER_TOOLS}}");
       expect(dockerfile).not.toContain("x86_64-linux-gnu");
       expect(dockerfile).toContain("dpkg-architecture -qDEB_HOST_MULTIARCH");
     });
@@ -1745,7 +2083,7 @@ describe("InitService scaffold", () => {
       const dir = await makeDir();
       const podmanProvider = getSandboxProvider("podman")!;
       await runScaffold(dir, {
-        backlogManager: getBacklogManager("beads"),
+        issueTracker: getIssueTracker("beads"),
         sandboxProvider: podmanProvider,
       });
 
@@ -1756,7 +2094,7 @@ describe("InitService scaffold", () => {
       expect(containerfile).toContain("beads");
       expect(containerfile).toContain("libicu72");
       expect(containerfile).not.toContain("GitHub CLI");
-      expect(containerfile).not.toContain("{{BACKLOG_MANAGER_TOOLS}}");
+      expect(containerfile).not.toContain("{{ISSUE_TRACKER_TOOLS}}");
       expect(containerfile).not.toContain("x86_64-linux-gnu");
       expect(containerfile).toContain("dpkg-architecture -qDEB_HOST_MULTIARCH");
     });
@@ -1766,7 +2104,7 @@ describe("InitService scaffold", () => {
       await runScaffold(dir, {
         agent: piAgent,
         model: "claude-sonnet-4-6",
-        backlogManager: getBacklogManager("beads"),
+        issueTracker: getIssueTracker("beads"),
       });
 
       const dockerfile = await readFile(
@@ -1913,7 +2251,7 @@ describe("InitService scaffold", () => {
         "utf-8",
       );
       expect(dockerfile).toContain("FROM node:22-bookworm");
-      expect(dockerfile).not.toContain("{{BACKLOG_MANAGER_TOOLS}}");
+      expect(dockerfile).not.toContain("{{ISSUE_TRACKER_TOOLS}}");
     });
 
     it("selecting podman writes Containerfile to .sandcastle/", async () => {
@@ -1925,7 +2263,7 @@ describe("InitService scaffold", () => {
         "utf-8",
       );
       expect(containerfile).toContain("FROM node:22-bookworm");
-      expect(containerfile).not.toContain("{{BACKLOG_MANAGER_TOOLS}}");
+      expect(containerfile).not.toContain("{{ISSUE_TRACKER_TOOLS}}");
     });
 
     it("selecting podman does not write Dockerfile", async () => {
@@ -1947,35 +2285,53 @@ describe("InitService scaffold", () => {
         access(join(dir, ".sandcastle", "Containerfile")),
       ).rejects.toThrow();
     });
-  });
-});
 
-// ---------------------------------------------------------------------------
-// Sandbox provider registry
-// ---------------------------------------------------------------------------
+    it("selecting podman rewrites the main file to import and call podman", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { sandboxProvider: podmanProvider });
 
-describe("Sandbox provider registry", () => {
-  it("listSandboxProviders returns docker and podman", () => {
-    const providers = listSandboxProviders();
-    expect(providers.some((p) => p.name === "docker")).toBe(true);
-    expect(providers.some((p) => p.name === "podman")).toBe(true);
-  });
+      const mainTs = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+      expect(mainTs).toContain(
+        'import { podman } from "@ai-hero/sandcastle/sandboxes/podman"',
+      );
+      expect(mainTs).toContain("sandbox: podman()");
+      expect(mainTs).not.toContain("docker");
+    });
 
-  it("getSandboxProvider returns docker entry", () => {
-    const provider = getSandboxProvider("docker");
-    expect(provider).toBeDefined();
-    expect(provider!.containerfileName).toBe("Dockerfile");
-    expect(provider!.cliNamespace).toBe("docker");
-  });
+    it("selecting podman rewrites every docker() call site", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        sandboxProvider: podmanProvider,
+        templateName: "parallel-planner",
+      });
 
-  it("getSandboxProvider returns podman entry", () => {
-    const provider = getSandboxProvider("podman");
-    expect(provider).toBeDefined();
-    expect(provider!.containerfileName).toBe("Containerfile");
-    expect(provider!.cliNamespace).toBe("podman");
-  });
+      const mainTs = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+      expect(mainTs).not.toContain("docker");
+      // parallel-planner calls the factory three times
+      expect(mainTs.match(/sandbox: podman\(\)/g)).toHaveLength(3);
+    });
 
-  it("getSandboxProvider returns undefined for unknown provider", () => {
-    expect(getSandboxProvider("nonexistent")).toBeUndefined();
+    it("selecting docker leaves the main file importing and calling docker", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { sandboxProvider: dockerProvider });
+
+      const mainTs = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+      expect(mainTs).toContain(
+        'import { run, claudeCode } from "@ai-hero/sandcastle"',
+      );
+      expect(mainTs).toContain(
+        'import { docker } from "@ai-hero/sandcastle/sandboxes/docker"',
+      );
+      expect(mainTs).toContain("sandbox: docker()");
+    });
   });
 });

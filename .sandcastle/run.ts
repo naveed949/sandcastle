@@ -61,7 +61,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
         await using sandbox = await sandcastle.createSandbox({
           sandbox: docker(),
           branch: issue.branch,
-          copyToWorkspace: ["node_modules"],
+          copyToWorktree: ["node_modules"],
           hooks: {
             sandbox: {
               onSandboxReady: [{ command: "npm install && npm run build" }],

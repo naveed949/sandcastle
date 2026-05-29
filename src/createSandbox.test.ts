@@ -1,5 +1,5 @@
 import { exec } from "node:child_process";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1422,6 +1422,41 @@ describe("createSandbox", () => {
       expect(worktreeHead.trim()).toBe(baseSha.trim());
     } finally {
       await sandbox.close();
+      await rm(hostDir, { recursive: true, force: true });
+    }
+  });
+
+  it("removes the worktree when sandbox start fails (no orphan)", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "sandbox-test-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "init.txt", "init", "initial commit");
+
+    const failingProvider = createBindMountSandboxProvider({
+      name: "failing-create",
+      create: async () => {
+        throw new Error("Image 'sandcastle:test' not found locally");
+      },
+    });
+
+    try {
+      await expect(
+        createSandbox({
+          branch: "test-start-fails",
+          sandbox: failingProvider,
+          cwd: hostDir,
+        }),
+      ).rejects.toThrow();
+
+      // The worktree must not be left orphaned on disk.
+      const worktreesDir = join(hostDir, ".sandcastle", "worktrees");
+      const leftover = existsSync(worktreesDir)
+        ? readdirSync(worktreesDir)
+        : [];
+      expect(leftover).toHaveLength(0);
+
+      const { stdout } = await execAsync("git worktree list", { cwd: hostDir });
+      expect(stdout).not.toContain(".sandcastle/worktrees");
+    } finally {
       await rm(hostDir, { recursive: true, force: true });
     }
   });

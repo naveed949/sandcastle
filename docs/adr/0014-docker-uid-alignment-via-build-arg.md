@@ -18,9 +18,11 @@ ARG AGENT_GID=1000
 The existing `usermod -d /home/agent -m -l agent node` is replaced with:
 
 ```dockerfile
-RUN groupmod -g $AGENT_GID node && usermod -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
+RUN groupmod -o -g $AGENT_GID node && usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
 USER ${AGENT_UID}:${AGENT_GID}
 ```
+
+The `-o` (`--non-unique`) flag lets the alignment succeed when the host GID/UID collides with one already present in the base image. On macOS the primary group is `staff` = GID 20, which `node:22-bookworm` already assigns to `dialout`; without `-o`, `groupmod -g 20 node` fails with `GID '20' already exists` and the build dies. `dialout` is unused inside an agent container, so sharing the GID is harmless and the agent user's primary group still lands on the host GID, matching the bind-mounted worktree owner.
 
 The `USER` directive is now numeric (`${AGENT_UID}:${AGENT_GID}`) instead of `USER agent`, so that `docker image inspect --format '{{.Config.User}}'` returns a parseable `UID:GID` for the pre-flight check.
 

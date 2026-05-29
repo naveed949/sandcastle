@@ -80,6 +80,8 @@ export interface StructuredOutputErrorOptions {
   readonly commits: { sha: string }[];
   readonly branch: string;
   readonly preservedWorktreePath?: string;
+  readonly sessionId?: string;
+  readonly sessionFilePath?: string;
 }
 
 /**
@@ -92,6 +94,27 @@ export interface StructuredOutputErrorOptions {
  *
  * The error carries `commits`, `branch`, and optionally `preservedWorktreePath`
  * so callers can decide recovery without losing the run's side effects.
+ *
+ * It also carries `sessionId` (and `sessionFilePath` when the session was
+ * captured to the host) of the iteration that produced the bad output, so a
+ * caller can resume that same session and ask the agent to re-emit corrected
+ * output:
+ *
+ * ```ts
+ * try {
+ *   return await run({ ...opts, output });
+ * } catch (e) {
+ *   if (e instanceof StructuredOutputError && e.sessionId) {
+ *     return await run({
+ *       ...opts,
+ *       output,
+ *       resumeSession: e.sessionId,
+ *       prompt: feedback(e),
+ *     });
+ *   }
+ *   throw e;
+ * }
+ * ```
  */
 export class StructuredOutputError extends Error {
   readonly tag: string;
@@ -100,6 +123,10 @@ export class StructuredOutputError extends Error {
   readonly commits: { sha: string }[];
   readonly branch: string;
   readonly preservedWorktreePath?: string;
+  /** Session ID of the iteration that produced the bad output, when available. */
+  readonly sessionId?: string;
+  /** Host path to the captured session JSONL, when the session was captured. */
+  readonly sessionFilePath?: string;
 
   constructor(message: string, options: StructuredOutputErrorOptions) {
     super(message);
@@ -110,5 +137,7 @@ export class StructuredOutputError extends Error {
     this.commits = options.commits;
     this.branch = options.branch;
     this.preservedWorktreePath = options.preservedWorktreePath;
+    this.sessionId = options.sessionId;
+    this.sessionFilePath = options.sessionFilePath;
   }
 }

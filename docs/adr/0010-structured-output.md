@@ -8,7 +8,7 @@ Structured output is a separate domain concept from the **completion signal**. T
 
 - **`maxIterations === 1` only.** `run()` throws at entry if `output` is set and `maxIterations !== 1`. The current iteration/completion-signal API is expected to split off `run()` in future; restricting structured output to single-shot runs from day one keeps those users out of that future blast radius. (See the deferred-work issue tracking the split.)
 - **Caller owns the prompt-side instruction.** Sandcastle does not inject any text describing the expected tag or schema. `run()` throws at entry if the resolved prompt does not contain the configured opening tag — early protection against misconfiguration.
-- **Throw on failure.** Missing tag, invalid JSON, or schema validation failure throws a `StructuredOutputError` carrying `tag`, `rawMatched`, `cause`, `commits`, `branch`, and `preservedWorktreePath?`. No auto-cleanup of worktree or branch — the caller decides recovery.
+- **Throw on failure.** Missing tag, invalid JSON, or schema validation failure throws a `StructuredOutputError` carrying `tag`, `rawMatched`, `cause`, `commits`, `branch`, `preservedWorktreePath?`, and the failed iteration's `sessionId?`/`sessionFilePath?` (see "Recovery surface" below). No auto-cleanup of worktree or branch — the caller decides recovery.
 - **Last match wins** when the tag occurs multiple times in stdout. Self-correction by the agent is the realistic case, and end-first scanning matches how `Orchestrator.ts` already locates the completion signal.
 - **Fence-aware extraction.** The contents of the tag are stripped of leading/trailing whitespace and unwrapped from an optional ` ```json ... ``` ` (or bare ` ``` ... ``` `) fence before `JSON.parse`. No other tolerance — invalid JSON throws.
 - **`run()` only.** Not available on `interactive()` or `wt.interactive()`; type-level exclusion, no runtime guard needed.
@@ -30,3 +30,11 @@ Structured output is a separate domain concept from the **completion signal**. T
 - Two new entry-time validations on `run()`: (1) `output` set with `maxIterations !== 1` throws; (2) `output` set with the tag absent from the resolved prompt throws.
 - `StructuredOutputError` is a new public error type; callers can `instanceof`-narrow to recover.
 - The completion signal mechanism in `Orchestrator.ts` is unchanged. Structured-output extraction is a separate pass over the same stdout.
+
+## Amendment — recovery surface: failed session is resumable
+
+`StructuredOutputError` originally carried `commits`/`branch`/`preservedWorktreePath` "so callers can decide recovery without losing the run's side effects" — but it omitted the run's `sessionId`. Resuming the session **is** recovery: a caller wants to make a single combined call with `output`, and on failure resume that same session with feedback ("you emitted X, it failed because Y; re-emit corrected output") rather than redo the work. Without the session id that pattern was impossible — the only workaround was scavenging the newest session file by mtime, which is fragile.
+
+The error now also carries `sessionId?` and `sessionFilePath?`, populated from the iteration that produced the bad output (structured-output runs are single-iteration, so `iterations.at(-1)`). Both are optional: `sessionId` is absent for non-Claude agents that don't emit one, and `sessionFilePath` is only set when the session was captured to the host. The fields are additive and backward compatible.
+
+Alternatives considered and rejected: (B) an `onIteration`/`onSessionId` callback on `run()` to surface the id before the throw — broader surface, and attaching to the error covers this use case more simply; (C) a caller-supplied `--session-id` passthrough on `claudeCode` so the id is known in advance — generally useful but a larger surface and not required once the error exposes the id. Retry/feedback orchestration stays out of Sandcastle: the error exposes what's needed for recovery, and the loop lives in the consumer.

@@ -185,8 +185,27 @@ describe("extractStructuredOutput — Output.object", () => {
     }
   });
 
+  it("passes sessionId and sessionFilePath through to the error", async () => {
+    const stdout = "no tag";
+    const def = Output.object({ tag: "result", schema: passthrough() });
+    try {
+      await extractStructuredOutput(stdout, def, {
+        ...baseContext,
+        sessionId: "session-123",
+        sessionFilePath: "/home/u/.claude/projects/x/session-123.jsonl",
+      });
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      const soe = err as StructuredOutputError;
+      expect(soe.sessionId).toBe("session-123");
+      expect(soe.sessionFilePath).toBe(
+        "/home/u/.claude/projects/x/session-123.jsonl",
+      );
+    }
+  });
+
   it("handles whitespace around JSON inside tags", async () => {
-    const stdout = "<result>  \n  {\"a\": 1}  \n  </result>";
+    const stdout = '<result>  \n  {"a": 1}  \n  </result>';
     const def = Output.object({ tag: "result", schema: passthrough() });
     const value = await extractStructuredOutput(stdout, def, baseContext);
     expect(value).toEqual({ a: 1 });
@@ -298,6 +317,8 @@ describe("StructuredOutputError", () => {
       commits: [{ sha: "abc" }],
       branch: "my-branch",
       preservedWorktreePath: "/tmp/wt",
+      sessionId: "sess-1",
+      sessionFilePath: "/tmp/sess-1.jsonl",
     });
     expect(err.tag).toBe("result");
     expect(err.rawMatched).toBe("raw text");
@@ -305,6 +326,19 @@ describe("StructuredOutputError", () => {
     expect(err.commits).toEqual([{ sha: "abc" }]);
     expect(err.branch).toBe("my-branch");
     expect(err.preservedWorktreePath).toBe("/tmp/wt");
+    expect(err.sessionId).toBe("sess-1");
+    expect(err.sessionFilePath).toBe("/tmp/sess-1.jsonl");
+  });
+
+  it("leaves sessionId and sessionFilePath undefined when not provided", () => {
+    const err = new StructuredOutputError("msg", {
+      tag: "result",
+      rawMatched: undefined,
+      commits: [],
+      branch: "main",
+    });
+    expect(err.sessionId).toBeUndefined();
+    expect(err.sessionFilePath).toBeUndefined();
   });
 });
 

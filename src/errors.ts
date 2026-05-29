@@ -4,6 +4,9 @@ import { Data, Duration, Effect } from "effect";
 export class ExecError extends Data.TaggedError("ExecError")<{
   readonly message: string;
   readonly command: string;
+  /** Exit code of the failed command, when the command ran but returned non-zero.
+   *  Absent when the failure was the exec itself (e.g. the SDK threw before a code was available). */
+  readonly exitCode?: number;
 }> {}
 
 /** Command execution failed on the host */

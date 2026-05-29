@@ -1009,6 +1009,65 @@ describe("structured output entry-time validation", () => {
   });
 });
 
+describe("structured output error carries the failed session id", () => {
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    consoleSpy.mockRestore();
+  });
+
+  // A sandbox whose agent invocation (the exec that receives `onLine`) streams
+  // a Claude Code init line carrying a session id, followed by a result line
+  // whose <result> tag holds malformed JSON. Extraction then fails and the
+  // session id must survive onto the thrown error.
+  const sessionEmittingSandbox = createBindMountSandboxProvider({
+    name: "session-emitting",
+    create: async () => ({
+      worktreePath: "/home/agent/workspace",
+      exec: async (
+        _command: string,
+        options?: { onLine?: (line: string) => void },
+      ) => {
+        if (options?.onLine) {
+          options.onLine(
+            '{"type":"system","subtype":"init","session_id":"sess-abc-123"}',
+          );
+          options.onLine(
+            '{"type":"result","result":"<result>not valid json</result>"}',
+          );
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+      copyFileIn: async () => {},
+      copyFileOut: async () => {},
+      close: async () => {},
+    }),
+  });
+
+  it("threads iterations[].sessionId onto StructuredOutputError", async () => {
+    // captureSessions: false keeps the session id from the stream without
+    // attempting to transfer a (nonexistent) session file off the sandbox.
+    try {
+      await run({
+        agent: claudeCode("claude-opus-4-7", { captureSessions: false }),
+        sandbox: sessionEmittingSandbox,
+        prompt: "emit your answer inside <result> tags",
+        branchStrategy: { type: "head" },
+        output: Output.object({ tag: "result", schema: mockSchema() }),
+      });
+      expect.unreachable("should have thrown StructuredOutputError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(StructuredOutputError);
+      const soe = err as StructuredOutputError;
+      expect(soe.sessionId).toBe("sess-abc-123");
+      expect(soe.rawMatched).toBe("not valid json");
+    }
+  });
+});
+
 describe("RunOptions with output", () => {
   it("allows output field on RunOptions", () => {
     const opts: RunOptions = {

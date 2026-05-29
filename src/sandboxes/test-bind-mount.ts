@@ -17,6 +17,7 @@ import {
   type BindMountSandboxProvider,
   type ExecResult,
 } from "../SandboxProvider.js";
+import { BoundedTail, MAX_TAIL_CHARS } from "../boundedTail.js";
 
 /**
  * Create a filesystem-based test bind-mount sandbox provider.
@@ -52,17 +53,17 @@ export const testBindMount = (): BindMountSandboxProvider =>
                 stdio: ["ignore", "pipe", "pipe"],
               });
 
-              const stdoutChunks: string[] = [];
-              const stderrChunks: string[] = [];
+              const stdoutTail = new BoundedTail(MAX_TAIL_CHARS, "\n");
+              const stderrTail = new BoundedTail(MAX_TAIL_CHARS, "");
 
               const rl = createInterface({ input: proc.stdout! });
               rl.on("line", (line) => {
-                stdoutChunks.push(line);
+                stdoutTail.push(line);
                 onLine(line);
               });
 
               proc.stderr!.on("data", (chunk: Buffer) => {
-                stderrChunks.push(chunk.toString());
+                stderrTail.push(chunk.toString());
               });
 
               proc.on("error", (error) => {
@@ -71,8 +72,8 @@ export const testBindMount = (): BindMountSandboxProvider =>
 
               proc.on("close", (code) => {
                 resolve({
-                  stdout: stdoutChunks.join("\n"),
-                  stderr: stderrChunks.join(""),
+                  stdout: stdoutTail.toString(),
+                  stderr: stderrTail.toString(),
                   exitCode: code ?? 0,
                 });
               });

@@ -3,8 +3,10 @@ import { FileSystem } from "@effect/platform";
 import { NodeFileSystem } from "@effect/platform-node";
 import { exec } from "node:child_process";
 import {
+  chmod,
   mkdir,
   mkdtemp,
+  readFile,
   readdir,
   stat,
   symlink,
@@ -17,6 +19,7 @@ import { describe, expect, it } from "vitest";
 import {
   create,
   generateTempBranchName,
+  getCurrentBranch,
   hasUncommittedChanges,
   pruneStale,
   remove,
@@ -574,5 +577,46 @@ describe("WorktreeManager.hasUncommittedChanges", () => {
     expect(result).toBe(true);
 
     await run(remove(path));
+  });
+});
+
+describe("WorktreeManager git locale", () => {
+  // Regression for #595: this module matches git's stderr (e.g. "invalid
+  // reference") to decide control flow. git localizes those strings via
+  // gettext, so in a non-English locale the matches silently fail and worktree
+  // creation breaks. execGit must force LC_ALL=C so git always emits English.
+  //
+  // No non-English locale is installed on CI, so git would emit English
+  // regardless and a plain behavioral test could not fail. Instead we shadow
+  // the real `git` binary with a shim that records the LC_ALL it received,
+  // asserting the module invokes git in the C locale even when the parent
+  // process is set to a different one.
+  it("invokes git with LC_ALL=C even when the process locale is non-English", async () => {
+    if (process.platform === "win32") return; // POSIX shell shim
+    const repoDir = await setupRepo();
+    const shimDir = await mkdtemp(join(tmpdir(), "wt-git-shim-"));
+    const logPath = join(shimDir, "lc_all.log");
+    const gitShim = join(shimDir, "git");
+    await writeFile(
+      gitShim,
+      `#!/bin/sh\nprintf '%s' "\${LC_ALL-}" > "${logPath}"\necho main\n`,
+    );
+    await chmod(gitShim, 0o755);
+
+    const originalPath = process.env.PATH;
+    const originalLcAll = process.env.LC_ALL;
+    process.env.PATH = `${shimDir}:${originalPath ?? ""}`;
+    process.env.LC_ALL = "en_US.UTF-8";
+    try {
+      const branch = await run(getCurrentBranch(repoDir));
+      expect(branch).toBe("main");
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      if (originalLcAll === undefined) delete process.env.LC_ALL;
+      else process.env.LC_ALL = originalLcAll;
+    }
+
+    expect(await readFile(logPath, "utf8")).toBe("C");
   });
 });

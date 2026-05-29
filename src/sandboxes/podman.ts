@@ -30,6 +30,8 @@ import {
   formatVolumeMount,
   processFileMountParents,
 } from "../mountUtils.js";
+import { BoundedTail, MAX_TAIL_CHARS } from "../boundedTail.js";
+import { registerShutdown } from "../shutdownRegistry.js";
 
 export interface PodmanOptions {
   /** Podman image name (default: derived from repo directory name). */
@@ -83,6 +85,53 @@ export interface PodmanOptions {
    * When omitted, Podman's default network is used.
    */
   readonly network?: string | readonly string[];
+  /**
+   * Supplementary groups to add the container user to, via `--group-add`.
+   *
+   * Accepts group names or numeric GIDs:
+   *
+   * - `["docker"]` → `--group-add docker`
+   * - `[999]` → `--group-add 999`
+   * - `["docker", 999]` → `--group-add docker --group-add 999`
+   *
+   * Useful for granting access to a bind-mounted Docker socket (Docker-outside-of-Docker).
+   * When omitted, no `--group-add` flags are added.
+   */
+  readonly groups?: readonly (string | number)[];
+  /**
+   * Host devices to expose to the container, via `--device`.
+   *
+   * Each entry is a full device spec in `host[:container[:permissions]]` form:
+   *
+   * - `["/dev/kvm"]` → `--device /dev/kvm`
+   * - `["/dev/sda:/dev/xvda:rwm"]` → `--device /dev/sda:/dev/xvda:rwm`
+   * - `["/dev/kvm", "/dev/fuse"]` → `--device /dev/kvm --device /dev/fuse`
+   *
+   * Under rootless Podman, exposing a host device often requires host-side
+   * group/permission setup and may interact with `--userns=keep-id`.
+   * When omitted, no `--device` flags are added.
+   */
+  readonly devices?: readonly string[];
+  /**
+   * Maximum number of characters of streamed `exec` output retained per stream
+   * (stdout and stderr) when an `onLine` callback is supplied (default: 64KiB).
+   *
+   * Output is delivered live to `onLine` regardless; this only bounds the tail
+   * returned in `ExecResult`, preventing a long-running agent's output from
+   * overflowing V8's max string length and crashing the run.
+   */
+  readonly maxOutputTailChars?: number;
+  /**
+   * Limit the CPU resources available to the container, via `--cpus`.
+   *
+   * Maps directly to `podman run --cpus`. Accepts fractional values:
+   *
+   * - `2` → `--cpus 2` (at most 2 CPUs)
+   * - `1.5` → `--cpus 1.5` (at most 1.5 CPUs)
+   *
+   * When omitted, no `--cpus` flag is added and the container is unconstrained.
+   */
+  readonly cpus?: number;
 }
 
 /**
@@ -99,6 +148,7 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
   const userns = options?.userns ?? "keep-id";
   const containerUid = options?.containerUid ?? 1000;
   const containerGid = options?.containerGid ?? 1000;
+  const maxOutputTailChars = options?.maxOutputTailChars ?? MAX_TAIL_CHARS;
   const sandboxHomedir = "/home/agent";
   const userMounts = options?.mounts
     ? resolveUserMounts(options.mounts, sandboxHomedir)
@@ -158,6 +208,16 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
           : [options.network]
         : [];
       const networkArgs = networks.flatMap((n) => ["--network", n]);
+      const groupArgs = (options?.groups ?? []).flatMap((g) => [
+        "--group-add",
+        String(g),
+      ]);
+      const deviceArgs = (options?.devices ?? []).flatMap((d) => [
+        "--device",
+        d,
+      ]);
+      const cpusArgs =
+        options?.cpus !== undefined ? ["--cpus", String(options.cpus)] : [];
 
       // Start container via podman run
       await new Promise<void>((resolve, reject) => {
@@ -171,6 +231,9 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
             ...userArgs,
             ...usernsArgs,
             ...networkArgs,
+            ...groupArgs,
+            ...deviceArgs,
+            ...cpusArgs,
             "-w",
             worktreePath,
             ...envArgs,
@@ -222,8 +285,10 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
         });
       }
 
-      // Set up signal handlers for cleanup
-      const onExit = () => {
+      // Register synchronous container cleanup via the shared shutdown registry
+      // so concurrent sandboxes share a single exit/SIGINT/SIGTERM listener
+      // instead of tripping Node's MaxListenersExceededWarning.
+      const removeContainerSync = () => {
         try {
           execFileSync("podman", ["rm", "-f", containerName], {
             stdio: "ignore",
@@ -233,13 +298,7 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
           /* best-effort */
         }
       };
-      const onSignal = () => {
-        onExit();
-        process.exit(1);
-      };
-      process.on("exit", onExit);
-      process.on("SIGINT", onSignal);
-      process.on("SIGTERM", onSignal);
+      const unregisterShutdown = registerShutdown(removeContainerSync);
 
       const handle: BindMountSandboxHandle = {
         worktreePath,
@@ -273,37 +332,46 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
               proc.stdin!.end();
             }
 
-            const stdoutChunks: string[] = [];
-            const stderrChunks: string[] = [];
-
-            if (opts?.onLine) {
-              const onLine = opts.onLine;
-              const rl = createInterface({ input: proc.stdout! });
-              rl.on("line", (line) => {
-                stdoutChunks.push(line);
-                onLine(line);
-              });
-            } else {
-              proc.stdout!.on("data", (chunk: Buffer) => {
-                stdoutChunks.push(chunk.toString());
-              });
-            }
-
-            proc.stderr!.on("data", (chunk: Buffer) => {
-              stderrChunks.push(chunk.toString());
-            });
-
             proc.on("error", (error) => {
               reject(new Error(`podman exec failed: ${error.message}`));
             });
 
-            proc.on("close", (code) => {
-              resolve({
-                stdout: stdoutChunks.join(opts?.onLine ? "\n" : ""),
-                stderr: stderrChunks.join(""),
-                exitCode: code ?? 0,
+            if (opts?.onLine) {
+              const onLine = opts.onLine;
+              const stdoutTail = new BoundedTail(maxOutputTailChars, "\n");
+              const stderrTail = new BoundedTail(maxOutputTailChars, "");
+              const rl = createInterface({ input: proc.stdout! });
+              rl.on("line", (line) => {
+                stdoutTail.push(line);
+                onLine(line);
               });
-            });
+              proc.stderr!.on("data", (chunk: Buffer) => {
+                stderrTail.push(chunk.toString());
+              });
+              proc.on("close", (code) => {
+                resolve({
+                  stdout: stdoutTail.toString(),
+                  stderr: stderrTail.toString(),
+                  exitCode: code ?? 0,
+                });
+              });
+            } else {
+              const stdoutChunks: string[] = [];
+              const stderrChunks: string[] = [];
+              proc.stdout!.on("data", (chunk: Buffer) => {
+                stdoutChunks.push(chunk.toString());
+              });
+              proc.stderr!.on("data", (chunk: Buffer) => {
+                stderrChunks.push(chunk.toString());
+              });
+              proc.on("close", (code) => {
+                resolve({
+                  stdout: stdoutChunks.join(""),
+                  stderr: stderrChunks.join(""),
+                  exitCode: code ?? 0,
+                });
+              });
+            }
           });
         },
 
@@ -370,9 +438,7 @@ export const podman = (options?: PodmanOptions): SandboxProvider => {
           }),
 
         close: async (): Promise<void> => {
-          process.removeListener("exit", onExit);
-          process.removeListener("SIGINT", onSignal);
-          process.removeListener("SIGTERM", onSignal);
+          unregisterShutdown();
           await new Promise<void>((resolve, reject) => {
             execFile("podman", ["rm", "-f", containerName], (error) => {
               if (error) {

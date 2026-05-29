@@ -10,9 +10,11 @@ import { AgentError, AgentIdleTimeoutError, WorktreeError } from "./errors.js";
 import { SilentDisplay, type DisplayEntry } from "./Display.js";
 import {
   createBindMountSandboxProvider,
+  createIsolatedSandboxProvider,
   type SandboxProvider,
   type BindMountSandboxHandle,
   type BranchStrategy,
+  type NoSandboxProvider,
 } from "./SandboxProvider.js";
 import { testIsolated } from "./sandboxes/test-isolated.js";
 import { noSandbox } from "./sandboxes/no-sandbox.js";
@@ -466,6 +468,42 @@ describe("WorktreeDockerSandboxFactory", () => {
             Effect.fail(new AgentError({ message: "agent failed" })),
           );
         }).pipe(Effect.provide(makeLayer())),
+      ),
+    ).rejects.toThrow();
+
+    expect(mockRemove).toHaveBeenCalledWith(worktreePath);
+  });
+
+  it("removes worktree when sandbox start fails (e.g. missing image)", async () => {
+    mockHasUncommittedChanges.mockReturnValue(Effect.succeed(false));
+
+    const failingProvider = createBindMountSandboxProvider({
+      name: "failing-provider",
+      create: async () => {
+        throw new Error("Image 'sandcastle:test' not found locally");
+      },
+    });
+
+    const layer = Layer.provide(
+      WorktreeDockerSandboxFactory.layer,
+      Layer.mergeAll(
+        Layer.succeed(SandboxConfig, {
+          env: { FOO: "bar" },
+          hostRepoDir,
+          sandboxProvider: failingProvider,
+          branchStrategy: { type: "merge-to-head" },
+        }),
+        NodeFileSystem.layer,
+        SilentDisplay.layer(Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([])),
+      ),
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const factory = yield* SandboxFactory;
+          yield* factory.withSandbox(() => Effect.void);
+        }).pipe(Effect.provide(layer)),
       ),
     ).rejects.toThrow();
 
@@ -930,6 +968,52 @@ describe("WorktreeDockerSandboxFactory — isolated providers", () => {
     expect(mockRemove).not.toHaveBeenCalled();
   });
 
+  it("removes worktree when isolated sandbox start fails", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "sandcastle-test-"));
+    tempDirs.push(hostDir);
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial");
+
+    mockCreate.mockReturnValue(
+      Effect.succeed({ path: hostDir, branch: "sandcastle/20240101-000000" }),
+    );
+    mockRemove.mockReturnValue(Effect.void);
+    mockPruneStale.mockReturnValue(Effect.void);
+    mockHasUncommittedChanges.mockReturnValue(Effect.succeed(false));
+
+    const failingProvider = createIsolatedSandboxProvider({
+      name: "failing-isolated",
+      create: async () => {
+        throw new Error("isolated sandbox unavailable");
+      },
+    });
+
+    const layer = Layer.provide(
+      WorktreeDockerSandboxFactory.layer,
+      Layer.mergeAll(
+        Layer.succeed(SandboxConfig, {
+          env: {},
+          hostRepoDir: hostDir,
+          sandboxProvider: failingProvider,
+          branchStrategy: { type: "merge-to-head" },
+        }),
+        NodeFileSystem.layer,
+        SilentDisplay.layer(Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([])),
+      ),
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const factory = yield* SandboxFactory;
+          yield* factory.withSandbox(() => Effect.void);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow();
+
+    expect(mockRemove).toHaveBeenCalledWith(hostDir);
+  });
+
   it("prunes stale worktrees before creating a new one", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "sandcastle-test-"));
     tempDirs.push(hostDir);
@@ -1093,6 +1177,57 @@ describe("WorktreeDockerSandboxFactory — no-sandbox provider", () => {
     );
 
     expect(mockCreate).toHaveBeenCalledWith(hostDir, { name: undefined });
+    expect(mockRemove).toHaveBeenCalledWith(hostDir);
+  });
+
+  it("worktree mode: removes worktree when sandbox start fails", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "sandcastle-test-"));
+    tempDirs.push(hostDir);
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hi", "initial");
+
+    mockCreate.mockReturnValue(
+      Effect.succeed({
+        path: hostDir,
+        branch: "sandcastle/20240101-000000",
+      }),
+    );
+    mockRemove.mockReturnValue(Effect.void);
+    mockPruneStale.mockReturnValue(Effect.void);
+    mockHasUncommittedChanges.mockReturnValue(Effect.succeed(false));
+
+    const failingProvider: NoSandboxProvider = {
+      tag: "none",
+      name: "failing-no-sandbox",
+      env: {},
+      create: async () => {
+        throw new Error("no-sandbox create failed");
+      },
+    };
+
+    const layer = Layer.provide(
+      WorktreeDockerSandboxFactory.layer,
+      Layer.mergeAll(
+        Layer.succeed(SandboxConfig, {
+          env: {},
+          hostRepoDir: hostDir,
+          sandboxProvider: failingProvider,
+          branchStrategy: { type: "merge-to-head" },
+        }),
+        NodeFileSystem.layer,
+        SilentDisplay.layer(Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([])),
+      ),
+    );
+
+    await expect(
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const factory = yield* SandboxFactory;
+          yield* factory.withSandbox(() => Effect.void);
+        }).pipe(Effect.provide(layer)),
+      ),
+    ).rejects.toThrow();
+
     expect(mockRemove).toHaveBeenCalledWith(hostDir);
   });
 });

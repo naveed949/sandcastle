@@ -899,8 +899,7 @@ describe("withSandboxLifecycle (worktree mode)", () => {
     const syncLog = entries.find(
       (e) =>
         e._tag === "taskLog" &&
-        (e.title === "No commits to sync out" ||
-          e.title.startsWith("Syncing")),
+        (e.title === "No commits to sync out" || e.title.startsWith("Syncing")),
     );
     expect(syncLog).toBeUndefined();
   });
@@ -1163,9 +1162,7 @@ describe("withSandboxLifecycle (worktree mode)", () => {
           branch: "sandcastle/test",
           hooks: {
             sandbox: {
-              onSandboxReady: [
-                { command: "slow-install", timeoutMs: 500 },
-              ],
+              onSandboxReady: [{ command: "slow-install", timeoutMs: 500 }],
             },
           },
         },
@@ -1187,9 +1184,7 @@ describe("withSandboxLifecycle (worktree mode)", () => {
           branch: "sandcastle/test",
           hooks: {
             host: {
-              onSandboxReady: [
-                { command: "sleep 2", timeoutMs: 500 },
-              ],
+              onSandboxReady: [{ command: "sleep 2", timeoutMs: 500 }],
             },
           },
         },
@@ -1225,6 +1220,202 @@ describe("withSandboxLifecycle (worktree mode)", () => {
           }),
       ).pipe(Effect.provide(Layer.merge(layer, testDisplayLayer))),
     );
+  });
+
+  it("retries a transient exit-126 git setup failure, then succeeds", async () => {
+    const { hostDir, worktreeDir } = await setupWorktree();
+
+    let safeDirAttempts = 0;
+    // Sandbox where the first `safe.directory` config attempt exits 126
+    // (overlayfs/exec race seen under heavy parallelism), then succeeds.
+    // Effect.sync defers per-run so retries re-evaluate, matching how the
+    // real exec (Effect.tryPromise) re-invokes the SDK on each attempt.
+    const flakySandboxLayer = Layer.succeed(Sandbox, {
+      exec: (command, _options) =>
+        Effect.sync(() => {
+          if (command.includes("safe.directory")) {
+            safeDirAttempts++;
+            if (safeDirAttempts === 1) {
+              return { stdout: "", stderr: "cannot exec", exitCode: 126 };
+            }
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        }),
+      copyIn: () => Effect.succeed(undefined as never),
+      copyFileOut: () => Effect.succeed(undefined as never),
+    });
+
+    const result = await Effect.runPromise(
+      withSandboxLifecycle(
+        {
+          hostRepoDir: hostDir,
+          sandboxRepoDir: worktreeDir,
+          branch: "sandcastle/test",
+        },
+        () => Effect.succeed("ok"),
+      ).pipe(Effect.provide(Layer.merge(flakySandboxLayer, testDisplayLayer))),
+    );
+
+    expect(safeDirAttempts).toBe(2);
+    expect(result.result).toBe("ok");
+  });
+
+  it("does not retry a non-transient git setup failure", async () => {
+    const { hostDir, worktreeDir } = await setupWorktree();
+
+    let safeDirAttempts = 0;
+    const failingSandboxLayer = Layer.succeed(Sandbox, {
+      exec: (command, _options) =>
+        Effect.sync(() => {
+          if (command.includes("safe.directory")) {
+            safeDirAttempts++;
+            return { stdout: "", stderr: "fatal: bad config", exitCode: 1 };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        }),
+      copyIn: () => Effect.succeed(undefined as never),
+      copyFileOut: () => Effect.succeed(undefined as never),
+    });
+
+    await expect(
+      Effect.runPromise(
+        withSandboxLifecycle(
+          {
+            hostRepoDir: hostDir,
+            sandboxRepoDir: worktreeDir,
+            branch: "sandcastle/test",
+          },
+          () => Effect.succeed("ok"),
+        ).pipe(
+          Effect.provide(Layer.merge(failingSandboxLayer, testDisplayLayer)),
+        ),
+      ),
+    ).rejects.toThrow(/exit 1/);
+
+    expect(safeDirAttempts).toBe(1);
+  });
+
+  it("respects a gitSetupMs timeout override", async () => {
+    const { hostDir, worktreeDir } = await setupWorktree();
+
+    // The git safe.directory setup command takes longer than the short
+    // gitSetupMs override, so it should time out rather than succeed under
+    // the default 10s timeout.
+    const slowGitSetupLayer = Layer.succeed(Sandbox, {
+      exec: (command, _options) => {
+        if (command.includes("safe.directory")) {
+          return Effect.gen(function* () {
+            yield* Effect.sleep("2 seconds");
+            return { stdout: "", stderr: "", exitCode: 0 };
+          });
+        }
+        return Effect.succeed({ stdout: "", stderr: "", exitCode: 0 });
+      },
+      copyIn: () => Effect.succeed(undefined as never),
+      copyFileOut: () => Effect.succeed(undefined as never),
+    });
+
+    const result = Effect.runPromise(
+      withSandboxLifecycle(
+        {
+          hostRepoDir: hostDir,
+          sandboxRepoDir: worktreeDir,
+          branch: "sandcastle/test",
+          timeouts: { gitSetupMs: 300 },
+        },
+        () => Effect.succeed("ok"),
+      ).pipe(Effect.provide(Layer.merge(slowGitSetupLayer, testDisplayLayer))),
+    );
+
+    await expect(result).rejects.toThrow(/Git command timed out after 300ms/);
+  });
+
+  it("respects a commitCollectionMs timeout override", async () => {
+    const { hostDir, worktreeDir, layer } = await setupWorktree();
+
+    // A 1ms budget cannot outrun spawning the `git rev-list` process, so
+    // commit collection should time out under the override (default is 30s).
+    const result = Effect.runPromise(
+      withSandboxLifecycle(
+        {
+          hostRepoDir: hostDir,
+          sandboxRepoDir: worktreeDir,
+          branch: "sandcastle/test",
+          timeouts: { commitCollectionMs: 1 },
+        },
+        () => Effect.succeed("ok"),
+      ).pipe(Effect.provide(Layer.merge(layer, testDisplayLayer))),
+    );
+
+    await expect(result).rejects.toThrow(
+      /Commit collection timed out after 1ms/,
+    );
+  });
+
+  it("respects a mergeToHostMs timeout override", async () => {
+    const { hostDir, worktreeDir, layer } = await setupWorktree();
+
+    // Merge-to-head path (no explicit branch) with a real commit, so the
+    // host-side merge runs and times out under the 1ms override (default 30s).
+    const result = Effect.runPromise(
+      withSandboxLifecycle(
+        {
+          hostRepoDir: hostDir,
+          sandboxRepoDir: worktreeDir,
+          timeouts: { mergeToHostMs: 1 },
+        },
+        (ctx) =>
+          Effect.gen(function* () {
+            yield* ctx.sandbox.exec('git config user.email "test@test.com"', {
+              cwd: ctx.sandboxRepoDir,
+            });
+            yield* ctx.sandbox.exec('git config user.name "Test"', {
+              cwd: ctx.sandboxRepoDir,
+            });
+            yield* ctx.sandbox.exec(
+              'sh -c "echo wt > wt.txt && git add wt.txt && git commit -m \\"wt commit\\""',
+              { cwd: ctx.sandboxRepoDir },
+            );
+          }),
+      ).pipe(Effect.provide(Layer.merge(layer, testDisplayLayer))),
+    );
+
+    await expect(result).rejects.toThrow(/timed out after 1ms/);
+  });
+
+  it("fails after exhausting retries on a persistent transient failure", async () => {
+    const { hostDir, worktreeDir } = await setupWorktree();
+
+    let safeDirAttempts = 0;
+    const alwaysFlakyLayer = Layer.succeed(Sandbox, {
+      exec: (command, _options) =>
+        Effect.sync(() => {
+          if (command.includes("safe.directory")) {
+            safeDirAttempts++;
+            return { stdout: "", stderr: "cannot exec", exitCode: 126 };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        }),
+      copyIn: () => Effect.succeed(undefined as never),
+      copyFileOut: () => Effect.succeed(undefined as never),
+    });
+
+    await expect(
+      Effect.runPromise(
+        withSandboxLifecycle(
+          {
+            hostRepoDir: hostDir,
+            sandboxRepoDir: worktreeDir,
+            branch: "sandcastle/test",
+          },
+          () => Effect.succeed("ok"),
+        ).pipe(Effect.provide(Layer.merge(alwaysFlakyLayer, testDisplayLayer))),
+      ),
+    ).rejects.toThrow(/exit 126/);
+
+    // Initial attempt + bounded retries (does not loop forever)
+    expect(safeDirAttempts).toBeGreaterThan(1);
+    expect(safeDirAttempts).toBeLessThanOrEqual(4);
   });
 });
 
@@ -1305,10 +1496,7 @@ describe("runHostHooks", () => {
     // sleep 2 with a 500ms timeout should fail
     await expect(
       Effect.runPromise(
-        runHostHooks(
-          [{ command: "sleep 2", timeoutMs: 500 }],
-          dir,
-        ),
+        runHostHooks([{ command: "sleep 2", timeoutMs: 500 }], dir),
       ),
     ).rejects.toThrow(/timed out/);
   });

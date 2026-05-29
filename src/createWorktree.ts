@@ -1,8 +1,6 @@
 import { NodeContext, NodeFileSystem } from "@effect/platform-node";
-import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Effect, Layer } from "effect";
-import { hostSessionStore } from "./SessionStore.js";
 import type { AgentProvider } from "./AgentProvider.js";
 import { ClackDisplay, Display, FileDisplay } from "./Display.js";
 import { preprocessPrompt } from "./PromptPreprocessor.js";
@@ -33,7 +31,6 @@ import type { InteractiveResult } from "./interactive.js";
 import { buildLogFilename, printFileDisplayStartup } from "./run.js";
 import type { LoggingOption } from "./run.js";
 import { orchestrate, type IterationResult } from "./Orchestrator.js";
-import { defaultSessionPathsLayer } from "./SessionPaths.js";
 import {
   callbackAgentStreamEmitterLayer,
   noopAgentStreamEmitterLayer,
@@ -45,6 +42,7 @@ import { syncOut } from "./syncOut.js";
 import * as WorktreeManager from "./WorktreeManager.js";
 import { copyToWorktree } from "./CopyToWorktree.js";
 import { resolveCwd } from "./resolveCwd.js";
+import { assertResumeSessionExists } from "./resumePrecheck.js";
 import {
   type PromptArgs,
   substitutePromptArgs,
@@ -396,6 +394,7 @@ export const createWorktree = async (
             branch: worktreeInfo.branch,
             hostWorktreePath: worktreeInfo.path,
             applyToHost,
+            timeouts: options.timeouts,
           },
           (ctx) =>
             Effect.gen(function* () {
@@ -487,13 +486,12 @@ export const createWorktree = async (
     }
 
     if (opts.resumeSession) {
-      const hStore = hostSessionStore(hostRepoDir);
-      const sessionPath = hStore.sessionFilePath(opts.resumeSession);
-      if (!existsSync(sessionPath)) {
-        throw new Error(
-          `resumeSession "${opts.resumeSession}" not found: expected session file at ${sessionPath}`,
-        );
-      }
+      await assertResumeSessionExists({
+        provider,
+        sandboxTag: sandboxProvider.tag,
+        hostRepoDir,
+        resumeSession: opts.resumeSession,
+      });
     }
 
     const inner = Effect.gen(function* () {
@@ -627,7 +625,6 @@ export const createWorktree = async (
       const runLayer = Layer.mergeAll(
         reuseFactoryLayer,
         runDisplayLayer,
-        defaultSessionPathsLayer,
         agentStreamEmitterLayer,
       );
 
@@ -649,6 +646,7 @@ export const createWorktree = async (
           resumeSession: opts.resumeSession,
           signal: opts.signal,
           skipPromptExpansion: isInlinePrompt,
+          timeouts: options.timeouts,
         });
       }).pipe(
         Effect.provide(runLayer),

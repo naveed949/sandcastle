@@ -1,25 +1,25 @@
-# Adding a backlog manager
+# Adding an issue tracker
 
-This document is for contributors adding support for a new **backlog manager** (e.g. GitHub Issues, Beads, Jira, GitLab) to `sandcastle init`. It covers:
+This document is for contributors adding support for a new **issue tracker** (e.g. GitHub Issues, Beads, Jira, GitLab) to `sandcastle init`. It covers:
 
-1. [Evaluating a new backlog manager](#evaluating-a-new-backlog-manager) — the questionnaire used to decide whether a backlog manager can be supported.
-2. [The `BacklogManagerEntry` shape](#the-backlogmanagerentry-shape) — what you fill in.
+1. [Evaluating a new issue tracker](#evaluating-a-new-issue-tracker) — the questionnaire used to decide whether an issue tracker can be supported.
+2. [The `IssueTrackerEntry` shape](#the-issuetrackerentry-shape) — what you fill in.
 3. [Scaffold integration](#scaffold-integration) — how the entry plugs into `sandcastle init`.
 4. [Implementation checklist](#implementation-checklist) — every file to touch.
 
-For terminology (**backlog manager**, **task**, **template argument**, etc.), see [`CONTEXT.md`](../../CONTEXT.md).
+For terminology (**issue tracker**, **task**, **template argument**, etc.), see [`CONTEXT.md`](../../CONTEXT.md).
 
-## What a backlog manager integration actually is
+## What an issue tracker integration actually is
 
-Sandcastle does not embed any backlog manager itself. A backlog-manager entry is a **scaffold template**: when a user picks it during `sandcastle init`, we substitute three CLI commands (`LIST_TASKS_COMMAND`, `VIEW_TASK_COMMAND`, `CLOSE_TASK_COMMAND`) into the generated prompt files, and we drop a Dockerfile snippet that installs the relevant CLI into the **sandbox**.
+Sandcastle does not embed any issue tracker itself. An issue-tracker entry is a **scaffold template**: when a user picks it during `sandcastle init`, we substitute three CLI commands (`LIST_TASKS_COMMAND`, `VIEW_TASK_COMMAND`, `CLOSE_TASK_COMMAND`) into the generated prompt files, and we drop a Dockerfile snippet that installs the relevant CLI into the **sandbox**.
 
 The generated project then runs those commands itself — Sandcastle is not in the loop at runtime.
 
-This means the requirements below are about what the **CLI** can do unattended inside a Debian-based container, not about what the backlog manager can do as a product.
+This means the requirements below are about what the **CLI** can do unattended inside a Debian-based container, not about what the issue tracker can do as a product.
 
-## Evaluating a new backlog manager
+## Evaluating a new issue tracker
 
-Before implementing, confirm the backlog manager satisfies the must-haves below. If a must-have is missing, the integration likely cannot be supported until upstream changes.
+Before implementing, confirm the issue tracker satisfies the must-haves below. If a must-have is missing, the integration likely cannot be supported until upstream changes.
 
 ### Must-have CLI capabilities
 
@@ -43,25 +43,25 @@ Before implementing, confirm the backlog manager satisfies the must-haves below.
 
 ### Scaffold prerequisites
 
-For `sandcastle init` to offer the backlog manager:
+For `sandcastle init` to offer the issue tracker:
 
 - A Dockerfile snippet that installs the CLI as root (before any `USER` switch in the agent provider's Dockerfile).
 - A token env var to surface in `.env.example`, or an empty string if no auth is required (Beads is the local-only example).
 - Concrete `LIST_TASKS_COMMAND`, `VIEW_TASK_COMMAND`, `CLOSE_TASK_COMMAND` strings. Use `<ID>` as the placeholder for a task ID in the view/close commands — the generated prompts substitute it.
 
-## The `BacklogManagerEntry` shape
+## The `IssueTrackerEntry` shape
 
 Defined in [`src/InitService.ts`](../../src/InitService.ts).
 
 ```ts
-interface BacklogManagerEntry {
+interface IssueTrackerEntry {
   readonly name: string;
   readonly label: string;
   readonly templateArgs: {
     readonly LIST_TASKS_COMMAND: string;
     readonly VIEW_TASK_COMMAND: string;
     readonly CLOSE_TASK_COMMAND: string;
-    readonly BACKLOG_MANAGER_TOOLS: string;
+    readonly ISSUE_TRACKER_TOOLS: string;
   };
   readonly envExample: string;
 }
@@ -74,12 +74,12 @@ Field by field:
 - `templateArgs.LIST_TASKS_COMMAND` — shell command that prints open tasks. Prefer JSON output.
 - `templateArgs.VIEW_TASK_COMMAND` — shell command that prints one task by ID. Use `<ID>` as the literal placeholder.
 - `templateArgs.CLOSE_TASK_COMMAND` — shell command that closes a task by ID. Use `<ID>` as the literal placeholder.
-- `templateArgs.BACKLOG_MANAGER_TOOLS` — Dockerfile snippet that installs the CLI. Substituted into the agent provider's Dockerfile at the `{{BACKLOG_MANAGER_TOOLS}}` placeholder, which sits before the `USER agent` line, so commands run as root.
+- `templateArgs.ISSUE_TRACKER_TOOLS` — Dockerfile snippet that installs the CLI. Substituted into the agent provider's Dockerfile at the `{{ISSUE_TRACKER_TOOLS}}` placeholder, which sits before the `USER agent` line, so commands run as root.
 - `envExample` — lines appended to `.env.example`. Empty string if no auth is required.
 
 ## Scaffold integration
 
-Add an entry to `BACKLOG_MANAGER_REGISTRY` in [`src/InitService.ts`](../../src/InitService.ts), alongside `github-issues` and `beads`:
+Add an entry to `ISSUE_TRACKER_REGISTRY` in [`src/InitService.ts`](../../src/InitService.ts), alongside `github-issues` and `beads`:
 
 ```ts
 {
@@ -89,7 +89,7 @@ Add an entry to `BACKLOG_MANAGER_REGISTRY` in [`src/InitService.ts`](../../src/I
     LIST_TASKS_COMMAND: `glab issue list --opened --output json`,
     VIEW_TASK_COMMAND: "glab issue view <ID>",
     CLOSE_TASK_COMMAND: `glab issue close <ID>`,
-    BACKLOG_MANAGER_TOOLS: GLAB_TOOLS,
+    ISSUE_TRACKER_TOOLS: GLAB_TOOLS,
   },
   envExample: `# GitLab personal access token
 GITLAB_TOKEN=`,
@@ -100,10 +100,10 @@ And a Dockerfile-snippet constant alongside `GITHUB_CLI_TOOLS` and `BEADS_TOOLS`
 
 ## Implementation checklist
 
-For a new backlog manager `foo`:
+For a new issue tracker `foo`:
 
-- [ ] `BACKLOG_MANAGER_REGISTRY` entry in [`src/InitService.ts`](../../src/InitService.ts).
+- [ ] `ISSUE_TRACKER_REGISTRY` entry in [`src/InitService.ts`](../../src/InitService.ts).
 - [ ] `FOO_TOOLS` Dockerfile-snippet constant in `src/InitService.ts`.
-- [ ] Tests in `src/InitService.test.ts` covering: entry is listed by `listBacklogManagers`, `getBacklogManager("foo")` returns the entry with the expected `templateArgs`, `.env.example` includes the token line, generated prompts contain the substituted commands.
+- [ ] Tests in `src/InitService.test.ts` covering: entry is listed by `listIssueTrackers`, `getIssueTracker("foo")` returns the entry with the expected `templateArgs`, `.env.example` includes the token line, generated prompts contain the substituted commands.
 - [ ] Changeset in `.changeset/` (patch, since pre-1.0). See [`CLAUDE.md`](../../CLAUDE.md).
-- [ ] `README.md` update if the public-facing list of supported backlog managers is mentioned there.
+- [ ] `README.md` update if the public-facing list of supported issue trackers is mentioned there.

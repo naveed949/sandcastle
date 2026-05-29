@@ -18,7 +18,9 @@ You may write more than one changeset per commit, if the commit touches multiple
 
 ---
 
-When writing sandbox providers, don't use any shared abstractions between them. Each provider, for instance Vercel and Daytona, is a different concern and shouldn't share code.
+When writing sandbox providers, don't share provider-specific code between them. Each provider — for instance Vercel and Daytona — integrates a different SDK and is a different concern; that integration logic must not be shared, even when two providers look similar today, because they will diverge.
+
+The one exception is **pure, provider-agnostic utilities**: logic that references no provider SDK, no provider config, and whose behavior is purely a function of its inputs (e.g. a bounded string-tail buffer). These may live in a shared module. Test: if you can't tell which provider a function is for by reading it, it's a utility, not a shared abstraction.
 
 ---
 
@@ -37,6 +39,10 @@ Do not use lazy `import()`-style imports when importing Node built-ins. Just use
 Paths destined for the sandbox container (passed to `copyFileIn` / `copyFileOut` / `exec`, or stored as a sandbox cwd / projects dir) are always Linux paths. Use `posix.join` from `node:path`, not the bare platform-aware `join` — on Windows hosts the latter emits `\` separators, and `docker cp` / `podman cp` reject them silently (the run continues but data is lost).
 
 Host-side paths (anything under `tmpdir()`, `hostRepoDir`, the host projects dir) should keep using platform-aware `join`.
+
+---
+
+When comparing two paths — `===`, `startsWith`, `Set.has`, `.includes`, etc. — normalize separators on both sides first (e.g. `p.replace(/\\/g, "/")`). `git` reports forward slashes on every platform, while `node:path.join`/`normalize` emit `\` on Windows, so a raw comparison between a git-derived path and a join-derived path silently fails on Windows. This is invisible on Linux/macOS CI because both sources emit `/` there, so it will not surface in tests unless you deliberately mix the two separator styles. When the result is returned for downstream `join`/fs use, re-apply platform-native `normalize` so callers get consistent separators; only the comparison needs forward slashes.
 
 ---
 
