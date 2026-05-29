@@ -8,13 +8,13 @@ import { Effect, Layer } from "effect";
 import { describe, expect, it } from "vitest";
 import { claudeCode, pi } from "./AgentProvider.js";
 import { createSandbox, type CreateSandboxOptions } from "./createSandbox.js";
-import { Sandbox } from "./SandboxFactory.js";
+import type { SandboxService } from "./SandboxFactory.js";
 import {
   createBindMountSandboxProvider,
   createIsolatedSandboxProvider,
 } from "./SandboxProvider.js";
 import { testIsolated } from "./sandboxes/test-isolated.js";
-import { makeLocalSandboxLayer } from "./testSandbox.js";
+import { makeLocalSandbox } from "./testSandbox.js";
 
 /** Dummy sandbox provider used to satisfy the required `sandbox` field in test mode. */
 const testSandbox = createBindMountSandboxProvider({
@@ -99,13 +99,13 @@ const AGENT_PREFIXES: { prefix: string; toStream: (o: string) => string }[] = [
 const makeMockAgentLayer = (
   sandboxDir: string,
   mockAgentBehavior: (sandboxRepoDir: string) => Promise<string>,
-): Layer.Layer<Sandbox> => {
-  const fsLayer = makeLocalSandboxLayer(sandboxDir);
+): SandboxService => {
+  const real = makeLocalSandbox(sandboxDir);
 
   const matchAgent = (command: string) =>
     AGENT_PREFIXES.find((a) => command.startsWith(a.prefix));
 
-  return Layer.succeed(Sandbox, {
+  return {
     exec: (command, options) => {
       const agent = matchAgent(command);
       if (agent && options?.onLine) {
@@ -127,19 +127,12 @@ const makeMockAgentLayer = (
           return { stdout: output, stderr: "", exitCode: 0 };
         });
       }
-      return Effect.flatMap(Sandbox, (real) =>
-        real.exec(command, options),
-      ).pipe(Effect.provide(fsLayer));
+      return real.exec(command, options);
     },
-    copyIn: (hostPath, sandboxPath) =>
-      Effect.flatMap(Sandbox, (real) =>
-        real.copyIn(hostPath, sandboxPath),
-      ).pipe(Effect.provide(fsLayer)),
+    copyIn: (hostPath, sandboxPath) => real.copyIn(hostPath, sandboxPath),
     copyFileOut: (sandboxPath, hostPath) =>
-      Effect.flatMap(Sandbox, (real) =>
-        real.copyFileOut(sandboxPath, hostPath),
-      ).pipe(Effect.provide(fsLayer)),
-  });
+      real.copyFileOut(sandboxPath, hostPath),
+  };
 };
 
 /**
@@ -193,7 +186,7 @@ describe("createSandbox", () => {
       sandbox: testSandbox,
       cwd: hostDir,
       _test: {
-        buildSandboxLayer: (sandboxDir) => makeLocalSandboxLayer(sandboxDir),
+        buildSandbox: (sandboxDir) => makeLocalSandbox(sandboxDir),
       },
     });
 
@@ -217,7 +210,7 @@ describe("createSandbox", () => {
       sandbox: testSandbox,
       cwd: hostDir,
       _test: {
-        buildSandboxLayer: (sandboxDir) =>
+        buildSandbox: (sandboxDir) =>
           makeMockAgentLayer(sandboxDir, async () => "agent output"),
       },
     });
@@ -248,7 +241,7 @@ describe("createSandbox", () => {
       sandbox: testSandbox,
       cwd: hostDir,
       _test: {
-        buildSandboxLayer: (sandboxDir) => makeLocalSandboxLayer(sandboxDir),
+        buildSandbox: (sandboxDir) => makeLocalSandbox(sandboxDir),
       },
     });
 
@@ -270,7 +263,7 @@ describe("createSandbox", () => {
       sandbox: testSandbox,
       cwd: hostDir,
       _test: {
-        buildSandboxLayer: (sandboxDir) => makeLocalSandboxLayer(sandboxDir),
+        buildSandbox: (sandboxDir) => makeLocalSandbox(sandboxDir),
       },
     });
 
@@ -300,7 +293,7 @@ describe("createSandbox", () => {
         sandbox: testSandbox,
         cwd: hostDir,
         _test: {
-          buildSandboxLayer: (sandboxDir) => makeLocalSandboxLayer(sandboxDir),
+          buildSandbox: (sandboxDir) => makeLocalSandbox(sandboxDir),
         },
       });
       worktreePath = sandbox.worktreePath;
@@ -321,7 +314,7 @@ describe("createSandbox", () => {
       sandbox: testSandbox,
       cwd: hostDir,
       _test: {
-        buildSandboxLayer: (sandboxDir) => makeLocalSandboxLayer(sandboxDir),
+        buildSandbox: (sandboxDir) => makeLocalSandbox(sandboxDir),
       },
     });
 
@@ -331,7 +324,7 @@ describe("createSandbox", () => {
         sandbox: testSandbox,
         cwd: hostDir,
         _test: {
-          buildSandboxLayer: (sandboxDir) => makeLocalSandboxLayer(sandboxDir),
+          buildSandbox: (sandboxDir) => makeLocalSandbox(sandboxDir),
         },
       });
 
@@ -354,7 +347,7 @@ describe("createSandbox", () => {
       sandbox: testSandbox,
       cwd: hostDir,
       _test: {
-        buildSandboxLayer: (sandboxDir) => makeLocalSandboxLayer(sandboxDir),
+        buildSandbox: (sandboxDir) => makeLocalSandbox(sandboxDir),
       },
     });
 
@@ -367,7 +360,7 @@ describe("createSandbox", () => {
         sandbox: testSandbox,
         cwd: hostDir,
         _test: {
-          buildSandboxLayer: (sandboxDir) => makeLocalSandboxLayer(sandboxDir),
+          buildSandbox: (sandboxDir) => makeLocalSandbox(sandboxDir),
         },
       });
 
@@ -393,7 +386,7 @@ describe("createSandbox", () => {
       sandbox: testSandbox,
       cwd: hostDir,
       _test: {
-        buildSandboxLayer: (sandboxDir) =>
+        buildSandbox: (sandboxDir) =>
           makeMockAgentLayer(sandboxDir, async (cwd) => {
             await writeFile(join(cwd, "agent-created.txt"), "new file");
             await execAsync("git add agent-created.txt", { cwd });
@@ -427,7 +420,7 @@ describe("createSandbox", () => {
       sandbox: testSandbox,
       cwd: hostDir,
       _test: {
-        buildSandboxLayer: (sandboxDir) => makeLocalSandboxLayer(sandboxDir),
+        buildSandbox: (sandboxDir) => makeLocalSandbox(sandboxDir),
       },
     });
 
@@ -449,7 +442,7 @@ describe("createSandbox", () => {
       sandbox: testSandbox,
       cwd: hostDir,
       _test: {
-        buildSandboxLayer: (sandboxDir) =>
+        buildSandbox: (sandboxDir) =>
           makeMockAgentLayer(sandboxDir, async () => "mock output"),
       },
     });
@@ -488,7 +481,7 @@ describe("createSandbox", () => {
       sandbox: testSandbox,
       cwd: hostDir,
       _test: {
-        buildSandboxLayer: (sandboxDir) =>
+        buildSandbox: (sandboxDir) =>
           makeMockAgentLayer(sandboxDir, async (cwd) => {
             runCount++;
             const fname = `file-${runCount}.txt`;
@@ -549,7 +542,7 @@ describe("createSandbox", () => {
       },
       cwd: hostDir,
       _test: {
-        buildSandboxLayer: (sandboxDir) => makeLocalSandboxLayer(sandboxDir),
+        buildSandbox: (sandboxDir) => makeLocalSandbox(sandboxDir),
       },
     });
 
@@ -720,7 +713,7 @@ describe("createSandbox", () => {
       sandbox: testSandbox,
       cwd: hostDir,
       _test: {
-        buildSandboxLayer: (sandboxDir) =>
+        buildSandbox: (sandboxDir) =>
           makeMockAgentLayer(sandboxDir, async (cwd) => {
             runNumber++;
             if (runNumber === 1) {
@@ -1164,7 +1157,7 @@ describe("createSandbox", () => {
       sandbox: testSandbox,
       cwd: hostDir,
       _test: {
-        buildSandboxLayer: (sandboxDir) =>
+        buildSandbox: (sandboxDir) =>
           makeMockAgentLayer(sandboxDir, async () => "agent output"),
       },
     });
@@ -1193,7 +1186,7 @@ describe("createSandbox", () => {
       sandbox: testSandbox,
       cwd: hostDir,
       _test: {
-        buildSandboxLayer: (sandboxDir) =>
+        buildSandbox: (sandboxDir) =>
           makeMockAgentLayer(sandboxDir, async () => "agent output"),
       },
     });
@@ -1226,7 +1219,7 @@ describe("createSandbox", () => {
       sandbox: testSandbox,
       cwd: hostDir,
       _test: {
-        buildSandboxLayer: (sandboxDir) =>
+        buildSandbox: (sandboxDir) =>
           makeMockAgentLayer(sandboxDir, async () => "agent output"),
       },
     });
@@ -1266,7 +1259,7 @@ describe("createSandbox", () => {
       sandbox: testSandbox,
       cwd: hostDir,
       _test: {
-        buildSandboxLayer: (sandboxDir) =>
+        buildSandbox: (sandboxDir) =>
           makeMockAgentLayer(sandboxDir, async () => "agent output"),
       },
     });
@@ -1411,7 +1404,7 @@ describe("createSandbox", () => {
       sandbox: testSandbox,
       cwd: hostDir,
       _test: {
-        buildSandboxLayer: (sandboxDir) => makeLocalSandboxLayer(sandboxDir),
+        buildSandbox: (sandboxDir) => makeLocalSandbox(sandboxDir),
       },
     });
 
@@ -1475,7 +1468,7 @@ describe("createSandbox", () => {
       copyToWorktree: ["config.json"],
       cwd: hostDir,
       _test: {
-        buildSandboxLayer: (sandboxDir) => makeLocalSandboxLayer(sandboxDir),
+        buildSandbox: (sandboxDir) => makeLocalSandbox(sandboxDir),
       },
     });
 

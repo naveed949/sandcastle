@@ -41,10 +41,15 @@ export const assertResumeSessionExists = async (params: {
     return;
   }
 
-  const hostStore = provider.sessionStorage.hostStore(hostRepoDir);
-  const exists = await hostStore.exists(resumeSession);
+  const exists = await provider.sessionStorage.existsOnHost(
+    hostRepoDir,
+    resumeSession,
+  );
   if (!exists) {
-    const sessionPath = hostStore.sessionFilePath(resumeSession);
+    const sessionPath = provider.sessionStorage.hostSessionFilePath(
+      hostRepoDir,
+      resumeSession,
+    );
     throw new Error(
       sessionPath
         ? `resumeSession "${resumeSession}" not found: expected session file at ${sessionPath}`

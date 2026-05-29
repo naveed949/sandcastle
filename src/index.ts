@@ -32,12 +32,15 @@ export type {
 export type { PromptArgs } from "./PromptArgumentSubstitution.js";
 export type { AgentStreamEvent } from "./AgentStreamEmitter.js";
 export {
-  hostSessionStore,
-  sandboxSessionStore,
-  codexHostSessionStore,
-  codexSandboxSessionStore,
+  transferClaudeSession,
+  transferCodexSession,
+  encodeProjectPath,
+  claudeHostSessionPath,
+  claudeSandboxSessionPath,
+  findClaudeSessionOnHost,
+  findCodexSessionOnHost,
 } from "./SessionStore.js";
-export type { SessionStore } from "./SessionStore.js";
+export type { HostSessionLookup } from "./SessionStore.js";
 export type { SandboxHooks } from "./SandboxLifecycle.js";
 export type { MountConfig } from "./MountConfig.js";
 export { Output, StructuredOutputError } from "./Output.js";

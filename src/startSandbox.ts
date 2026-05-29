@@ -1,4 +1,4 @@
-import { Effect, Layer } from "effect";
+import { Effect } from "effect";
 import { existsSync } from "node:fs";
 import { join, posix } from "node:path";
 import {
@@ -20,9 +20,9 @@ import type {
   NoSandboxHandle,
 } from "./SandboxProvider.js";
 import {
-  type Sandbox,
+  type SandboxService,
   type MountEntry,
-  makeSandboxLayerFromHandle,
+  makeSandboxFromHandle,
   SANDBOX_REPO_DIR,
 } from "./SandboxFactory.js";
 import { syncIn } from "./syncIn.js";
@@ -66,7 +66,7 @@ export type StartSandboxOptions =
 
 export interface StartSandboxResult {
   handle: BindMountSandboxHandle | IsolatedSandboxHandle | NoSandboxHandle;
-  sandboxLayer: Layer.Layer<Sandbox>;
+  sandbox: SandboxService;
   worktreePath: string;
 }
 
@@ -119,7 +119,7 @@ const startNoSandbox = (
   }).pipe(
     Effect.map((handle) => ({
       handle,
-      sandboxLayer: makeSandboxLayerFromHandle(handle),
+      sandbox: makeSandboxFromHandle(handle),
       worktreePath: handle.worktreePath,
     })),
   );
@@ -162,7 +162,7 @@ const startBindMountSandbox = (
   }).pipe(
     Effect.map((handle) => ({
       handle,
-      sandboxLayer: makeSandboxLayerFromHandle(handle),
+      sandbox: makeSandboxFromHandle(handle),
       worktreePath: handle.worktreePath,
     })),
     withTimeout(
@@ -249,7 +249,7 @@ const startIsolatedSandbox = (
 
     return {
       handle,
-      sandboxLayer: makeSandboxLayerFromHandle(handle),
+      sandbox: makeSandboxFromHandle(handle),
       worktreePath: handle.worktreePath,
     };
   });

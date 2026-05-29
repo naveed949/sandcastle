@@ -27,8 +27,7 @@ import { resolveEnv } from "./EnvResolver.js";
 import { formatErrorMessage } from "./ErrorHandler.js";
 import type { SandboxError } from "./errors.js";
 import {
-  callbackAgentStreamEmitterLayer,
-  noopAgentStreamEmitterLayer,
+  agentStreamEmitterLayer,
   type AgentStreamEvent,
 } from "./AgentStreamEmitter.js";
 import type { SandboxHooks } from "./SandboxLifecycle.js";
@@ -502,15 +501,16 @@ export async function run(
     ),
   );
 
-  const agentStreamEmitterLayer =
-    resolvedLogging.type === "file" && resolvedLogging.onAgentStreamEvent
-      ? callbackAgentStreamEmitterLayer(resolvedLogging.onAgentStreamEvent)
-      : noopAgentStreamEmitterLayer;
+  const streamEmitterLayer = agentStreamEmitterLayer(
+    resolvedLogging.type === "file"
+      ? resolvedLogging.onAgentStreamEvent
+      : undefined,
+  );
 
   const runLayer = Layer.mergeAll(
     factoryLayer,
     displayLayer,
-    agentStreamEmitterLayer,
+    streamEmitterLayer,
   );
 
   const baseEffect = Effect.gen(function* () {

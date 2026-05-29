@@ -6,18 +6,14 @@
  * requiring a real remote environment.
  */
 
-import { execFile, spawn } from "node:child_process";
-import { copyFile, cp, mkdir, mkdtemp, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { createInterface } from "node:readline";
+import { copyFile, cp, mkdir, stat } from "node:fs/promises";
+import { dirname } from "node:path";
 import {
   createIsolatedSandboxProvider,
-  type ExecResult,
   type IsolatedSandboxHandle,
   type IsolatedSandboxProvider,
 } from "../SandboxProvider.js";
-import { BoundedTail, MAX_TAIL_CHARS } from "../boundedTail.js";
+import { createTempSandbox } from "./test-shared.js";
 
 /**
  * Create a filesystem-based test isolated sandbox provider.
@@ -30,83 +26,12 @@ export const testIsolated = (): IsolatedSandboxProvider =>
   createIsolatedSandboxProvider({
     name: "test-isolated",
     create: async (): Promise<IsolatedSandboxHandle> => {
-      const sandboxRoot = await mkdtemp(join(tmpdir(), "sandcastle-test-"));
-      const worktreePath = join(sandboxRoot, "workspace");
-      await mkdir(worktreePath, { recursive: true });
+      const temp = await createTempSandbox("sandcastle-test-");
 
       return {
-        worktreePath,
-
-        exec: (
-          command: string,
-          options?: {
-            onLine?: (line: string) => void;
-            cwd?: string;
-            sudo?: boolean;
-          },
-        ): Promise<ExecResult> => {
-          if (options?.onLine) {
-            const onLine = options.onLine;
-            return new Promise((resolve, reject) => {
-              const proc = spawn("sh", ["-c", command], {
-                cwd: options?.cwd ?? worktreePath,
-                stdio: ["ignore", "pipe", "pipe"],
-              });
-
-              const stdoutTail = new BoundedTail(MAX_TAIL_CHARS, "\n");
-              const stderrTail = new BoundedTail(MAX_TAIL_CHARS, "");
-
-              const rl = createInterface({ input: proc.stdout! });
-              rl.on("line", (line) => {
-                stdoutTail.push(line);
-                onLine(line);
-              });
-
-              proc.stderr!.on("data", (chunk: Buffer) => {
-                stderrTail.push(chunk.toString());
-              });
-
-              proc.on("error", (error) => {
-                reject(new Error(`exec failed: ${error.message}`));
-              });
-
-              proc.on("close", (code) => {
-                resolve({
-                  stdout: stdoutTail.toString(),
-                  stderr: stderrTail.toString(),
-                  exitCode: code ?? 0,
-                });
-              });
-            });
-          }
-
-          return new Promise((resolve, reject) => {
-            execFile(
-              "sh",
-              ["-c", command],
-              {
-                cwd: options?.cwd ?? worktreePath,
-                maxBuffer: 10 * 1024 * 1024,
-              },
-              (error, stdout, stderr) => {
-                if (error && error.code === undefined) {
-                  reject(new Error(`exec failed: ${error.message}`));
-                } else {
-                  resolve({
-                    stdout: stdout.toString(),
-                    stderr: stderr.toString(),
-                    exitCode: typeof error?.code === "number" ? error.code : 0,
-                  });
-                }
-              },
-            );
-          });
-        },
-
-        copyIn: async (
-          hostPath: string,
-          sandboxPath: string,
-        ): Promise<void> => {
+        worktreePath: temp.worktreePath,
+        exec: temp.exec,
+        copyIn: async (hostPath, sandboxPath) => {
           const info = await stat(hostPath);
           if (info.isDirectory()) {
             await cp(hostPath, sandboxPath, { recursive: true });
@@ -115,18 +40,11 @@ export const testIsolated = (): IsolatedSandboxProvider =>
             await copyFile(hostPath, sandboxPath);
           }
         },
-
-        copyFileOut: async (
-          sandboxPath: string,
-          hostPath: string,
-        ): Promise<void> => {
+        copyFileOut: async (sandboxPath, hostPath) => {
           await mkdir(dirname(hostPath), { recursive: true });
           await copyFile(sandboxPath, hostPath);
         },
-
-        close: async (): Promise<void> => {
-          await rm(sandboxRoot, { recursive: true, force: true });
-        },
+        close: temp.close,
       };
     },
   });

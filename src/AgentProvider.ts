@@ -1,17 +1,27 @@
+import { mkdir, readFile, rm, writeFile, access } from "node:fs/promises";
+import { dirname, join, posix } from "node:path";
+import { tmpdir } from "node:os";
 import {
-  codexHostSessionStore,
-  codexSandboxSessionStore,
+  claudeHostSessionPath,
+  claudeSandboxSessionPath,
   findClaudeSessionOnHost,
   findCodexSessionOnHost,
-  hostSessionStore,
-  sandboxSessionStore,
+  locateCodexHostSession,
+  locateCodexSandboxSession,
   transferClaudeSession,
   transferCodexSession,
   type HostSessionLookup,
-  type LocatableSessionStore,
-  type SessionStore,
 } from "./SessionStore.js";
 import type { BindMountSandboxHandle } from "./SandboxProvider.js";
+
+const fileExists = async (path: string): Promise<boolean> => {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 export type ParsedStreamEvent =
   | { type: "text"; text: string }
@@ -206,9 +216,26 @@ export interface IterationUsage {
 }
 
 export interface AgentSessionStorage {
-  hostStore(cwd: string): SessionStore;
-  sandboxStore(cwd: string, handle: BindMountSandboxHandle): SessionStore;
-  transfer(from: SessionStore, to: SessionStore, id: string): Promise<void>;
+  /** Transfer a session JSONL from the sandbox into the host store. */
+  captureToHost(args: {
+    hostCwd: string;
+    sandboxCwd: string;
+    sessionId: string;
+    handle: BindMountSandboxHandle;
+  }): Promise<void>;
+  /** Transfer a session JSONL from the host store into the sandbox. */
+  resumeIntoSandbox(args: {
+    hostCwd: string;
+    sandboxCwd: string;
+    sessionId: string;
+    handle: BindMountSandboxHandle;
+  }): Promise<void>;
+  /** Read a captured session JSONL from the host store. Returns undefined when absent. */
+  readHostSession(cwd: string, sessionId: string): Promise<string | undefined>;
+  /** Whether a session with the given id exists in the host store keyed on cwd. */
+  existsOnHost(cwd: string, sessionId: string): Promise<boolean>;
+  /** Absolute host path where a session would be stored (for not-found error messages). */
+  hostSessionFilePath(cwd: string, sessionId: string): string | undefined;
   /**
    * Locate a session on the host by its unique id, independent of cwd encoding.
    * Used by the no-sandbox resume precheck, where the agent runs on the host and
@@ -216,7 +243,7 @@ export interface AgentSessionStorage {
    * reliably reconstruct. Returns the located path (or `undefined`) plus the
    * directory that was searched (for not-found errors).
    */
-  findByIdOnHost(id: string): Promise<HostSessionLookup>;
+  findByIdOnHost(sessionId: string): Promise<HostSessionLookup>;
 }
 
 export interface AgentProvider {
@@ -235,6 +262,152 @@ export interface AgentProvider {
 }
 
 export const DEFAULT_MODEL = "claude-opus-4-7";
+
+// ---------------------------------------------------------------------------
+// Session storage helpers — file I/O lives here so callers (Orchestrator,
+// resumePrecheck) work against the high-level AgentSessionStorage interface
+// and tests can exercise transferClaudeSession / transferCodexSession as
+// pure string functions.
+// ---------------------------------------------------------------------------
+
+const readSandboxFile = async (
+  handle: Pick<BindMountSandboxHandle, "copyFileOut">,
+  sandboxPath: string,
+  tag: string,
+): Promise<string> => {
+  const tmpPath = join(
+    tmpdir(),
+    `sandcastle-${tag}-${Date.now()}-${Math.random().toString(36).slice(2)}.jsonl`,
+  );
+  await handle.copyFileOut(sandboxPath, tmpPath);
+  try {
+    return await readFile(tmpPath, "utf-8");
+  } finally {
+    await rm(tmpPath, { force: true }).catch(() => {});
+  }
+};
+
+const writeSandboxFile = async (
+  handle: Pick<BindMountSandboxHandle, "copyFileIn" | "exec">,
+  sandboxPath: string,
+  content: string,
+  tag: string,
+): Promise<void> => {
+  const tmpPath = join(
+    tmpdir(),
+    `sandcastle-${tag}-${Date.now()}-${Math.random().toString(36).slice(2)}.jsonl`,
+  );
+  await writeFile(tmpPath, content);
+  try {
+    await handle.exec(`mkdir -p ${JSON.stringify(posix.dirname(sandboxPath))}`);
+    await handle.copyFileIn(tmpPath, sandboxPath);
+  } finally {
+    await rm(tmpPath, { force: true }).catch(() => {});
+  }
+};
+
+const makeClaudeSessionStorage = (
+  options?: ClaudeCodeOptions,
+): AgentSessionStorage => {
+  const hostProjectsDir = options?.sessionStorage?.hostProjectsDir;
+  const sandboxProjectsDir =
+    options?.sessionStorage?.sandboxProjectsDir ??
+    "/home/agent/.claude/projects";
+
+  return {
+    hostSessionFilePath: (cwd, id) =>
+      claudeHostSessionPath(cwd, id, hostProjectsDir),
+    existsOnHost: (cwd, id) =>
+      fileExists(claudeHostSessionPath(cwd, id, hostProjectsDir)),
+    readHostSession: async (cwd, id) => {
+      const path = claudeHostSessionPath(cwd, id, hostProjectsDir);
+      if (!(await fileExists(path))) return undefined;
+      return readFile(path, "utf-8");
+    },
+    captureToHost: async ({ hostCwd, sandboxCwd, sessionId, handle }) => {
+      const sandboxPath = claudeSandboxSessionPath(
+        sandboxCwd,
+        sessionId,
+        sandboxProjectsDir,
+      );
+      const jsonl = await readSandboxFile(handle, sandboxPath, "claude-cap");
+      const rewritten = transferClaudeSession(jsonl, sandboxCwd, hostCwd);
+      const hostPath = claudeHostSessionPath(
+        hostCwd,
+        sessionId,
+        hostProjectsDir,
+      );
+      await mkdir(dirname(hostPath), { recursive: true });
+      await writeFile(hostPath, rewritten);
+    },
+    resumeIntoSandbox: async ({ hostCwd, sandboxCwd, sessionId, handle }) => {
+      const hostPath = claudeHostSessionPath(
+        hostCwd,
+        sessionId,
+        hostProjectsDir,
+      );
+      const jsonl = await readFile(hostPath, "utf-8");
+      const rewritten = transferClaudeSession(jsonl, hostCwd, sandboxCwd);
+      const sandboxPath = claudeSandboxSessionPath(
+        sandboxCwd,
+        sessionId,
+        sandboxProjectsDir,
+      );
+      await writeSandboxFile(handle, sandboxPath, rewritten, "claude-res");
+    },
+    findByIdOnHost: (id) => findClaudeSessionOnHost(id, hostProjectsDir),
+  };
+};
+
+const makeCodexSessionStorage = (
+  options?: CodexOptions,
+): AgentSessionStorage => {
+  const hostSessionsDir = options?.sessionStorage?.hostSessionsDir;
+  const sandboxSessionsDir =
+    options?.sessionStorage?.sandboxSessionsDir ??
+    posix.join("/home/agent", ".codex", "sessions");
+
+  // Codex sessions live at YYYY/MM/DD/rollout-*-<id>.jsonl — the path is not
+  // derivable from (cwd, id) alone, so we cache the path written by
+  // captureToHost for hostSessionFilePath to surface on the IterationResult.
+  const capturedPaths = new Map<string, string>();
+
+  return {
+    hostSessionFilePath: (_cwd, id) => capturedPaths.get(id),
+    existsOnHost: async (_cwd, id) => {
+      const found = await findCodexSessionOnHost(id, hostSessionsDir);
+      return found.path !== undefined;
+    },
+    readHostSession: async (_cwd, id) => {
+      const found = await findCodexSessionOnHost(id, hostSessionsDir);
+      if (!found.path) return undefined;
+      return readFile(found.path, "utf-8");
+    },
+    captureToHost: async ({ hostCwd, sandboxCwd, sessionId, handle }) => {
+      const located = await locateCodexSandboxSession(
+        sessionId,
+        handle,
+        sandboxSessionsDir,
+      );
+      const jsonl = await readSandboxFile(handle, located.path, "codex-cap");
+      const rewritten = transferCodexSession(jsonl, sandboxCwd, hostCwd);
+      const root =
+        hostSessionsDir ?? join(process.env.HOME ?? "~", ".codex", "sessions");
+      const target = join(root, located.relativePath);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, rewritten);
+      capturedPaths.set(sessionId, target);
+    },
+    resumeIntoSandbox: async ({ hostCwd, sandboxCwd, sessionId, handle }) => {
+      const located = await locateCodexHostSession(sessionId, hostSessionsDir);
+      const jsonl = await readFile(located.path, "utf-8");
+      const rewritten = transferCodexSession(jsonl, hostCwd, sandboxCwd);
+      const target = posix.join(sandboxSessionsDir, located.relativePath);
+      await writeSandboxFile(handle, target, rewritten, "codex-res");
+    },
+    findByIdOnHost: (id) => findCodexSessionOnHost(id, hostSessionsDir),
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Pi agent provider
@@ -450,26 +623,7 @@ export const codex = (
   name: "codex",
   env: options?.env ?? {},
   captureSessions: options?.captureSessions ?? true,
-  sessionStorage: {
-    hostStore: (cwd) =>
-      codexHostSessionStore(cwd, options?.sessionStorage?.hostSessionsDir),
-    sandboxStore: (cwd, handle) =>
-      codexSandboxSessionStore(
-        cwd,
-        handle,
-        options?.sessionStorage?.sandboxSessionsDir,
-      ),
-    // Both stores above are LocatableSessionStore by construction; the
-    // AgentSessionStorage seam types them as the narrower SessionStore.
-    transfer: (from, to, id) =>
-      transferCodexSession(
-        from as LocatableSessionStore,
-        to as LocatableSessionStore,
-        id,
-      ),
-    findByIdOnHost: (id) =>
-      findCodexSessionOnHost(id, options?.sessionStorage?.hostSessionsDir),
-  },
+  sessionStorage: makeCodexSessionStorage(options),
 
   buildPrintCommand({
     prompt,
@@ -844,20 +998,7 @@ export const claudeCode = (
   name: "claude-code",
   env: options?.env ?? {},
   captureSessions: options?.captureSessions ?? true,
-  sessionStorage: {
-    hostStore: (cwd) =>
-      hostSessionStore(cwd, options?.sessionStorage?.hostProjectsDir),
-    sandboxStore: (cwd, handle) =>
-      sandboxSessionStore(
-        cwd,
-        handle,
-        options?.sessionStorage?.sandboxProjectsDir ??
-          "/home/agent/.claude/projects",
-      ),
-    transfer: transferClaudeSession,
-    findByIdOnHost: (id) =>
-      findClaudeSessionOnHost(id, options?.sessionStorage?.hostProjectsDir),
-  },
+  sessionStorage: makeClaudeSessionStorage(options),
 
   buildPrintCommand({
     prompt,

@@ -12,11 +12,7 @@ import {
   withTimeout,
   type SandboxError,
 } from "./errors.js";
-import {
-  Sandbox,
-  type ExecResult,
-  type SandboxService,
-} from "./SandboxFactory.js";
+import { type ExecResult, type SandboxService } from "./SandboxFactory.js";
 import type { Timeouts } from "./run.js";
 
 const GIT_SETUP_TIMEOUT_MS = 10_000;
@@ -176,12 +172,10 @@ export interface SandboxLifecycleResult<A> {
 
 export const withSandboxLifecycle = <A>(
   options: SandboxLifecycleOptions,
-  work: (
-    ctx: SandboxContext,
-  ) => Effect.Effect<A, SandboxError, Sandbox | Display>,
-): Effect.Effect<SandboxLifecycleResult<A>, SandboxError, Sandbox | Display> =>
+  sandbox: SandboxService,
+  work: (ctx: SandboxContext) => Effect.Effect<A, SandboxError, Display>,
+): Effect.Effect<SandboxLifecycleResult<A>, SandboxError, Display> =>
   Effect.gen(function* () {
-    const sandbox = yield* Sandbox;
     const display = yield* Display;
     const { hostRepoDir, sandboxRepoDir, hooks, branch, hostWorktreePath } =
       options;

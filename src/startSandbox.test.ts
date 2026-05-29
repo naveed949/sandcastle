@@ -11,7 +11,7 @@ import {
   type BindMountSandboxHandle,
   type IsolatedSandboxHandle,
 } from "./SandboxProvider.js";
-import { Sandbox, SANDBOX_REPO_DIR } from "./SandboxFactory.js";
+import { SANDBOX_REPO_DIR } from "./SandboxFactory.js";
 import { startSandbox, COPY_PATHS_TIMEOUT_MS } from "./startSandbox.js";
 import { testIsolated } from "./sandboxes/test-isolated.js";
 import { CopyToWorktreeTimeoutError } from "./errors.js";
@@ -77,7 +77,7 @@ describe("startSandbox", () => {
       expect(createCalls[0].env).toEqual({ FOO: "bar" });
       expect(result.worktreePath).toBe(SANDBOX_REPO_DIR);
       expect(result.handle).toBeDefined();
-      expect(result.sandboxLayer).toBeDefined();
+      expect(result.sandbox).toBeDefined();
     });
 
     it("returns a working sandboxLayer", async () => {
@@ -92,7 +92,7 @@ describe("startSandbox", () => {
         }),
       });
 
-      const { sandboxLayer } = await Effect.runPromise(
+      const { sandbox } = await Effect.runPromise(
         startSandbox({
           provider,
           hostRepoDir: "/repo",
@@ -105,9 +105,8 @@ describe("startSandbox", () => {
 
       const result = await Effect.runPromise(
         Effect.gen(function* () {
-          const sandbox = yield* Sandbox;
           return yield* sandbox.exec("echo hello");
-        }).pipe(Effect.provide(sandboxLayer)),
+        }),
       );
 
       expect(result.stdout).toBe("hello");
@@ -131,7 +130,7 @@ describe("startSandbox", () => {
       await commitFile(hostDir, "hello.txt", "hello world", "initial");
 
       const provider = testIsolated();
-      const { handle, sandboxLayer, worktreePath } = await Effect.runPromise(
+      const { handle, sandbox, worktreePath } = await Effect.runPromise(
         startSandbox({
           provider,
           hostRepoDir: hostDir,
@@ -142,9 +141,8 @@ describe("startSandbox", () => {
       // Verify the repo was synced - hello.txt should exist
       const result = await Effect.runPromise(
         Effect.gen(function* () {
-          const sandbox = yield* Sandbox;
           return yield* sandbox.exec("cat hello.txt");
-        }).pipe(Effect.provide(sandboxLayer)),
+        }),
       );
 
       expect(result.stdout.trim()).toBe("hello world");
@@ -160,7 +158,7 @@ describe("startSandbox", () => {
       await writeFile(join(hostDir, "extra.txt"), "extra content");
 
       const provider = testIsolated();
-      const { handle, sandboxLayer } = await Effect.runPromise(
+      const { handle, sandbox } = await Effect.runPromise(
         startSandbox({
           provider,
           hostRepoDir: hostDir,
@@ -171,9 +169,8 @@ describe("startSandbox", () => {
 
       const result = await Effect.runPromise(
         Effect.gen(function* () {
-          const sandbox = yield* Sandbox;
           return yield* sandbox.exec("cat extra.txt");
-        }).pipe(Effect.provide(sandboxLayer)),
+        }),
       );
 
       expect(result.stdout.trim()).toBe("extra content");

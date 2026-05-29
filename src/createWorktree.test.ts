@@ -20,7 +20,7 @@ import {
   type ExecResult,
   type SandboxProvider,
 } from "./SandboxProvider.js";
-import { makeLocalSandboxLayer } from "./testSandbox.js";
+import { makeLocalSandbox } from "./testSandbox.js";
 
 const execAsync = promisify(exec);
 
@@ -872,7 +872,7 @@ describe("worktree.createSandbox()", () => {
       const sandbox = await ws.createSandbox({
         sandbox: testSandbox,
         _test: {
-          buildSandboxLayer: (sandboxDir) => makeLocalSandboxLayer(sandboxDir),
+          buildSandbox: (sandboxDir) => makeLocalSandbox(sandboxDir),
         },
       });
 
@@ -902,7 +902,7 @@ describe("worktree.createSandbox()", () => {
       const sandbox = await ws.createSandbox({
         sandbox: testSandbox,
         _test: {
-          buildSandboxLayer: (sandboxDir) => makeLocalSandboxLayer(sandboxDir),
+          buildSandbox: (sandboxDir) => makeLocalSandbox(sandboxDir),
         },
       });
 
@@ -933,7 +933,7 @@ describe("worktree.createSandbox()", () => {
     const sandbox = await ws.createSandbox({
       sandbox: testSandbox,
       _test: {
-        buildSandboxLayer: (sandboxDir) => makeLocalSandboxLayer(sandboxDir),
+        buildSandbox: (sandboxDir) => makeLocalSandbox(sandboxDir),
       },
     });
 
@@ -962,7 +962,7 @@ describe("worktree.createSandbox()", () => {
       const sandbox1 = await ws.createSandbox({
         sandbox: testSandbox,
         _test: {
-          buildSandboxLayer: (sandboxDir) => makeLocalSandboxLayer(sandboxDir),
+          buildSandbox: (sandboxDir) => makeLocalSandbox(sandboxDir),
         },
       });
       expect(sandbox1.branch).toBe("sequential-sandbox");
@@ -972,7 +972,7 @@ describe("worktree.createSandbox()", () => {
       const sandbox2 = await ws.createSandbox({
         sandbox: testSandbox,
         _test: {
-          buildSandboxLayer: (sandboxDir) => makeLocalSandboxLayer(sandboxDir),
+          buildSandbox: (sandboxDir) => makeLocalSandbox(sandboxDir),
         },
       });
       expect(sandbox2.branch).toBe("sequential-sandbox");

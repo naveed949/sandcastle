@@ -7,7 +7,7 @@ import { ClackDisplay, Display } from "./Display.js";
 import { preprocessPrompt } from "./PromptPreprocessor.js";
 import { resolvePrompt } from "./PromptResolver.js";
 import {
-  makeSandboxLayerFromHandle,
+  makeSandboxFromHandle,
   resolveGitMounts,
   SANDBOX_REPO_DIR,
 } from "./SandboxFactory.js";
@@ -350,8 +350,8 @@ export const interactive = async (
       }
       const interactiveExecFn = handle.interactiveExec.bind(handle);
 
-      // Build sandbox layer and run withSandboxLifecycle
-      const sandboxLayer = makeSandboxLayerFromHandle(handle);
+      // Build sandbox service and run withSandboxLifecycle
+      const sandbox = makeSandboxFromHandle(handle);
       const worktreePath = handle.worktreePath;
 
       const applyToHost =
@@ -369,6 +369,7 @@ export const interactive = async (
           applyToHost,
           timeouts: options.timeouts,
         },
+        sandbox,
         (ctx) =>
           Effect.gen(function* () {
             // Preprocess prompt (expand !`command` shell expressions inside sandbox).
@@ -404,9 +405,7 @@ export const interactive = async (
           }),
       );
 
-      const lifecycleResult = yield* lifecycleEffect.pipe(
-        Effect.provide(sandboxLayer),
-      );
+      const lifecycleResult = yield* lifecycleEffect;
 
       const exitCode = lifecycleResult.result;
 

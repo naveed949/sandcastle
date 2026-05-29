@@ -263,7 +263,10 @@ export const orchestrate = (
       yield* display.status(label(`Iteration ${i}/${iterations}`), "info");
 
       const sandboxResult = yield* factory.withSandbox(
-        ({ hostWorktreePath, sandboxRepoPath, applyToHost, bindMountHandle }) =>
+        (
+          { hostWorktreePath, sandboxRepoPath, applyToHost, bindMountHandle },
+          sandbox,
+        ) =>
           withSandboxLifecycle(
             {
               hostRepoDir,
@@ -275,6 +278,7 @@ export const orchestrate = (
               signal: options.signal,
               timeouts: options.timeouts,
             },
+            sandbox,
             (ctx) =>
               Effect.gen(function* () {
                 // Resume session: transfer JSONL from host to sandbox before iteration 1
@@ -286,18 +290,14 @@ export const orchestrate = (
                   provider.sessionStorage
                 ) {
                   yield* display.status(label("Resuming session"), "info");
-                  const sbStore = provider.sessionStorage.sandboxStore(
-                    ctx.sandboxRepoDir,
-                    bindMountHandle,
-                  );
-                  const hStore = provider.sessionStorage.hostStore(hostRepoDir);
                   yield* Effect.tryPromise({
                     try: () =>
-                      provider.sessionStorage!.transfer(
-                        hStore,
-                        sbStore,
-                        iterationResumeSession,
-                      ),
+                      provider.sessionStorage!.resumeIntoSandbox({
+                        hostCwd: hostRepoDir,
+                        sandboxCwd: ctx.sandboxRepoDir,
+                        sessionId: iterationResumeSession,
+                        handle: bindMountHandle,
+                      }),
                     catch: (e) =>
                       new SessionCaptureError({
                         message: `Session resume failed: ${e instanceof Error ? e.message : String(e)}`,
@@ -389,31 +389,30 @@ export const orchestrate = (
                   bindMountHandle
                 ) {
                   yield* display.status(label("Capturing session"), "info");
-                  const sbStore = provider.sessionStorage.sandboxStore(
-                    ctx.sandboxRepoDir,
-                    bindMountHandle,
-                  );
-                  const hStore = provider.sessionStorage.hostStore(hostRepoDir);
                   yield* Effect.tryPromise({
                     try: () =>
-                      provider.sessionStorage!.transfer(
-                        sbStore,
-                        hStore,
+                      provider.sessionStorage!.captureToHost({
+                        hostCwd: hostRepoDir,
+                        sandboxCwd: ctx.sandboxRepoDir,
                         sessionId,
-                      ),
+                        handle: bindMountHandle,
+                      }),
                     catch: (e) =>
                       new SessionCaptureError({
                         message: `Session capture failed: ${e instanceof Error ? e.message : String(e)}`,
                         sessionId,
                       }),
                   });
-                  sessionFilePath = hStore.sessionFilePath(sessionId);
+                  sessionFilePath = provider.sessionStorage.hostSessionFilePath(
+                    hostRepoDir,
+                    sessionId,
+                  );
 
                   // Parse token usage from the captured session JSONL
                   if (provider.parseSessionUsage) {
                     const content = yield* Effect.promise(() =>
-                      hStore
-                        .readSession(sessionId)
+                      provider
+                        .sessionStorage!.readHostSession(hostRepoDir, sessionId)
                         .catch(() => undefined as string | undefined),
                     );
                     if (content) {

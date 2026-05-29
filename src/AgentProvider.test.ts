@@ -1,3 +1,6 @@
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, posix } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   claudeCode,
@@ -8,6 +11,7 @@ import {
   pi,
 } from "./AgentProvider.js";
 import type { AgentCommandOptions } from "./AgentProvider.js";
+import type { BindMountSandboxHandle } from "./SandboxProvider.js";
 
 /** Shorthand: build options with dangerouslySkipPermissions: true (mirrors existing sandbox callers). */
 const opts = (prompt: string): AgentCommandOptions => ({
@@ -1936,5 +1940,110 @@ describe("captureSessions flag", () => {
 
   it("cursor has captureSessions false", () => {
     expect(cursor("cursor-model").captureSessions).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sessionStorage — captureToHost populates hostSessionFilePath
+// ---------------------------------------------------------------------------
+
+describe("sessionStorage", () => {
+  /** Bind-mount handle backed by the host filesystem (sandbox path == host path). */
+  const fsBindMountHandle = (): BindMountSandboxHandle => ({
+    worktreePath: "/workspace",
+    exec: async (command) => {
+      const { exec } = await import("node:child_process");
+      return new Promise((resolve) => {
+        exec(command, (err, stdout, stderr) => {
+          resolve({
+            stdout: stdout.toString(),
+            stderr: stderr.toString(),
+            exitCode: err && typeof err.code === "number" ? err.code : 0,
+          });
+        });
+      });
+    },
+    copyFileIn: async (hostPath, sandboxPath) => {
+      const { copyFile } = await import("node:fs/promises");
+      await copyFile(hostPath, sandboxPath);
+    },
+    copyFileOut: async (sandboxPath, hostPath) => {
+      const { copyFile } = await import("node:fs/promises");
+      await copyFile(sandboxPath, hostPath);
+    },
+    close: async () => {},
+  });
+
+  it("claudeCode hostSessionFilePath is derivable without capture", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sandcastle-claude-hostpath-"));
+    try {
+      const provider = claudeCode("claude-opus-4-7", {
+        sessionStorage: { hostProjectsDir: dir },
+      });
+      // Path is purely a function of (cwd, id) — available before any capture.
+      const path = provider.sessionStorage!.hostSessionFilePath(
+        "/some/cwd",
+        "abc-123",
+      );
+      expect(path).toContain("-some-cwd");
+      expect(path).toContain("abc-123.jsonl");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("codex hostSessionFilePath returns the captured rollout file after captureToHost", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "sandcastle-codex-hostpath-"));
+    const sandboxDir = await mkdtemp(join(tmpdir(), "sandcastle-codex-sbx-"));
+    try {
+      const id = "9ba1c695-2222-4444-8888-e7e847bf34dd";
+      // Stage a sandbox-side rollout file mirroring Codex's YYYY/MM/DD layout.
+      const relativePath = posix.join(
+        "2026",
+        "05",
+        "26",
+        `rollout-2026-05-26T08-00-00-${id}.jsonl`,
+      );
+      const sandboxRollout = join(sandboxDir, relativePath);
+      await mkdir(join(sandboxRollout, ".."), { recursive: true });
+      await writeFile(
+        sandboxRollout,
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id, cwd: "/sandbox/repo" },
+        }),
+      );
+
+      const provider = codex("gpt-5.4-mini", {
+        sessionStorage: {
+          hostSessionsDir: hostDir,
+          sandboxSessionsDir: sandboxDir,
+        },
+      });
+
+      // Before capture, the path is unknown.
+      expect(
+        provider.sessionStorage!.hostSessionFilePath("/host/repo", id),
+      ).toBeUndefined();
+
+      await provider.sessionStorage!.captureToHost({
+        hostCwd: "/host/repo",
+        sandboxCwd: "/sandbox/repo",
+        sessionId: id,
+        handle: fsBindMountHandle(),
+      });
+
+      // After capture, the path resolves to the rewritten rollout under hostDir.
+      const captured = provider.sessionStorage!.hostSessionFilePath(
+        "/host/repo",
+        id,
+      );
+      expect(captured).toBe(join(hostDir, relativePath));
+      const content = await readFile(captured!, "utf-8");
+      expect(JSON.parse(content).payload.cwd).toBe("/host/repo");
+    } finally {
+      await rm(hostDir, { recursive: true, force: true });
+      await rm(sandboxDir, { recursive: true, force: true });
+    }
   });
 });

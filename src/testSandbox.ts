@@ -1,8 +1,8 @@
 /**
- * Test helper: creates a local (filesystem-based) Sandbox layer for unit tests.
+ * Test helper: creates a local (filesystem-based) SandboxService for unit tests.
  * This replaces FilesystemSandbox which has been removed.
  */
-import { Effect, Layer } from "effect";
+import { Effect } from "effect";
 import { spawn } from "node:child_process";
 import { copyFile, mkdir } from "node:fs/promises";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { BoundedTail, MAX_TAIL_CHARS } from "./boundedTail.js";
 import { CopyError, ExecError } from "./errors.js";
-import { type ExecResult, Sandbox } from "./SandboxFactory.js";
+import { type ExecResult, type SandboxService } from "./SandboxFactory.js";
 
 /**
  * Creates an isolated git global config env so that test sandbox
@@ -24,13 +24,11 @@ const createIsolatedGitEnv = (): Record<string, string> => {
   return { GIT_CONFIG_GLOBAL: globalConfigPath };
 };
 
-export const makeLocalSandboxLayer = (
-  sandboxDir: string,
-): Layer.Layer<Sandbox> => {
+export const makeLocalSandbox = (sandboxDir: string): SandboxService => {
   const gitEnv = createIsolatedGitEnv();
   const env = { ...process.env, ...gitEnv };
 
-  return Layer.succeed(Sandbox, {
+  return {
     exec: (command, options) => {
       return Effect.async<ExecResult, ExecError>((resume) => {
         const proc = spawn("sh", ["-c", command], {
@@ -125,5 +123,5 @@ export const makeLocalSandboxLayer = (
             message: `Failed to copy ${sandboxPath} -> ${hostPath}: ${e}`,
           }),
       }),
-  });
+  };
 };

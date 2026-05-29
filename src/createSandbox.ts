@@ -12,10 +12,7 @@ import {
 import { resolveEnv } from "./EnvResolver.js";
 import { mergeProviderEnv } from "./mergeProviderEnv.js";
 import { orchestrate, type IterationResult } from "./Orchestrator.js";
-import {
-  callbackAgentStreamEmitterLayer,
-  noopAgentStreamEmitterLayer,
-} from "./AgentStreamEmitter.js";
+import { agentStreamEmitterLayer } from "./AgentStreamEmitter.js";
 import {
   type PromptArgs,
   substitutePromptArgs,
@@ -33,10 +30,11 @@ import {
   type SandboxHooks,
 } from "./SandboxLifecycle.js";
 import {
-  Sandbox as SandboxTag,
+  type SandboxService,
   SandboxFactory,
   SANDBOX_REPO_DIR,
   resolveGitMounts,
+  makeSandboxFromHandle,
 } from "./SandboxFactory.js";
 import type {
   SandboxProvider,
@@ -79,9 +77,7 @@ export interface CreateSandboxOptions {
   readonly timeouts?: Timeouts;
   /** @internal Test-only overrides to bypass the sandbox provider. */
   readonly _test?: {
-    readonly buildSandboxLayer?: (
-      sandboxDir: string,
-    ) => Layer.Layer<SandboxTag>;
+    readonly buildSandbox?: (sandboxDir: string) => SandboxService;
   };
 }
 
@@ -185,7 +181,7 @@ interface SandboxHandleContext {
   readonly worktreePath: string;
   readonly hostRepoDir: string;
   readonly sandboxRepoDir: string;
-  readonly sandboxLayer: Layer.Layer<SandboxTag>;
+  readonly sandbox: SandboxService;
   readonly providerHandle:
     | BindMountSandboxHandle
     | IsolatedSandboxHandle
@@ -210,7 +206,7 @@ const buildSandboxHandle = (
     worktreePath,
     hostRepoDir,
     sandboxRepoDir,
-    sandboxLayer,
+    sandbox,
     providerHandle,
     applyToHost,
     timeouts,
@@ -295,12 +291,14 @@ const buildSandboxHandle = (
 
       const reuseFactoryLayer = Layer.succeed(SandboxFactory, {
         withSandbox: (makeEffect) =>
-          makeEffect({
-            hostWorktreePath: worktreePath,
-            sandboxRepoPath: sandboxRepoDir,
-            applyToHost,
-          }).pipe(
-            Effect.provide(sandboxLayer),
+          makeEffect(
+            {
+              hostWorktreePath: worktreePath,
+              sandboxRepoPath: sandboxRepoDir,
+              applyToHost,
+            },
+            sandbox,
+          ).pipe(
             Effect.map((value) => ({
               value,
               preservedWorktreePath: undefined,
@@ -308,15 +306,16 @@ const buildSandboxHandle = (
           ) as any,
       });
 
-      const agentStreamEmitterLayer =
-        resolvedLogging.type === "file" && resolvedLogging.onAgentStreamEvent
-          ? callbackAgentStreamEmitterLayer(resolvedLogging.onAgentStreamEvent)
-          : noopAgentStreamEmitterLayer;
+      const streamEmitterLayer = agentStreamEmitterLayer(
+        resolvedLogging.type === "file"
+          ? resolvedLogging.onAgentStreamEvent
+          : undefined,
+      );
 
       const runLayer = Layer.mergeAll(
         reuseFactoryLayer,
         runDisplayLayer,
-        agentStreamEmitterLayer,
+        streamEmitterLayer,
       );
 
       let result;
@@ -422,6 +421,7 @@ const buildSandboxHandle = (
                 applyToHost,
                 timeouts,
               },
+              sandbox,
               (ctx) =>
                 Effect.gen(function* () {
                   const fullPrompt = isInlinePrompt
@@ -472,7 +472,6 @@ const buildSandboxHandle = (
                 }),
             );
           }).pipe(
-            Effect.provide(sandboxLayer),
             Effect.provide(ClackDisplay.layer),
             Effect.provide(NodeContext.layer),
           ),
@@ -509,9 +508,7 @@ export interface CreateSandboxFromWorktreeOptions {
   readonly copyToWorktree?: string[];
   readonly timeouts?: Timeouts;
   readonly _test?: {
-    readonly buildSandboxLayer?: (
-      sandboxDir: string,
-    ) => Layer.Layer<SandboxTag>;
+    readonly buildSandbox?: (sandboxDir: string) => SandboxService;
   };
 }
 
@@ -524,7 +521,7 @@ export const createSandboxFromWorktree = async (
   options: CreateSandboxFromWorktreeOptions,
 ): Promise<Sandbox> => {
   const { branch, worktreePath, hostRepoDir } = options;
-  const isTestMode = !!options._test?.buildSandboxLayer;
+  const isTestMode = !!options._test?.buildSandbox;
 
   // 1. Copy files if requested (bind-mount only)
   if (
@@ -548,12 +545,12 @@ export const createSandboxFromWorktree = async (
     | IsolatedSandboxHandle
     | NoSandboxHandle
     | undefined;
-  let sandboxLayer: Layer.Layer<SandboxTag>;
+  let sandbox: SandboxService;
   let sandboxRepoDir: string;
   const isIsolated = options.sandbox.tag === "isolated";
 
   if (isTestMode) {
-    sandboxLayer = options._test!.buildSandboxLayer!(worktreePath);
+    sandbox = options._test!.buildSandbox!(worktreePath);
     sandboxRepoDir = worktreePath;
   } else {
     const resolvedEnv = await Effect.runPromise(
@@ -617,7 +614,7 @@ export const createSandboxFromWorktree = async (
     const startResult = await Effect.runPromise(startEffect);
 
     providerHandle = startResult.handle;
-    sandboxLayer = startResult.sandboxLayer;
+    sandbox = startResult.sandbox;
     sandboxRepoDir = startResult.worktreePath;
   }
 
@@ -628,7 +625,6 @@ export const createSandboxFromWorktree = async (
   if (sandboxOnReady?.length || hostOnReady?.length) {
     await Effect.runPromise(
       Effect.gen(function* () {
-        const sandbox = yield* SandboxTag;
         yield* sandbox.exec(
           `git config --global --add safe.directory "${sandboxRepoDir}"`,
         );
@@ -648,7 +644,7 @@ export const createSandboxFromWorktree = async (
         yield* Effect.all(allEffects, {
           concurrency: "unbounded",
         });
-      }).pipe(Effect.provide(sandboxLayer)),
+      }),
     );
   }
 
@@ -667,7 +663,7 @@ export const createSandboxFromWorktree = async (
       worktreePath,
       hostRepoDir,
       sandboxRepoDir,
-      sandboxLayer,
+      sandbox,
       providerHandle,
       applyToHost,
       timeouts: options.timeouts,
@@ -690,169 +686,167 @@ export const createSandbox = async (
   options: CreateSandboxOptions,
 ): Promise<Sandbox> => {
   const { branch } = options;
-  const isTestMode = !!options._test?.buildSandboxLayer;
+  const isTestMode = !!options._test?.buildSandbox;
   const isIsolated = options.sandbox.tag === "isolated";
 
   // Resolve cwd, create the worktree, and set up the sandbox in a single Effect.
   // Once the worktree exists, any later failure (e.g. a missing image surfacing
   // when the provider creates the container) tears down the container — if it
   // started — and removes the worktree so it is not orphaned on disk.
-  const {
-    hostRepoDir,
-    worktreePath,
-    providerHandle,
-    sandboxLayer,
-    sandboxRepoDir,
-  } = await Effect.runPromise(
-    Effect.gen(function* () {
-      const hostRepoDir = yield* resolveCwd(options.cwd);
+  const { hostRepoDir, worktreePath, providerHandle, sandbox, sandboxRepoDir } =
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const hostRepoDir = yield* resolveCwd(options.cwd);
 
-      yield* WorktreeManager.pruneStale(hostRepoDir).pipe(
-        Effect.catchAll(() => Effect.void),
-      );
-      const { path: worktreePath } = yield* WorktreeManager.create(
-        hostRepoDir,
-        { branch, baseBranch: options.baseBranch },
-      );
+        yield* WorktreeManager.pruneStale(hostRepoDir).pipe(
+          Effect.catchAll(() => Effect.void),
+        );
+        const { path: worktreePath } = yield* WorktreeManager.create(
+          hostRepoDir,
+          { branch, baseBranch: options.baseBranch },
+        );
 
-      const prepared = yield* Effect.gen(function* () {
-        // Copy files (bind-mount/no-sandbox only; isolated copies in startSandbox).
-        if (
-          options.copyToWorktree &&
-          options.copyToWorktree.length > 0 &&
-          options.sandbox.tag !== "isolated"
-        ) {
-          yield* copyToWorktree(
-            options.copyToWorktree,
-            hostRepoDir,
-            worktreePath,
-            options.timeouts?.copyToWorktreeMs,
-          );
-        }
+        const prepared = yield* Effect.gen(function* () {
+          // Copy files (bind-mount/no-sandbox only; isolated copies in startSandbox).
+          if (
+            options.copyToWorktree &&
+            options.copyToWorktree.length > 0 &&
+            options.sandbox.tag !== "isolated"
+          ) {
+            yield* copyToWorktree(
+              options.copyToWorktree,
+              hostRepoDir,
+              worktreePath,
+              options.timeouts?.copyToWorktreeMs,
+            );
+          }
 
-        // Run host.onWorktreeReady hooks (after copy, before sandbox creation).
-        if (options.hooks?.host?.onWorktreeReady?.length) {
-          yield* runHostHooks(options.hooks.host.onWorktreeReady, worktreePath);
-        }
+          // Run host.onWorktreeReady hooks (after copy, before sandbox creation).
+          if (options.hooks?.host?.onWorktreeReady?.length) {
+            yield* runHostHooks(
+              options.hooks.host.onWorktreeReady,
+              worktreePath,
+            );
+          }
 
-        // Start the sandbox via the test layer or the shared startSandbox helper.
-        let providerHandle:
-          | BindMountSandboxHandle
-          | IsolatedSandboxHandle
-          | NoSandboxHandle
-          | undefined;
-        let sandboxLayer: Layer.Layer<SandboxTag>;
-        let sandboxRepoDir: string;
+          // Start the sandbox via the test layer or the shared startSandbox helper.
+          let providerHandle:
+            | BindMountSandboxHandle
+            | IsolatedSandboxHandle
+            | NoSandboxHandle
+            | undefined;
+          let sandbox: SandboxService;
+          let sandboxRepoDir: string;
 
-        if (isTestMode) {
-          sandboxLayer = options._test!.buildSandboxLayer!(worktreePath);
-          sandboxRepoDir = worktreePath;
-        } else {
-          const resolvedEnv = yield* resolveEnv(hostRepoDir);
-          const env = mergeProviderEnv({
-            resolvedEnv,
-            agentProviderEnv: {},
-            sandboxProviderEnv: options.sandbox.env,
-          });
+          if (isTestMode) {
+            sandbox = options._test!.buildSandbox!(worktreePath);
+            sandboxRepoDir = worktreePath;
+          } else {
+            const resolvedEnv = yield* resolveEnv(hostRepoDir);
+            const env = mergeProviderEnv({
+              resolvedEnv,
+              agentProviderEnv: {},
+              sandboxProviderEnv: options.sandbox.env,
+            });
 
-          const provider = options.sandbox;
-          const startResult = yield* provider.tag === "isolated"
-            ? startSandbox({
-                provider,
-                hostRepoDir: worktreePath,
-                env,
-                copyPaths: options.copyToWorktree,
-              })
-            : provider.tag === "none"
+            const provider = options.sandbox;
+            const startResult = yield* provider.tag === "isolated"
               ? startSandbox({
                   provider,
-                  hostRepoDir,
+                  hostRepoDir: worktreePath,
                   env,
-                  worktreeOrRepoPath: worktreePath,
+                  copyPaths: options.copyToWorktree,
                 })
-              : resolveGitMounts(join(hostRepoDir, ".git")).pipe(
-                  Effect.provide(NodeFileSystem.layer),
-                  Effect.catchAll(() => Effect.succeed([])),
-                  // Patch git mounts for Windows worktree compatibility (ADR-0006)
-                  Effect.flatMap((gitMounts) =>
-                    Effect.tryPromise({
-                      try: () =>
-                        patchGitMountsForWindows(
-                          gitMounts,
-                          worktreePath,
-                          SANDBOX_REPO_DIR,
-                        ),
-                      catch: (e) =>
-                        new Error(
-                          `Failed to patch git mounts: ${e instanceof Error ? e.message : String(e)}`,
-                        ),
-                    }),
-                  ),
-                  Effect.flatMap((gitMounts) =>
-                    startSandbox({
-                      provider,
-                      hostRepoDir,
-                      env,
-                      worktreeOrRepoPath: worktreePath,
-                      gitMounts,
-                      repoDir: SANDBOX_REPO_DIR,
-                    }),
-                  ),
-                );
+              : provider.tag === "none"
+                ? startSandbox({
+                    provider,
+                    hostRepoDir,
+                    env,
+                    worktreeOrRepoPath: worktreePath,
+                  })
+                : resolveGitMounts(join(hostRepoDir, ".git")).pipe(
+                    Effect.provide(NodeFileSystem.layer),
+                    Effect.catchAll(() => Effect.succeed([])),
+                    // Patch git mounts for Windows worktree compatibility (ADR-0006)
+                    Effect.flatMap((gitMounts) =>
+                      Effect.tryPromise({
+                        try: () =>
+                          patchGitMountsForWindows(
+                            gitMounts,
+                            worktreePath,
+                            SANDBOX_REPO_DIR,
+                          ),
+                        catch: (e) =>
+                          new Error(
+                            `Failed to patch git mounts: ${e instanceof Error ? e.message : String(e)}`,
+                          ),
+                      }),
+                    ),
+                    Effect.flatMap((gitMounts) =>
+                      startSandbox({
+                        provider,
+                        hostRepoDir,
+                        env,
+                        worktreeOrRepoPath: worktreePath,
+                        gitMounts,
+                        repoDir: SANDBOX_REPO_DIR,
+                      }),
+                    ),
+                  );
 
-          providerHandle = startResult.handle;
-          sandboxLayer = startResult.sandboxLayer;
-          sandboxRepoDir = startResult.worktreePath;
-        }
+            providerHandle = startResult.handle;
+            sandbox = startResult.sandbox;
+            sandboxRepoDir = startResult.worktreePath;
+          }
 
-        // Run onSandboxReady hooks (sandbox-side and host-side in parallel). If
-        // they fail, tear down the container that just started before the outer
-        // handler removes the worktree.
-        const sandboxOnReady = options.hooks?.sandbox?.onSandboxReady;
-        const hostOnReady = options.hooks?.host?.onSandboxReady;
+          // Run onSandboxReady hooks (sandbox-side and host-side in parallel). If
+          // they fail, tear down the container that just started before the outer
+          // handler removes the worktree.
+          const sandboxOnReady = options.hooks?.sandbox?.onSandboxReady;
+          const hostOnReady = options.hooks?.host?.onSandboxReady;
 
-        if (sandboxOnReady?.length || hostOnReady?.length) {
-          yield* Effect.gen(function* () {
-            const sandbox = yield* SandboxTag;
-            yield* sandbox.exec(
-              `git config --global --add safe.directory "${sandboxRepoDir}"`,
+          if (sandboxOnReady?.length || hostOnReady?.length) {
+            yield* Effect.gen(function* () {
+              yield* sandbox.exec(
+                `git config --global --add safe.directory "${sandboxRepoDir}"`,
+              );
+              const sandboxEffects = (sandboxOnReady ?? []).map((hook) =>
+                sandbox.exec(hook.command, {
+                  cwd: sandboxRepoDir,
+                  sudo: hook.sudo,
+                }),
+              );
+              const allEffects = [...sandboxEffects] as Effect.Effect<
+                unknown,
+                unknown
+              >[];
+              if (hostOnReady?.length) {
+                allEffects.push(runHostHooks(hostOnReady, worktreePath));
+              }
+              yield* Effect.all(allEffects, { concurrency: "unbounded" });
+            }).pipe(
+              Effect.onError(() =>
+                providerHandle
+                  ? Effect.promise(() =>
+                      providerHandle!.close().catch(() => {}),
+                    )
+                  : Effect.void,
+              ),
             );
-            const sandboxEffects = (sandboxOnReady ?? []).map((hook) =>
-              sandbox.exec(hook.command, {
-                cwd: sandboxRepoDir,
-                sudo: hook.sudo,
-              }),
-            );
-            const allEffects = [...sandboxEffects] as Effect.Effect<
-              unknown,
-              unknown
-            >[];
-            if (hostOnReady?.length) {
-              allEffects.push(runHostHooks(hostOnReady, worktreePath));
-            }
-            yield* Effect.all(allEffects, { concurrency: "unbounded" });
-          }).pipe(
-            Effect.provide(sandboxLayer),
-            Effect.onError(() =>
-              providerHandle
-                ? Effect.promise(() => providerHandle!.close().catch(() => {}))
-                : Effect.void,
+          }
+
+          return { providerHandle, sandbox, sandboxRepoDir };
+        }).pipe(
+          Effect.onError(() =>
+            WorktreeManager.remove(worktreePath).pipe(
+              Effect.catchAll(() => Effect.void),
             ),
-          );
-        }
-
-        return { providerHandle, sandboxLayer, sandboxRepoDir };
-      }).pipe(
-        Effect.onError(() =>
-          WorktreeManager.remove(worktreePath).pipe(
-            Effect.catchAll(() => Effect.void),
           ),
-        ),
-      );
+        );
 
-      return { hostRepoDir, worktreePath, ...prepared };
-    }).pipe(Effect.provide(NodeContext.layer)),
-  );
+        return { hostRepoDir, worktreePath, ...prepared };
+      }).pipe(Effect.provide(NodeContext.layer)),
+    );
 
   // Build applyToHost callback (once, reused across runs)
   const applyToHost =
@@ -906,7 +900,7 @@ export const createSandbox = async (
       worktreePath,
       hostRepoDir,
       sandboxRepoDir,
-      sandboxLayer,
+      sandbox,
       providerHandle,
       applyToHost,
       timeouts: options.timeouts,

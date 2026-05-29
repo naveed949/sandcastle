@@ -112,9 +112,12 @@ describe("assertResumeSessionExists", () => {
         sessionStorage: { hostProjectsDir: projectsDir },
       });
       const hostRepoDir = "/some/host/repo";
-      await provider.sessionStorage
-        .hostStore(hostRepoDir)
-        .writeSession(SESSION_ID, "{}");
+      const sessionPath = provider.sessionStorage.hostSessionFilePath(
+        hostRepoDir,
+        SESSION_ID,
+      )!;
+      await mkdir(join(sessionPath, ".."), { recursive: true });
+      await writeFile(sessionPath, "{}");
 
       await expect(
         assertResumeSessionExists({

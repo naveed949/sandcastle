@@ -22,17 +22,9 @@ import type { WorktreeInteractiveOptions } from "./createWorktree.js";
 import { defaultImageName } from "./sandboxes/docker.js";
 import * as sandcastle from "./SandboxProvider.js";
 import { createBindMountSandboxProvider } from "./SandboxProvider.js";
+import { testStubProvider } from "./sandboxes/test-shared.js";
 
-const testSandbox = createBindMountSandboxProvider({
-  name: "test",
-  create: async () => ({
-    worktreePath: "/home/agent/workspace",
-    exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
-    copyFileIn: async () => {},
-    copyFileOut: async () => {},
-    close: async () => {},
-  }),
-});
+const testSandbox = testStubProvider({ name: "test" }).provider;
 
 describe("printFileDisplayStartup", () => {
   let consoleSpy: ReturnType<typeof vi.spyOn>;

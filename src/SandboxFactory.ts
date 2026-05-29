@@ -59,11 +59,6 @@ export interface SandboxService {
   ) => Effect.Effect<void, CopyError>;
 }
 
-export class Sandbox extends Context.Tag("Sandbox")<
-  Sandbox,
-  SandboxService
->() {}
-
 const getCopyIn = (
   handle: BindMountSandboxHandle | IsolatedSandboxHandle | NoSandboxHandle,
 ): SandboxService["copyIn"] => {
@@ -98,44 +93,42 @@ const getCopyIn = (
 };
 
 /**
- * Wrap a Promise-based sandbox handle into an Effect-based SandboxService layer.
+ * Wrap a Promise-based sandbox handle into an Effect-based SandboxService.
  * Delegates copyIn/copyFileOut to the handle when available.
  */
-export const makeSandboxLayerFromHandle = (
+export const makeSandboxFromHandle = (
   handle: BindMountSandboxHandle | IsolatedSandboxHandle | NoSandboxHandle,
-): Layer.Layer<Sandbox> =>
-  Layer.succeed(Sandbox, {
-    exec: (command, options) =>
-      Effect.tryPromise({
-        try: () => handle.exec(command, options),
-        catch: (e) =>
-          new ExecError({
-            command,
-            message: `exec failed: ${e instanceof Error ? e.message : String(e)}`,
-          }),
-      }),
-    copyIn: getCopyIn(handle),
-    copyFileOut:
-      "copyFileOut" in handle
-        ? (sandboxPath, hostPath) =>
-            Effect.tryPromise({
-              try: () =>
-                (
-                  handle as IsolatedSandboxHandle | BindMountSandboxHandle
-                ).copyFileOut(sandboxPath, hostPath),
-              catch: (e) =>
-                new CopyError({
-                  message: `copyFileOut failed: ${e instanceof Error ? e.message : String(e)}`,
-                }),
-            })
-        : () =>
-            Effect.fail(
+): SandboxService => ({
+  exec: (command, options) =>
+    Effect.tryPromise({
+      try: () => handle.exec(command, options),
+      catch: (e) =>
+        new ExecError({
+          command,
+          message: `exec failed: ${e instanceof Error ? e.message : String(e)}`,
+        }),
+    }),
+  copyIn: getCopyIn(handle),
+  copyFileOut:
+    "copyFileOut" in handle
+      ? (sandboxPath, hostPath) =>
+          Effect.tryPromise({
+            try: () =>
+              (
+                handle as IsolatedSandboxHandle | BindMountSandboxHandle
+              ).copyFileOut(sandboxPath, hostPath),
+            catch: (e) =>
               new CopyError({
-                message:
-                  "copyFileOut is not supported for this sandbox provider",
+                message: `copyFileOut failed: ${e instanceof Error ? e.message : String(e)}`,
               }),
-            ),
-  });
+          })
+      : () =>
+          Effect.fail(
+            new CopyError({
+              message: "copyFileOut is not supported for this sandbox provider",
+            }),
+          ),
+});
 
 /** The mount point inside the sandbox where the project worktree is bound. */
 export const SANDBOX_REPO_DIR = "/home/agent/workspace";
@@ -161,12 +154,11 @@ export class SandboxFactory extends Context.Tag("SandboxFactory")<
   SandboxFactory,
   {
     readonly withSandbox: <A, E, R>(
-      makeEffect: (info: SandboxInfo) => Effect.Effect<A, E, R | Sandbox>,
-    ) => Effect.Effect<
-      WithSandboxResult<A>,
-      E | SandboxError,
-      Exclude<R, Sandbox>
-    >;
+      makeEffect: (
+        info: SandboxInfo,
+        sandbox: SandboxService,
+      ) => Effect.Effect<A, E, R>,
+    ) => Effect.Effect<WithSandboxResult<A>, E | SandboxError, R>;
   }
 >() {}
 
@@ -342,12 +334,11 @@ export const WorktreeDockerSandboxFactory = {
 
       return {
         withSandbox: <A, E, R>(
-          makeEffect: (info: SandboxInfo) => Effect.Effect<A, E, R | Sandbox>,
-        ): Effect.Effect<
-          WithSandboxResult<A>,
-          E | SandboxError,
-          Exclude<R, Sandbox>
-        > => {
+          makeEffect: (
+            info: SandboxInfo,
+            sandbox: SandboxService,
+          ) => Effect.Effect<A, E, R>,
+        ): Effect.Effect<WithSandboxResult<A>, E | SandboxError, R> => {
           // No-sandbox providers: run directly on the host, no container or mounts.
           if (sandboxProvider.tag === "none") {
             let preservedPath: string | undefined;
@@ -371,15 +362,14 @@ export const WorktreeDockerSandboxFactory = {
                       env,
                       worktreeOrRepoPath: hostRepoDir,
                     }),
-                    ({ sandboxLayer, worktreePath, handle }) =>
-                      makeEffect({
-                        hostWorktreePath: hostRepoDir,
-                        sandboxRepoPath: worktreePath,
-                      }).pipe(Effect.provide(sandboxLayer)) as Effect.Effect<
-                        A,
-                        E | SandboxError,
-                        Exclude<R, Sandbox>
-                      >,
+                    ({ sandbox, worktreePath }) =>
+                      makeEffect(
+                        {
+                          hostWorktreePath: hostRepoDir,
+                          sandboxRepoPath: worktreePath,
+                        },
+                        sandbox,
+                      ) as Effect.Effect<A, E | SandboxError, R>,
                     ({ handle }) =>
                       Effect.tryPromise({
                         try: () => handle.close(),
@@ -431,11 +421,14 @@ export const WorktreeDockerSandboxFactory = {
                         env,
                         worktreeOrRepoPath: worktreeInfo.path,
                       }),
-                      ({ sandboxLayer, worktreePath }) =>
-                        makeEffect({
-                          hostWorktreePath: worktreeInfo.path,
-                          sandboxRepoPath: worktreePath,
-                        }).pipe(Effect.provide(sandboxLayer)),
+                      ({ sandbox, worktreePath }) =>
+                        makeEffect(
+                          {
+                            hostWorktreePath: worktreeInfo.path,
+                            sandboxRepoPath: worktreePath,
+                          },
+                          sandbox,
+                        ),
                       ({ handle }) =>
                         Effect.tryPromise({
                           try: () => handle.close(),
@@ -443,7 +436,7 @@ export const WorktreeDockerSandboxFactory = {
                         }).pipe(Effect.orDie),
                     ),
                   ),
-                ) as Effect.Effect<A, E | SandboxError, Exclude<R, Sandbox>>,
+                ) as Effect.Effect<A, E | SandboxError, R>,
               (worktreeInfo, exit) =>
                 cleanupWorktree(worktreeInfo.path, exit).pipe(
                   Effect.tap((p) => {
@@ -489,16 +482,19 @@ export const WorktreeDockerSandboxFactory = {
                         env,
                         copyPaths,
                       }),
-                      ({ sandboxLayer, worktreePath, handle }) =>
-                        makeEffect({
-                          hostWorktreePath: worktreeInfo.path,
-                          sandboxRepoPath: worktreePath,
-                          applyToHost: () =>
-                            syncOut(
-                              worktreeInfo.path,
-                              handle as IsolatedSandboxHandle,
-                            ),
-                        }).pipe(Effect.provide(sandboxLayer)),
+                      ({ sandbox, worktreePath, handle }) =>
+                        makeEffect(
+                          {
+                            hostWorktreePath: worktreeInfo.path,
+                            sandboxRepoPath: worktreePath,
+                            applyToHost: () =>
+                              syncOut(
+                                worktreeInfo.path,
+                                handle as IsolatedSandboxHandle,
+                              ),
+                          },
+                          sandbox,
+                        ),
                       ({ handle }) =>
                         Effect.tryPromise({
                           try: () => handle.close(),
@@ -506,7 +502,7 @@ export const WorktreeDockerSandboxFactory = {
                         }).pipe(Effect.orDie),
                     ),
                   ),
-                ) as Effect.Effect<A, E | SandboxError, Exclude<R, Sandbox>>,
+                ) as Effect.Effect<A, E | SandboxError, R>,
               (worktreeInfo, exit) =>
                 cleanupWorktree(worktreeInfo.path, exit).pipe(
                   Effect.tap((p) => {
@@ -568,16 +564,15 @@ export const WorktreeDockerSandboxFactory = {
                     repoDir: SANDBOX_REPO_DIR,
                   }),
                   // Use
-                  ({ sandboxLayer, worktreePath, handle }) =>
-                    makeEffect({
-                      hostWorktreePath: hostRepoDir,
-                      sandboxRepoPath: worktreePath,
-                      bindMountHandle: handle as BindMountSandboxHandle,
-                    }).pipe(Effect.provide(sandboxLayer)) as Effect.Effect<
-                      A,
-                      E | SandboxError,
-                      Exclude<R, Sandbox>
-                    >,
+                  ({ sandbox, worktreePath, handle }) =>
+                    makeEffect(
+                      {
+                        hostWorktreePath: hostRepoDir,
+                        sandboxRepoPath: worktreePath,
+                        bindMountHandle: handle as BindMountSandboxHandle,
+                      },
+                      sandbox,
+                    ) as Effect.Effect<A, E | SandboxError, R>,
                   // Release
                   ({ handle }) =>
                     Effect.tryPromise({
@@ -668,12 +663,15 @@ export const WorktreeDockerSandboxFactory = {
                       gitMounts,
                       repoDir: SANDBOX_REPO_DIR,
                     }),
-                    ({ sandboxLayer, worktreePath, handle }) =>
-                      makeEffect({
-                        hostWorktreePath: worktreeInfo.path,
-                        sandboxRepoPath: worktreePath,
-                        bindMountHandle: handle as BindMountSandboxHandle,
-                      }).pipe(Effect.provide(sandboxLayer)),
+                    ({ sandbox, worktreePath, handle }) =>
+                      makeEffect(
+                        {
+                          hostWorktreePath: worktreeInfo.path,
+                          sandboxRepoPath: worktreePath,
+                          bindMountHandle: handle as BindMountSandboxHandle,
+                        },
+                        sandbox,
+                      ),
                     ({ handle }) =>
                       Effect.tryPromise({
                         try: () => handle.close(),
@@ -681,7 +679,7 @@ export const WorktreeDockerSandboxFactory = {
                       }).pipe(Effect.orDie),
                   ),
                 ),
-              ) as Effect.Effect<A, E | SandboxError, Exclude<R, Sandbox>>,
+              ) as Effect.Effect<A, E | SandboxError, R>,
             // Release: remove or preserve the worktree based on dirty state.
             (worktreeInfo, exit) =>
               cleanupWorktree(worktreeInfo.path, exit).pipe(

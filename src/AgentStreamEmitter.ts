@@ -31,25 +31,27 @@ export class AgentStreamEmitter extends Context.Tag("AgentStreamEmitter")<
   AgentStreamEmitterService
 >() {}
 
-export const noopAgentStreamEmitterLayer: Layer.Layer<AgentStreamEmitter> =
-  Layer.succeed(AgentStreamEmitter, { emit: () => Effect.void });
-
 /**
- * Build a layer that forwards each event to the provided callback.
+ * Build a layer for the AgentStreamEmitter service.
+ *
+ * Called with no argument, returns a no-op layer that discards events.
+ * Called with a callback, returns a layer that forwards each event to it.
  * The callback is invoked synchronously inside an `Effect.sync`; any error
  * thrown by the callback is caught and discarded so observability failures
  * cannot kill the run.
  */
-export const callbackAgentStreamEmitterLayer = (
-  onEvent: (event: AgentStreamEvent) => void,
+export const agentStreamEmitterLayer = (
+  onEvent?: (event: AgentStreamEvent) => void,
 ): Layer.Layer<AgentStreamEmitter> =>
   Layer.succeed(AgentStreamEmitter, {
-    emit: (event) =>
-      Effect.sync(() => {
-        try {
-          onEvent(event);
-        } catch {
-          // Swallow callback errors — a broken forwarder must not kill the run.
-        }
-      }),
+    emit: onEvent
+      ? (event) =>
+          Effect.sync(() => {
+            try {
+              onEvent(event);
+            } catch {
+              // Swallow callback errors — a broken forwarder must not kill the run.
+            }
+          })
+      : () => Effect.void,
   });
