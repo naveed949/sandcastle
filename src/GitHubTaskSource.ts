@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   runWorkerDryRun,
   type DryRunResult,
@@ -7,6 +9,8 @@ import {
   type TaskState,
   type WorkerConfiguration,
 } from "./WorkerCoordinator.js";
+
+const execFileAsync = promisify(execFile);
 
 /** The only request shape used by the GitHub task source. */
 export interface GitHubRequestInit {
@@ -99,6 +103,7 @@ interface Candidate {
   readonly repository: string;
   readonly number: number;
   readonly kindHint: TaskKind;
+  readonly kindExplicit: boolean;
 }
 
 const DEFAULT_API_BASE_URL = "https://api.github.com/";
@@ -272,18 +277,44 @@ const stateFromPayload = (
   return "open";
 };
 
-const defaultFetch: GitHubFetch = async (url, init) => {
-  const response = await globalThis.fetch(url, {
-    method: init.method,
-    headers: init.headers,
-  });
-  return {
-    ok: response.ok,
-    status: response.status,
-    statusText: response.statusText,
-    json: () => response.json() as Promise<unknown>,
-  };
+const isPrdPayload = (
+  payload: JsonRecord,
+  repository: string,
+  number: number,
+  prdKeys: ReadonlySet<string>,
+  prdLabel: string,
+): boolean => {
+  const labels = labelsFromPayload(payload);
+  return (
+    prdKeys.has(taskCoordinate(repository, number)) ||
+    labels.some((label) => label.toLowerCase() === prdLabel) ||
+    (nonEmptyString(payload.title)?.toLowerCase().startsWith("prd:") ?? false)
+  );
 };
+
+const createGitHubCliFetch =
+  (token?: string): GitHubFetch =>
+  async (url, init) => {
+    const args = ["api", "--method", init.method];
+    for (const [name, value] of Object.entries(init.headers)) {
+      if (name.toLowerCase() === "authorization") continue;
+      args.push("--header", `${name}: ${value}`);
+    }
+    args.push(url);
+    const environment = {
+      ...process.env,
+      ...(token === undefined ? {} : { GH_TOKEN: token }),
+    };
+    const { stdout } = await execFileAsync("gh", args, { env: environment });
+    const output = String(stdout);
+    const body: unknown = JSON.parse(output);
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => body,
+    };
+  };
 
 const apiUrl = (baseUrl: string, path: string): string => {
   const normalizedBase = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
@@ -354,15 +385,12 @@ const recordsFromSearch = (
 export const createGitHubTaskSource = (
   options: GitHubTaskSourceOptions = {},
 ): GitHubTaskSource => {
-  const fetchJson = options.fetch ?? defaultFetch;
+  const fetchJson = options.fetch ?? createGitHubCliFetch(options.token);
   const baseUrl = options.apiBaseUrl ?? DEFAULT_API_BASE_URL;
   const stateLabels = { ...DEFAULT_STATE_LABELS, ...options.stateLabels };
   const prdLabel = (options.prdLabel ?? DEFAULT_PRD_LABEL).trim().toLowerCase();
 
-  const request = async (
-    path: string,
-    optionalStatuses: readonly number[] = [],
-  ): Promise<unknown | undefined> => {
+  const request = async (path: string): Promise<unknown | undefined> => {
     const url = apiUrl(baseUrl, path);
     const headers: Record<string, string> = {
       Accept: "application/vnd.github+json",
@@ -382,7 +410,6 @@ export const createGitHubTaskSource = (
         { url },
       );
     }
-    if (optionalStatuses.includes(response.status)) return undefined;
     if (!response.ok) {
       throw new GitHubTaskSourceError(
         `GitHub GET request returned ${response.status}${response.statusText === undefined ? "" : ` ${response.statusText}`}.`,
@@ -404,6 +431,7 @@ export const createGitHubTaskSource = (
     Promise<{ readonly defaultBranch: string }>
   >();
   const commitCache = new Map<string, Promise<string>>();
+  const issueCache = new Map<string, Promise<JsonRecord | undefined>>();
 
   const repositoryInfo = (
     repository: string,
@@ -464,14 +492,43 @@ export const createGitHubTaskSource = (
     return pending;
   };
 
+  const issuePayload = (
+    reference: TaskReference,
+  ): Promise<JsonRecord | undefined> => {
+    const normalized = validateReference(reference);
+    const key = taskCoordinate(normalized.repository, normalized.number);
+    const cached = issueCache.get(key);
+    if (cached !== undefined) return cached;
+    const path = `/repos/${repositoryPath(normalized.repository)}/issues/${normalized.number}`;
+    const pending = (async () => {
+      const url = apiUrl(baseUrl, path);
+      const payload = await request(path);
+      if (!isRecord(payload)) {
+        throw new GitHubTaskSourceError("GitHub issue response was invalid.", {
+          url,
+        });
+      }
+      if (isPullRequest(payload)) return undefined;
+      const number = numberFromPayload(payload);
+      if (number !== normalized.number) {
+        throw new GitHubTaskSourceError(
+          "GitHub issue response did not match the requested number.",
+          { url },
+        );
+      }
+      return payload;
+    })();
+    issueCache.set(key, pending);
+    return pending;
+  };
+
   const relationshipReferences = async (
     repository: string,
     number: number,
     relationship: "dependencies/blocked_by" | "sub_issues",
   ): Promise<readonly TaskReference[]> => {
     const path = `/repos/${repositoryPath(repository)}/issues/${number}/${relationship}`;
-    const payload = await request(path, [404]);
-    if (payload === undefined) return [];
+    const payload = await request(path);
     const records = recordsFromArray(payload, apiUrl(baseUrl, path));
     return records.flatMap((record) => {
       const reference = referenceFromPayload(record, repository);
@@ -482,15 +539,32 @@ export const createGitHubTaskSource = (
   const addCandidate = (
     candidates: Map<string, Candidate>,
     reference: TaskReference,
+    kindExplicit = false,
   ): void => {
     const normalized = validateReference(reference);
     const key = taskCoordinate(normalized.repository, normalized.number);
     const existing = candidates.get(key);
-    if (existing === undefined || normalized.kind === "prd") {
+    if (
+      existing !== undefined &&
+      existing.kindExplicit &&
+      kindExplicit &&
+      existing.kindHint !== normalized.kind
+    ) {
+      throw new GitHubTaskSourceError(
+        `Conflicting explicit kinds for ${normalized.repository}#${normalized.number}.`,
+      );
+    }
+    if (
+      existing === undefined ||
+      (kindExplicit && !existing.kindExplicit) ||
+      (kindExplicit && existing.kindExplicit && normalized.kind === "prd") ||
+      (!existing.kindExplicit && normalized.kind === "prd")
+    ) {
       candidates.set(key, {
         repository: normalized.repository,
         number: normalized.number,
         kindHint: normalized.kind,
+        kindExplicit,
       });
     }
   };
@@ -551,6 +625,16 @@ export const createGitHubTaskSource = (
     prdReferences = [],
   }: GitHubTaskDiscoveryInput): Promise<readonly NormalizedTask[]> => {
     const candidates = new Map<string, Candidate>();
+    const explicitPrdReferences = [
+      ...(options.prdReferences ?? []),
+      ...prdReferences,
+    ].map((reference) => {
+      const normalized = validateReference(reference);
+      return {
+        ...normalized,
+        kind: "prd" as const,
+      };
+    });
     const configuredRepositories = isRecord(configuration.repositories)
       ? Object.entries(configuration.repositories)
           .filter(
@@ -566,7 +650,12 @@ export const createGitHubTaskSource = (
       }
     }
 
-    for (const reference of exactTasks) addCandidate(candidates, reference);
+    for (const reference of exactTasks) {
+      addCandidate(candidates, reference, true);
+    }
+    for (const reference of explicitPrdReferences) {
+      addCandidate(candidates, reference, true);
+    }
 
     if (includeAccountWide) {
       const account = options.account?.trim();
@@ -579,14 +668,9 @@ export const createGitHubTaskSource = (
     }
 
     const prdKeys = new Set<string>([
-      ...(options.prdReferences ?? []).map((reference) => {
-        const normalized = validateReference(reference);
-        return taskCoordinate(normalized.repository, normalized.number);
-      }),
-      ...prdReferences.map((reference) => {
-        const normalized = validateReference(reference);
-        return taskCoordinate(normalized.repository, normalized.number);
-      }),
+      ...explicitPrdReferences.map((reference) =>
+        taskCoordinate(reference.repository, reference.number),
+      ),
     ]);
     const tasks: NormalizedTask[] = [];
     const sortedCandidates = [...candidates.values()].sort((left, right) =>
@@ -598,32 +682,49 @@ export const createGitHubTaskSource = (
 
     for (const candidate of sortedCandidates) {
       const repository = validateRepository(candidate.repository);
+      const reference = {
+        repository,
+        kind: candidate.kindHint,
+        number: candidate.number,
+      } satisfies TaskReference;
+      const payload = await issuePayload(reference);
+      if (payload === undefined) continue;
       const issuePath = `/repos/${repositoryPath(repository)}/issues/${candidate.number}`;
       const issueUrl = apiUrl(baseUrl, issuePath);
-      const payload = await request(issuePath);
-      if (!isRecord(payload)) {
-        throw new GitHubTaskSourceError("GitHub issue response was invalid.", {
-          url: issueUrl,
-        });
-      }
-      if (isPullRequest(payload)) continue;
-      const number = numberFromPayload(payload);
-      if (number !== candidate.number) {
-        throw new GitHubTaskSourceError(
-          "GitHub issue response did not match the requested number.",
-          { url: issueUrl },
-        );
-      }
+      const number = candidate.number;
 
       const labels = labelsFromPayload(payload);
       const prd =
         candidate.kindHint === "prd" ||
-        prdKeys.has(taskCoordinate(repository, number)) ||
-        labels.some((label) => label.toLowerCase() === prdLabel) ||
-        (nonEmptyString(payload.title)?.toLowerCase().startsWith("prd:") ??
-          false);
+        (!candidate.kindExplicit &&
+          isPrdPayload(payload, repository, number, prdKeys, prdLabel));
       const kind: TaskKind = prd ? "prd" : "issue";
-      const parentPrd = referenceFromIssueUrl(payload.parent_issue_url, "prd");
+      const parentReference = referenceFromIssueUrl(
+        payload.parent_issue_url,
+        "issue",
+      );
+      let parentPrd: TaskReference | undefined;
+      if (parentReference !== undefined) {
+        const parentPayload = await issuePayload(parentReference);
+        if (parentPayload !== undefined) {
+          const parentCandidate = candidates.get(
+            taskCoordinate(parentReference.repository, parentReference.number),
+          );
+          const parentIsPrd =
+            parentCandidate?.kindHint === "prd" ||
+            (parentCandidate?.kindExplicit !== true &&
+              isPrdPayload(
+                parentPayload,
+                parentReference.repository,
+                parentReference.number,
+                prdKeys,
+                prdLabel,
+              ));
+          if (parentIsPrd) {
+            parentPrd = { ...parentReference, kind: "prd" };
+          }
+        }
+      }
       const dependencies = await relationshipReferences(
         repository,
         number,

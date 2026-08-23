@@ -55,7 +55,10 @@ const responseKey = (url: string): string => {
   return `${parsed.pathname}${parsed.search}`;
 };
 
-const fakeGitHub = (responses: Readonly<Record<string, unknown>>) => {
+const fakeGitHub = (
+  responses: Readonly<Record<string, unknown>>,
+  notFound: readonly string[] = [],
+) => {
   const calls: string[] = [];
   const fetch: GitHubFetch = async (url, init) => {
     expect(init.method).toBe("GET");
@@ -63,6 +66,14 @@ const fakeGitHub = (responses: Readonly<Record<string, unknown>>) => {
     const key = responseKey(url);
     if (!Object.hasOwn(responses, key)) {
       throw new Error(`Unexpected GitHub request: ${key}`);
+    }
+    if (notFound.includes(key)) {
+      return {
+        ok: false,
+        status: 404,
+        statusText: "Not Found",
+        json: async () => ({ message: "Not Found" }),
+      };
     }
     return {
       ok: true,
@@ -77,7 +88,17 @@ const fakeGitHub = (responses: Readonly<Record<string, unknown>>) => {
 const responses = (): Record<string, unknown> => ({
   "/repos/acme/app": repository("acme/app"),
   "/repos/acme/app/commits/main": commit("acme-base"),
-  "/repos/acme/app/issues?state=all&per_page=100&page=1": [issue()],
+  "/repos/acme/app/issues?state=all&per_page=100&page=1": [
+    issue(),
+    issue({
+      number: 13,
+      title: "PRD: Plan the next release",
+      labels: [],
+      parent_issue_url: null,
+      updated_at: "2026-08-23T12:05:00Z",
+      node_id: "I_kwDOacme13",
+    }),
+  ],
   "/repos/acme/app/issues/7": issue(),
   "/repos/acme/app/issues/7/dependencies/blocked_by": [
     {
@@ -91,6 +112,17 @@ const responses = (): Record<string, unknown> => ({
       repository_url: "https://api.github.com/repos/acme/app",
     },
   ],
+  "/repos/acme/app/issues/1": issue({
+    number: 1,
+    title: "PRD: Repo-agnostic worker",
+    body: "The parent PRD.",
+    labels: [{ name: "ready-for-agent" }],
+    parent_issue_url: null,
+    updated_at: "2026-08-23T11:59:00Z",
+    node_id: "I_kwDOacme1",
+  }),
+  "/repos/acme/app/issues/1/dependencies/blocked_by": [],
+  "/repos/acme/app/issues/1/sub_issues": [],
   "/repos/acme/app/issues/12": issue({
     number: 12,
     title: "Blocked work",
@@ -188,6 +220,8 @@ describe("GitHubTaskSource", () => {
       tasks.map((task) => `${task.repository}:${task.kind}:${task.number}`),
     ).toEqual([
       "acme/app:issue:7",
+      "acme/app:prd:1",
+      "acme/app:prd:13",
       "other/project:issue:10",
       "thirdparty/lib:issue:11",
       "thirdparty/lib:issue:9",
@@ -259,7 +293,7 @@ describe("GitHubTaskSource", () => {
       configuration,
       exactTasks: [
         { repository: "acme/app", kind: "issue", number: 12 },
-        { repository: "acme/app", kind: "issue", number: 13 },
+        { repository: "acme/app", kind: "prd", number: 13 },
       ],
       includeConfiguredRepositories: false,
       includeAccountWide: false,
@@ -275,5 +309,30 @@ describe("GitHubTaskSource", () => {
         reasonCode: "prd",
       }),
     ]);
+
+    const explicitIssueSource = createGitHubTaskSource({ fetch: fake.fetch });
+    const explicitIssueTasks = await explicitIssueSource.discover({
+      configuration,
+      exactTasks: [{ repository: "acme/app", kind: "issue", number: 13 }],
+      includeConfiguredRepositories: false,
+      includeAccountWide: false,
+    });
+    expect(explicitIssueTasks[0]?.kind).toBe("issue");
+  });
+
+  it("fails closed when supported relationship data is unavailable", async () => {
+    const fake = fakeGitHub(responses(), [
+      "/repos/acme/app/issues/12/dependencies/blocked_by",
+    ]);
+    const source = createGitHubTaskSource({ fetch: fake.fetch });
+
+    await expect(
+      source.discover({
+        configuration,
+        exactTasks: [{ repository: "acme/app", kind: "issue", number: 12 }],
+        includeConfiguredRepositories: false,
+        includeAccountWide: false,
+      }),
+    ).rejects.toMatchObject({ name: "GitHubTaskSourceError", status: 404 });
   });
 });
