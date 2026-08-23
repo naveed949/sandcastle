@@ -30,6 +30,7 @@ const task: NormalizedTask = {
   number: 7,
   title: "Fix the widget",
   body: "The widget is broken.",
+  labels: [],
   sourceRevision: "issue-revision-1",
   baseBranch: "main",
   baseCommit: "base-commit-1",

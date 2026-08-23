@@ -120,3 +120,18 @@ export type {
   DryRunResult,
   WorkerDryRunInput,
 } from "./WorkerCoordinator.js";
+export {
+  createGitHubTaskSource,
+  runGitHubWorkerDryRun,
+  GitHubTaskSourceError,
+} from "./GitHubTaskSource.js";
+export type {
+  GitHubRequestInit,
+  GitHubResponse,
+  GitHubFetch,
+  GitHubTaskStateLabels,
+  GitHubTaskSourceOptions,
+  GitHubTaskDiscoveryInput,
+  GitHubTaskSource,
+  GitHubWorkerDryRunInput,
+} from "./GitHubTaskSource.js";
