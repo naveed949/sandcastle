@@ -121,6 +121,55 @@ console.log(result.commits); // array of { sha } for commits created
 console.log(result.branch); // target branch name
 ```
 
+### Repo-agnostic worker dry runs
+
+`runWorkerDryRun()` evaluates centrally authorized, normalized tasks without
+checking out a repository, invoking an agent, mutating GitHub, pushing, or
+creating a pull request. Repository-wide authorization uses a policy with
+`authorized: true`; an exact task can be authorized in a profile-only policy by
+adding its `{ repository, kind, number }` reference to `authorizedTasks`.
+
+```typescript
+import {
+  runWorkerDryRun,
+  type NormalizedTask,
+  type WorkerConfiguration,
+} from "@ai-hero/sandcastle";
+
+const configuration: WorkerConfiguration = {
+  repositories: {
+    "owner/repository": {
+      authorized: true,
+      baseBranch: "main",
+      profileId: "node",
+    },
+  },
+  profiles: {
+    node: {
+      setupCommands: ["npm ci"],
+      verificationCommands: ["npm test"],
+    },
+  },
+  authorizedTasks: [],
+  promptVersion: "worker-v1",
+};
+
+declare const normalizedTasks: readonly NormalizedTask[];
+
+const result = runWorkerDryRun({
+  configuration,
+  tasks: normalizedTasks,
+});
+
+console.log(result.humanReadable);
+console.log(result.machineReadable.executionRequests);
+```
+
+The result contains stable reason codes for every task, deterministic ordering,
+and execution identities bound to the task revision, base commit, profile
+digest, and prompt version. The machine-readable projection reports
+`readOnly: true` and an empty `mutations` list.
+
 ### All options
 
 ```typescript

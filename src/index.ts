@@ -98,3 +98,25 @@ export type {
   MergeToHeadBranchStrategy,
   NamedBranchStrategy,
 } from "./SandboxProvider.js";
+export {
+  runWorkerDryRun,
+  WorkerConfigurationError,
+  NormalizedTaskError,
+} from "./WorkerCoordinator.js";
+export type {
+  TaskKind,
+  TaskState,
+  TaskReference,
+  ExecutionProfile,
+  RepositoryPolicy,
+  WorkerConfiguration,
+  NormalizedTask,
+  EligibilityReasonCode,
+  AuthorizationSource,
+  EligibilityDecision,
+  ExecutionRequest,
+  DryRunMutation,
+  DryRunMachineOutput,
+  DryRunResult,
+  WorkerDryRunInput,
+} from "./WorkerCoordinator.js";
