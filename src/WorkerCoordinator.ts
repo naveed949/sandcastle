@@ -58,6 +58,8 @@ export interface NormalizedTask extends TaskReference {
   readonly title: string;
   /** The task body retained in the immutable execution snapshot. */
   readonly body: string;
+  /** Labels retained from the source task for policy and prompt context. */
+  readonly labels: readonly string[];
   /** The source revision that freezes the task contents for this attempt. */
   readonly sourceRevision: string;
   /** The base branch observed with the task. */
@@ -318,6 +320,12 @@ const normalizeTask = (task: NormalizedTask, index: number): NormalizedTask => {
   if (typeof task.title !== "string" || typeof task.body !== "string") {
     throw new NormalizedTaskError(index, "title and body must be strings");
   }
+  if (
+    !Array.isArray(task.labels) ||
+    !task.labels.every((label) => typeof label === "string")
+  ) {
+    throw new NormalizedTaskError(index, "labels must be string[]");
+  }
   if (typeof task.sourceRevision !== "string") {
     throw new NormalizedTaskError(index, "sourceRevision must be a string");
   }
@@ -352,6 +360,7 @@ const normalizeTask = (task: NormalizedTask, index: number): NormalizedTask => {
     number: task.number,
     title: task.title,
     body: task.body,
+    labels: task.labels.map((label) => label.trim()),
     sourceRevision: task.sourceRevision.trim(),
     baseBranch: task.baseBranch.trim(),
     baseCommit: task.baseCommit.trim(),

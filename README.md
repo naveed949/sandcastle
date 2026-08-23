@@ -131,6 +131,8 @@ adding its `{ repository, kind, number }` reference to `authorizedTasks`.
 
 ```typescript
 import {
+  createGitHubTaskSource,
+  runGitHubWorkerDryRun,
   runWorkerDryRun,
   type NormalizedTask,
   type WorkerConfiguration,
@@ -164,6 +166,33 @@ const result = runWorkerDryRun({
 console.log(result.humanReadable);
 console.log(result.machineReadable.executionRequests);
 ```
+
+For read-only GitHub discovery, inject the account and token into a task
+source, then pass its snapshots through the same coordinator:
+
+```typescript
+const source = createGitHubTaskSource({
+  account: "naveed949",
+  token: process.env.GITHUB_TOKEN,
+});
+
+const liveResult = await runGitHubWorkerDryRun({
+  source,
+  configuration,
+  // Account-wide discovery is an inbox input; authorization is still decided
+  // by the central configuration above.
+  includeAccountWide: true,
+});
+```
+
+The source reads approved repositories, explicit task references, and
+accessible issues authored by the configured account. It uses only GET
+requests, and exact-task authorization does not authorize sibling issues.
+
+Each normalized task also retains its source labels, along with its source
+revision, base branch and commit, supported relationships, and optional PRD
+context. A read-only GitHub task source can produce these snapshots for the
+same dry-run seam; it never checks out a repository or writes GitHub state.
 
 The result contains stable reason codes for every task, deterministic ordering,
 and execution identities bound to the task revision, base commit, profile
