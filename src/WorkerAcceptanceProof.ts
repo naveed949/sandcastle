@@ -12,6 +12,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   normalizeRepository,
   runWorkerDryRun,
+  workerConfigurationDigest,
   workerTaskId,
   type EligibilityDecision,
   type ExecutionRequest,
@@ -40,6 +41,7 @@ import type {
   WorkerStateStore,
 } from "./WorkerStateStore.js";
 import { containsProtectedWorkerMaterial } from "./WorkerIsolationPolicy.js";
+import type { WorkerGuardedActionRecorder } from "./WorkerGuardedActions.js";
 
 export type WorkerAcceptanceProofErrorCode =
   | "invalid_scenario"
@@ -102,6 +104,7 @@ interface CrossRepositoryAcceptanceEvidenceInput {
   readonly proofPath: string;
   readonly workspaceRoot: string;
   readonly recordsRoot: string;
+  readonly configurationDigest: string;
   readonly scenario: EvaluatedAcceptanceScenario;
   readonly runs: readonly [
     CrossRepositoryAcceptanceRun,
@@ -112,17 +115,17 @@ interface CrossRepositoryAcceptanceEvidenceInput {
   readonly createdAt?: string;
 }
 
-export interface RetainedAcceptanceRun {
-  readonly repository: string;
+/** Immutable execution and publication fields shared by retained live proofs. */
+export interface RetainedExecutionProvenance {
   readonly taskId: string;
   readonly snapshot: NormalizedTask;
   readonly executionIdentity: string;
   readonly attemptId: string;
+  readonly configurationDigest: string;
   readonly profileId: string;
   readonly profileDigest: string;
-  readonly paths: WorkerAcceptanceRunPaths;
-  readonly recordPath: string;
-  readonly branch: string;
+  readonly promptVersion: string;
+  readonly promptTemplateDigest: string;
   readonly commits: readonly { readonly sha: string }[];
   readonly verification: readonly {
     readonly command: string;
@@ -130,6 +133,13 @@ export interface RetainedAcceptanceRun {
   }[];
   readonly evidence: readonly string[];
   readonly pullRequest: DraftPullRequest;
+}
+
+export interface RetainedAcceptanceRun extends RetainedExecutionProvenance {
+  readonly repository: string;
+  readonly paths: WorkerAcceptanceRunPaths;
+  readonly recordPath: string;
+  readonly branch: string;
   readonly isolationObservation: WorkerIsolationObservation;
 }
 
@@ -156,7 +166,10 @@ export interface RunCrossRepositoryAcceptanceProofInput {
   readonly leaseDurationMs: number;
   readonly runtimeFor: (
     request: ExecutionRequest,
+    guardedActions: WorkerGuardedActionRecorder | undefined,
   ) => Promise<CrossRepositoryAcceptanceRuntime>;
+  /** Optional trusted recorder for worker-owned guarded actions. */
+  readonly boundaryAudit?: WorkerGuardedActionRecorder;
   readonly createdAt?: string;
 }
 
@@ -188,7 +201,10 @@ export interface RunDependencyChainAcceptanceProofInput {
   readonly leaseDurationMs: number;
   readonly runtimeFor: (
     request: ExecutionRequest,
+    guardedActions: WorkerGuardedActionRecorder | undefined,
   ) => Promise<CrossRepositoryAcceptanceRuntime>;
+  /** Optional trusted recorder for worker-owned guarded actions. */
+  readonly boundaryAudit?: WorkerGuardedActionRecorder;
   /** Optional operator-owned transition used by dedicated live fixtures. */
   readonly afterStagePublished?: (input: {
     readonly stageIndex: number;
@@ -199,24 +215,13 @@ export interface RunDependencyChainAcceptanceProofInput {
 }
 
 /** Retained evidence for one dependency-ordered execution and publication. */
-export interface RetainedDependencyStage {
-  readonly taskId: string;
-  readonly snapshot: NormalizedTask;
+export interface RetainedDependencyStage extends RetainedExecutionProvenance {
   readonly prdContext: NormalizedTask;
   readonly observedSnapshots: readonly NormalizedTask[];
   /** Snapshots freshly re-read and durably bound to the claim. */
   readonly claimSnapshots: readonly NormalizedTask[];
   readonly blockedTaskIds: readonly string[];
-  readonly executionIdentity: string;
-  readonly attemptId: string;
   readonly executionRecordPath: string;
-  readonly evidence: readonly string[];
-  readonly commits: readonly { readonly sha: string }[];
-  readonly verification: readonly {
-    readonly command: string;
-    readonly exitCode: number;
-  }[];
-  readonly pullRequest: DraftPullRequest;
 }
 
 /** Immutable proof that a PRD's three leaves were dispatched in dependency order. */
@@ -645,8 +650,11 @@ const validateRun = async (
     snapshot: request.task,
     executionIdentity: request.executionIdentity,
     attemptId: run.attempt.attemptId,
+    configurationDigest: input.configurationDigest,
     profileId: request.profileId,
     profileDigest: request.profileDigest,
+    promptVersion: request.promptVersion,
+    promptTemplateDigest: request.promptTemplateDigest,
     paths: run.paths,
     recordPath: run.execution.recordPath,
     branch: workerBranchFor(request),
@@ -945,7 +953,7 @@ export const runCrossRepositoryAcceptanceProof = async (
   for (const request of scenario.requests) {
     const artifactRoots = [input.workspaceRoot, input.recordsRoot];
     const artifactsBefore = await snapshotFiles(artifactRoots);
-    const runtime = await input.runtimeFor(request);
+    const runtime = await input.runtimeFor(request, input.boundaryAudit);
     if (
       resolve(runtime.stateFilePath) !==
       resolve(workerStateFilePath(input.workspaceRoot, request.task.repository))
@@ -970,6 +978,7 @@ export const runCrossRepositoryAcceptanceProof = async (
       owner: input.owner,
       leaseDurationMs: input.leaseDurationMs,
       claimedAt: input.createdAt,
+      guardedActions: input.boundaryAudit,
     });
     const execution = await runtime.execution.execute(claimed);
     if (execution.status !== "verified") {
@@ -979,6 +988,17 @@ export const runCrossRepositoryAcceptanceProof = async (
       );
     }
     const publication = await runtime.publisher.publish(claimed.attemptId);
+    const finalCommit = execution.commits.at(-1)?.sha.toLowerCase();
+    if (
+      finalCommit === undefined ||
+      publication.branchSha.toLowerCase() !== finalCommit ||
+      publication.pullRequest.headSha.toLowerCase() !== finalCommit
+    ) {
+      fail(
+        `Draft publication for ${request.taskId} is not bound to its verified commit.`,
+        "evidence_mismatch",
+      );
+    }
     const state = await runtime.store.read();
     const attempt = state.attempts.find(
       (candidate) => candidate.attemptId === claimed.attemptId,
@@ -1044,6 +1064,9 @@ export const runCrossRepositoryAcceptanceProof = async (
     proofPath: input.proofPath,
     workspaceRoot: input.workspaceRoot,
     recordsRoot: input.recordsRoot,
+    configurationDigest: workerConfigurationDigest(
+      input.authorizedConfiguration,
+    ),
     scenario,
     runs: runs as unknown as readonly [
       CrossRepositoryAcceptanceRun,
@@ -1137,7 +1160,7 @@ export const runDependencyChainAcceptanceProof = async (
       );
     }
 
-    const runtime = await input.runtimeFor(request);
+    const runtime = await input.runtimeFor(request, input.boundaryAudit);
     await runtime.store.recordDiscovery(evaluation, {
       discoveredAt: input.createdAt,
     });
@@ -1149,6 +1172,7 @@ export const runDependencyChainAcceptanceProof = async (
       owner: input.owner,
       leaseDurationMs: input.leaseDurationMs,
       claimedAt: input.createdAt,
+      guardedActions: input.boundaryAudit,
     });
     const execution = await runtime.execution.execute(claimed);
     if (
@@ -1164,6 +1188,17 @@ export const runDependencyChainAcceptanceProof = async (
       );
     }
     const publication = await runtime.publisher.publish(claimed.attemptId);
+    const finalCommit = execution.commits.at(-1)?.sha.toLowerCase();
+    if (
+      finalCommit === undefined ||
+      publication.branchSha.toLowerCase() !== finalCommit ||
+      publication.pullRequest.headSha.toLowerCase() !== finalCommit
+    ) {
+      fail(
+        `Draft publication for ${request.taskId} is not bound to its verified commit.`,
+        "evidence_mismatch",
+      );
+    }
     const state = await runtime.store.read();
     const attempt = requireValue(
       state.attempts.find(
@@ -1214,6 +1249,11 @@ export const runDependencyChainAcceptanceProof = async (
       blockedTaskIds,
       executionIdentity: request.executionIdentity,
       attemptId: attempt.attemptId,
+      configurationDigest: workerConfigurationDigest(input.configuration),
+      profileId: request.profileId,
+      profileDigest: request.profileDigest,
+      promptVersion: request.promptVersion,
+      promptTemplateDigest: request.promptTemplateDigest,
       executionRecordPath: execution.recordPath,
       evidence: [...new Set(evidenceFor(attempt))],
       commits: execution.commits,

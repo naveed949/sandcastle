@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { canonicalJsonDigest } from "./CanonicalJson.js";
 
 /** The normalized kinds of GitHub task understood by the worker. */
 export type TaskKind = "issue" | "prd";
@@ -279,37 +279,9 @@ const displayTask = (task: TaskReference): string =>
 const compareStrings = (left: string, right: string): number =>
   left < right ? -1 : left > right ? 1 : 0;
 
-const canonicalize = (value: unknown): string => {
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean"
-  ) {
-    return JSON.stringify(value);
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value))
-      throw new TypeError("Cannot hash a non-finite number");
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalize).join(",")}]`;
-  }
-  if (isRecord(value)) {
-    return `{${Object.keys(value)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalize(value[key])}`)
-      .join(",")}}`;
-  }
-  throw new TypeError("Cannot hash an unsupported value");
-};
-
-const sha256 = (value: unknown): string =>
-  createHash("sha256").update(canonicalize(value)).digest("hex");
-
 /** Compute the canonical digest that binds a prompt-template artifact to execution. */
 export const digestPromptTemplate = (template: string): string =>
-  sha256(template);
+  canonicalJsonDigest(template);
 
 const deepFreeze = <T>(value: T, seen = new WeakSet<object>()): T => {
   if (typeof value !== "object" || value === null || seen.has(value)) {
@@ -737,6 +709,14 @@ export const configuredTaskDependencies = (
 ): ReadonlyMap<string, readonly TaskReference[]> =>
   validateConfiguration(configuration).taskDependencies;
 
+/** Return the digest of one validated, canonical central worker configuration. */
+export const workerConfigurationDigest = (
+  configuration: WorkerConfiguration,
+): string => {
+  validateConfiguration(configuration);
+  return canonicalJsonDigest(configuration);
+};
+
 const completedDependencyIds = (
   tasks: readonly NormalizedTask[],
   completionStates: ReadonlySet<DependencyCompletionState>,
@@ -992,8 +972,8 @@ export const runWorkerDryRun = ({
       setupCommands: [...profile.setupCommands],
       verificationCommands: [...profile.verificationCommands],
     });
-    const profileDigest = sha256(profileSnapshot);
-    const executionIdentity = sha256({
+    const profileDigest = canonicalJsonDigest(profileSnapshot);
+    const executionIdentity = canonicalJsonDigest({
       taskId: id,
       taskRevision: task.sourceRevision,
       ...(parentPrd === undefined

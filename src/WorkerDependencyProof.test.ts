@@ -18,6 +18,7 @@ import {
 } from "./WorkerAcceptanceProof.js";
 import { workerBranchFor } from "./WorkerRepositoryManager.js";
 import type { WorkerPublicationResult } from "./WorkerPublication.js";
+import type { WorkerPocBoundaryAuditRecordInput } from "./WorkerPocGateAudit.js";
 import { createWorkerStateStore } from "./WorkerStateStore.js";
 
 const reference = (number: number, kind: "issue" | "prd" = "issue") =>
@@ -116,6 +117,9 @@ const runtimeFor =
   ) =>
   async (
     request: ExecutionRequest,
+    guardedActions:
+      | { record(event: WorkerPocBoundaryAuditRecordInput): Promise<void> }
+      | undefined,
   ): Promise<CrossRepositoryAcceptanceRuntime> => {
     const stateFilePath = workerStateFilePath(
       workspaceRoot,
@@ -182,6 +186,11 @@ const runtimeFor =
             status: "verified",
             evidence: [recordPath, runLogPath],
           });
+          await guardedActions?.record({
+            action: "verification",
+            executionIdentity: request.executionIdentity,
+            evidence: [recordPath],
+          });
           return result;
         },
       },
@@ -209,6 +218,11 @@ const runtimeFor =
             status: "published",
             evidence: [recordPath, pullRequestUrl],
           });
+          await guardedActions?.record({
+            action: "publication",
+            executionIdentity: request.executionIdentity,
+            evidence: [pullRequestUrl],
+          });
           states.set(request.task.number, "completed");
           return publication;
         },
@@ -229,6 +243,9 @@ describe("runDependencyChainAcceptanceProof", () => {
       [4, "open"],
     ]);
     const taskSource = source(states);
+    const recordBoundary = vi.fn(
+      async (_event: WorkerPocBoundaryAuditRecordInput) => undefined,
+    );
 
     const proof = await runDependencyChainAcceptanceProof({
       proofPath,
@@ -239,6 +256,7 @@ describe("runDependencyChainAcceptanceProof", () => {
       owner: "acceptance-worker",
       leaseDurationMs: 60_000,
       runtimeFor: runtimeFor(workspaceRoot, recordsRoot, states),
+      boundaryAudit: { record: recordBoundary },
       createdAt: "2026-08-24T00:00:00.000Z",
     });
 
@@ -252,6 +270,17 @@ describe("runDependencyChainAcceptanceProof", () => {
       ["acme/app:issue:3", "acme/app:issue:4"],
       ["acme/app:issue:4"],
       [],
+    ]);
+    expect(recordBoundary.mock.calls.map(([event]) => event.action)).toEqual([
+      "claim",
+      "verification",
+      "publication",
+      "claim",
+      "verification",
+      "publication",
+      "claim",
+      "verification",
+      "publication",
     ]);
     expect(
       proof.stages.every(

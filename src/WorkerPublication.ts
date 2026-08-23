@@ -12,6 +12,7 @@ import {
   workerRepositoryDirectory,
 } from "./WorkerRepositoryManager.js";
 import type { ExecutionAttempt, WorkerStateStore } from "./WorkerStateStore.js";
+import type { WorkerGuardedActionRecorder } from "./WorkerGuardedActions.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -65,6 +66,15 @@ export interface WorkerPublicationOperations {
   }): Promise<DraftPullRequest>;
 }
 
+/** Read-capable publication adapter used by live duplicate-observation proofs. */
+export interface WorkerPublicationInspectionOperations extends WorkerPublicationOperations {
+  listPullRequests(input: {
+    readonly repository: string;
+    readonly branch: string;
+    readonly base: string;
+  }): Promise<readonly DraftPullRequest[]>;
+}
+
 export interface WorkerPublicationResult {
   readonly attemptId: string;
   readonly executionIdentity: string;
@@ -86,6 +96,7 @@ export interface WorkerPublisherOptions {
   readonly workspaceRoot: string;
   readonly store: WorkerStateStore;
   readonly operations: WorkerPublicationOperations;
+  readonly guardedActions?: WorkerGuardedActionRecorder;
   readonly loadExecutionResult?: (
     recordPath: string,
   ) => Promise<WorkerExecutionResult>;
@@ -320,7 +331,7 @@ const parsePullRequest = (value: unknown): DraftPullRequest => {
 /** Create the credentialed Git/GitHub adapter kept outside the agent sandbox. */
 export const createDefaultWorkerPublicationOperations = (
   options: DefaultWorkerPublicationOperationsOptions,
-): WorkerPublicationOperations => {
+): WorkerPublicationInspectionOperations => {
   const token = options.token.trim();
   if (token === "") {
     throw new WorkerPublicationError(
@@ -375,6 +386,29 @@ export const createDefaultWorkerPublicationOperations = (
       },
     });
     return stdout.trim();
+  };
+  const listPullRequests = async (input: {
+    readonly repository: string;
+    readonly branch: string;
+    readonly base: string;
+  }): Promise<readonly DraftPullRequest[]> => {
+    const [owner] = normalizeRepository(input.repository).split("/");
+    const query = new URLSearchParams({
+      state: "open",
+      head: `${owner}:${input.branch}`,
+      base: input.base,
+    });
+    const response = await request(
+      githubApiUrl(input.repository, `/pulls?${query.toString()}`),
+    );
+    const value = (await response.json()) as unknown;
+    if (!Array.isArray(value)) {
+      throw new WorkerPublicationError(
+        "GitHub returned an invalid pull request list.",
+        "publication_failed",
+      );
+    }
+    return value.map(parsePullRequest);
   };
 
   return {
@@ -435,25 +469,8 @@ export const createDefaultWorkerPublicationOperations = (
         true,
       );
     },
-    findPullRequest: async ({ repository, branch, base }) => {
-      const [owner] = normalizeRepository(repository).split("/");
-      const query = new URLSearchParams({
-        state: "open",
-        head: `${owner}:${branch}`,
-        base,
-      });
-      const response = await request(
-        githubApiUrl(repository, `/pulls?${query.toString()}`),
-      );
-      const value = (await response.json()) as unknown;
-      if (!Array.isArray(value)) {
-        throw new WorkerPublicationError(
-          "GitHub returned an invalid pull request list.",
-          "publication_failed",
-        );
-      }
-      return value.length === 0 ? undefined : parsePullRequest(value[0]);
-    },
+    listPullRequests,
+    findPullRequest: async (input) => (await listPullRequests(input))[0],
     createDraftPullRequest: async (input) => {
       const response = await request(githubApiUrl(input.repository, "/pulls"), {
         method: "POST",
@@ -637,6 +654,11 @@ export const createWorkerPublisher = (
           evidence: [recordPath, pullRequest.url],
         });
       }
+      await options.guardedActions?.record({
+        action: "publication",
+        executionIdentity: attempt.executionIdentity,
+        evidence: [pullRequest.url],
+      });
       return {
         attemptId: attempt.attemptId,
         executionIdentity: attempt.executionIdentity,

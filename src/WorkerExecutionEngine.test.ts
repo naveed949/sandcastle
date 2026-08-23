@@ -160,11 +160,13 @@ const createHarness = async (options?: {
       sandbox: { tag: "bind-mount" } as never,
     },
   });
+  const recordGuardedAction = vi.fn(async () => undefined);
   const engine = createWorkerExecutionEngine({
     configuration,
     repositoryManager: manager,
     store,
     recordsRoot: join(root, "records"),
+    guardedActions: { record: recordGuardedAction },
   });
   return {
     root,
@@ -175,6 +177,7 @@ const createHarness = async (options?: {
     commands,
     close,
     runAgent,
+    recordGuardedAction,
   };
 };
 
@@ -196,6 +199,11 @@ describe("WorkerExecutionEngine", () => {
     );
     expect(harness.runAgent.mock.calls[0]?.[0]).not.toHaveProperty("env");
     expect(harness.close).toHaveBeenCalledOnce();
+    expect(harness.recordGuardedAction).toHaveBeenCalledWith({
+      action: "verification",
+      executionIdentity: request.executionIdentity,
+      evidence: [result.recordPath],
+    });
 
     const state = await harness.store.read();
     expect(state.attempts[0]?.status).toBe("verified");
@@ -223,6 +231,7 @@ describe("WorkerExecutionEngine", () => {
     expect(result.agent?.stdout).toContain("successfully");
     expect(result.published).toBe(false);
     expect((await harness.store.read()).attempts[0]?.status).toBe("failed");
+    expect(harness.recordGuardedAction).not.toHaveBeenCalled();
     expect(harness.close).toHaveBeenCalledOnce();
   });
 

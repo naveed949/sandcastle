@@ -10,6 +10,7 @@ import type {
   ExecutionAttempt,
   WorkerStateStore,
 } from "./WorkerStateStore.js";
+import type { WorkerGuardedActionRecorder } from "./WorkerGuardedActions.js";
 
 /** Source seam used to freshly re-read a task immediately before claiming. */
 export interface ClaimTaskReadResult {
@@ -35,6 +36,7 @@ export interface ClaimWorkerTaskInput extends ClaimAttemptOptions {
   readonly store: WorkerStateStore;
   readonly configuration: WorkerConfiguration;
   readonly request: ExecutionRequest;
+  readonly guardedActions?: WorkerGuardedActionRecorder;
 }
 
 /** Stable claim failures that callers must handle before execution begins. */
@@ -65,6 +67,7 @@ export const claimWorkerTask = async ({
   leaseDurationMs,
   claimedAt,
   attemptId,
+  guardedActions,
 }: ClaimWorkerTaskInput): Promise<ExecutionAttempt> => {
   const freshRead = await source.read({
     configuration,
@@ -114,11 +117,18 @@ export const claimWorkerTask = async ({
     );
   }
 
-  return store.claimAttempt(freshRequest, {
+  const attempt = await store.claimAttempt(freshRequest, {
     owner,
     leaseDurationMs,
     refreshedSnapshots: [freshTask, ...freshRead.relatedTasks],
     ...(claimedAt === undefined ? {} : { claimedAt }),
     ...(attemptId === undefined ? {} : { attemptId }),
   });
+  await guardedActions?.record({
+    action: "claim",
+    executionIdentity: request.executionIdentity,
+    evidence: [attempt.attemptId],
+    timestamp: claimedAt,
+  });
+  return attempt;
 };

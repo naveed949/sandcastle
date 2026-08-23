@@ -4,6 +4,7 @@ import {
   createDefaultWorkerPublicationOperations,
   createGitHubTaskSource,
   createWorkerExecutionEngine,
+  createWorkerPocBoundaryAuditRecorder,
   createWorkerPublisher,
   createWorkerRepositoryManager,
   createWorkerStateStore,
@@ -27,6 +28,8 @@ interface LiveScenario {
   readonly thirdPartySibling: TaskReference;
   readonly initialConfiguration: WorkerConfiguration;
   readonly authorizedConfiguration: WorkerConfiguration;
+  readonly boundaryAuditPath?: string;
+  readonly boundaryAuditRunId?: string;
 }
 
 const requiredEnvironment = (name: string): string => {
@@ -49,12 +52,29 @@ export default async function liveFixture(): Promise<RunCrossRepositoryAcceptanc
     account: scenario.account,
     token,
   });
+  if (
+    (scenario.boundaryAuditPath === undefined) !==
+    (scenario.boundaryAuditRunId === undefined)
+  ) {
+    throw new Error(
+      "boundaryAuditPath and boundaryAuditRunId must be provided together.",
+    );
+  }
+  const boundaryAudit =
+    scenario.boundaryAuditPath === undefined
+      ? undefined
+      : createWorkerPocBoundaryAuditRecorder({
+          path: scenario.boundaryAuditPath,
+          runId: scenario.boundaryAuditRunId!,
+          integrityKey: requiredEnvironment("SANDCASTLE_POC_GATE_AUDIT_KEY"),
+        });
 
   return {
     ...scenario,
     source,
     leaseDurationMs: scenario.leaseDurationMs ?? 5 * 60_000,
-    runtimeFor: async (request) => {
+    boundaryAudit,
+    runtimeFor: async (request, guardedActions) => {
       const stateFilePath = workerStateFilePath(
         scenario.workspaceRoot,
         request.task.repository,
@@ -75,12 +95,14 @@ export default async function liveFixture(): Promise<RunCrossRepositoryAcceptanc
           repositoryManager,
           store,
           recordsRoot: scenario.recordsRoot,
+          guardedActions,
         }),
         publisher: createWorkerPublisher({
           configuration: scenario.authorizedConfiguration,
           workspaceRoot: scenario.workspaceRoot,
           store,
           operations: createDefaultWorkerPublicationOperations({ token }),
+          guardedActions,
         }),
       };
     },

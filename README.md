@@ -485,6 +485,37 @@ and `published` states.
 See [Remote worker operations](docs/remote-worker.md) for credential scope,
 systemd deployment, backup, upgrade, and failure inspection guidance.
 
+### Consolidated retained POC gate
+
+`runWorkerPocGate()` is the final fail-closed acceptance boundary. It performs
+two fresh discovery cycles, compares their ordered decisions and execution
+identities, proves an unauthorized account-authored task remains inbox-only,
+and validates retained restart, cross-repository, dependency-chain,
+publication-provenance, and privileged-action audit evidence. A successful run
+atomically writes both machine-readable JSON and a Markdown operator report.
+
+The restart evidence deliberately covers two dispositions: a started attempt
+with possible side effects remains blocked for manual intervention without a
+new claim, branch, or pull request; a verified attempt resumes publication by
+reusing its deterministic branch and one draft pull request.
+
+Use `runWorkerRestartAcceptanceProof()` (or the opt-in
+`test:acceptance:restart` fixture) to capture those states and live branch/PR
+observations around replacement-service cycles. Its manifest is HMAC-bound to
+the same deployed gate run as the guarded-action audit.
+
+Run the opt-in deployed-worker fixture with:
+
+```bash
+SANDCASTLE_POC_GATE_FIXTURE=$PWD/scripts/poc-gate.fixture.mts \
+SANDCASTLE_POC_GATE_SCENARIO=/absolute/path/to/poc-gate-scenario.json \
+  npm run test:acceptance:poc-gate
+```
+
+See [Final POC gate](docs/poc-gate.md) for artifact requirements, audit
+boundaries, limitations, and the evidence required before expanding beyond the
+single-worker GitHub POC.
+
 ### All options
 
 ```typescript

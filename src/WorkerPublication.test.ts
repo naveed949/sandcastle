@@ -192,15 +192,18 @@ const publisher = (
   operations = createOperations(),
 ) => {
   const storeHarness = createStore(initialAttempt);
+  const recordGuardedAction = vi.fn(async () => undefined);
   return {
     ...storeHarness,
     operations,
+    recordGuardedAction,
     publisher: createWorkerPublisher({
       configuration,
       workspaceRoot: "/worker",
       store: storeHarness.store,
       operations,
       loadExecutionResult: vi.fn(async () => executionResult),
+      guardedActions: { record: recordGuardedAction },
     }),
   };
 };
@@ -245,6 +248,11 @@ describe("WorkerPublisher", () => {
         evidence: [recordPath, draftPullRequest.url],
       },
     );
+    expect(harness.recordGuardedAction).toHaveBeenCalledWith({
+      action: "publication",
+      executionIdentity: request.executionIdentity,
+      evidence: [draftPullRequest.url],
+    });
   });
 
   it("rejects unverified attempts before any publication operation", async () => {

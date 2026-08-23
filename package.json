@@ -40,6 +40,8 @@
     "test": "vitest run",
     "test:acceptance:cross-repository": "vitest run src/WorkerAcceptanceProof.live.test.ts",
     "test:acceptance:dependency-chain": "vitest run src/WorkerDependencyProof.live.test.ts",
+    "test:acceptance:restart": "vitest run src/WorkerRestartAcceptanceProof.live.test.ts",
+    "test:acceptance:poc-gate": "vitest run src/WorkerPocGate.live.test.ts",
     "test:watch": "vitest",
     "typecheck": "tsgo --noEmit",
     "format": "prettier --write .",

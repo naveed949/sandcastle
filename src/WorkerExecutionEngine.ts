@@ -17,6 +17,7 @@ import type {
 } from "./WorkerRepositoryManager.js";
 import type { CloseResult } from "./createSandbox.js";
 import type { ExecutionAttempt, WorkerStateStore } from "./WorkerStateStore.js";
+import type { WorkerGuardedActionRecorder } from "./WorkerGuardedActions.js";
 
 export type {
   PreparedWorkerRepository,
@@ -89,6 +90,7 @@ export interface WorkerExecutionEngineOptions {
   readonly store: WorkerStateStore;
   /** Host root for repository-qualified structured execution records. */
   readonly recordsRoot: string;
+  readonly guardedActions?: WorkerGuardedActionRecorder;
 }
 
 export interface WorkerExecutionEngine {
@@ -356,6 +358,13 @@ export const createWorkerExecutionEngine = (
         status,
         evidence,
       });
+      if (status === "verified") {
+        await options.guardedActions?.record({
+          action: "verification",
+          executionIdentity: request.executionIdentity,
+          evidence: [recordPath],
+        });
+      }
       return result;
     },
   };

@@ -20,6 +20,7 @@ import {
 } from "./WorkerRepositoryManager.js";
 import type { WorkerPublicationResult } from "./WorkerPublication.js";
 import { createWorkerStateStore } from "./WorkerStateStore.js";
+import type { WorkerPocBoundaryAuditRecordInput } from "./WorkerPocGateAudit.js";
 
 const task = (repository: string, number: number): NormalizedTask => ({
   repository,
@@ -119,6 +120,9 @@ const runtimeFactory =
   ) =>
   async (
     request: ExecutionRequest,
+    guardedActions:
+      | { record(event: WorkerPocBoundaryAuditRecordInput): Promise<void> }
+      | undefined,
   ): Promise<CrossRepositoryAcceptanceRuntime> => {
     const repository = request.task.repository.toLowerCase();
     const repositoryDir = workerRepositoryDirectory(workspaceRoot, repository);
@@ -228,6 +232,11 @@ const runtimeFactory =
             status: "verified",
             evidence: [recordPath, runLogPath],
           });
+          await guardedActions?.record({
+            action: "verification",
+            executionIdentity: request.executionIdentity,
+            evidence: [recordPath],
+          });
           return result;
         },
       },
@@ -253,6 +262,11 @@ const runtimeFactory =
           await store.transitionAttempt(attemptId, {
             status: "published",
             evidence: [recordPath, pullRequestUrl],
+          });
+          await guardedActions?.record({
+            action: "publication",
+            executionIdentity: request.executionIdentity,
+            evidence: [pullRequestUrl],
           });
           return publication;
         },
@@ -289,7 +303,13 @@ const createInput = async (
 
 describe("runCrossRepositoryAcceptanceProof", () => {
   it("executes and reads back the live authorization and isolation proof", async () => {
-    const input = await createInput();
+    const recordBoundary = vi.fn(
+      async (_event: WorkerPocBoundaryAuditRecordInput) => undefined,
+    );
+    const input = {
+      ...(await createInput()),
+      boundaryAudit: { record: recordBoundary },
+    };
 
     const proof = await runCrossRepositoryAcceptanceProof(input);
     const retained = JSON.parse(await readFile(input.proofPath, "utf8"));
@@ -318,6 +338,17 @@ describe("runCrossRepositoryAcceptanceProof", () => {
     );
     expect(new Set(proof.runs.map((run) => run.attemptId)).size).toBe(3);
     expect(new Set(proof.runs.map((run) => run.branch)).size).toBe(3);
+    expect(recordBoundary.mock.calls.map(([event]) => event.action)).toEqual([
+      "claim",
+      "verification",
+      "publication",
+      "claim",
+      "verification",
+      "publication",
+      "claim",
+      "verification",
+      "publication",
+    ]);
     expect(retained).toEqual(proof);
     expect(input.source.discover).toHaveBeenNthCalledWith(
       1,

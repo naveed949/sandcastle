@@ -101,6 +101,7 @@ export type {
 export {
   runWorkerDryRun,
   configuredTaskDependencies,
+  workerConfigurationDigest,
   workerTaskId,
   WorkerConfigurationError,
   NormalizedTaskError,
@@ -210,6 +211,7 @@ export type {
   WorkerPublisher,
   WorkerPublisherOptions,
   WorkerPublicationFetch,
+  WorkerPublicationInspectionOperations,
   DefaultWorkerPublicationOperationsOptions,
   WorkerPublicationErrorCode,
 } from "./WorkerPublication.js";
@@ -226,11 +228,16 @@ export type {
   CrossRepositoryAcceptanceRuntime,
   RunCrossRepositoryAcceptanceProofInput,
   RunDependencyChainAcceptanceProofInput,
+  RetainedExecutionProvenance,
   RetainedAcceptanceRun,
   RetainedDependencyStage,
   DependencyChainAcceptanceProof,
   CrossRepositoryAcceptanceProof,
 } from "./WorkerAcceptanceProof.js";
+export type {
+  WorkerGuardedActionEvent,
+  WorkerGuardedActionRecorder,
+} from "./WorkerGuardedActions.js";
 export {
   createJsonlWorkerDiagnostics,
   createWorkerService,
@@ -248,3 +255,30 @@ export type {
   WorkerService,
   WorkerServiceOptions,
 } from "./WorkerService.js";
+export { runWorkerPocGate, WorkerPocGateError } from "./WorkerPocGate.js";
+export { createWorkerPocBoundaryAuditRecorder } from "./WorkerPocGateAudit.js";
+export { runWorkerRestartAcceptanceProof } from "./WorkerRestartAcceptanceProof.js";
+export type {
+  WorkerRestartObservation,
+  WorkerRestartAcceptanceScenario,
+  RunWorkerRestartAcceptanceProofInput,
+} from "./WorkerRestartAcceptanceProof.js";
+export type {
+  CreateWorkerPocBoundaryAuditRecorderInput,
+  WorkerPocBoundaryAuditRecordInput,
+  WorkerPocBoundaryAuditRecorder,
+} from "./WorkerPocGateAudit.js";
+export type {
+  WorkerPocGateErrorCode,
+  WorkerRestartScenarioEvidence,
+  WorkerRestartAcceptanceEvidence,
+  WorkerPrivilegedAction,
+  WorkerPocBoundaryAction,
+  WorkerPocBoundaryAuditEvent,
+  WorkerPocBoundaryAudit,
+  WorkerPocPublicationProvenance,
+  WorkerPocLimitation,
+  WorkerPocFutureEvidence,
+  WorkerPocGateProof,
+  RunWorkerPocGateInput,
+} from "./WorkerPocGate.js";
