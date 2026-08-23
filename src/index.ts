@@ -135,3 +135,19 @@ export type {
   GitHubTaskSource,
   GitHubWorkerDryRunInput,
 } from "./GitHubTaskSource.js";
+export {
+  createWorkerStateStore,
+  WorkerStateStoreError,
+} from "./WorkerStateStore.js";
+export type {
+  TaskSnapshotRecord,
+  ExecutionRequestRecord,
+  AttemptStatus,
+  AttemptOutcomeRecord,
+  ExecutionAttempt,
+  CreateAttemptOptions,
+  AttemptTransition,
+  WorkerState,
+  WorkerStateStoreOptions,
+  WorkerStateStore,
+} from "./WorkerStateStore.js";

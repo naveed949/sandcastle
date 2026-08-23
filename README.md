@@ -132,6 +132,7 @@ adding its `{ repository, kind, number }` reference to `authorizedTasks`.
 ```typescript
 import {
   createGitHubTaskSource,
+  createWorkerStateStore,
   runGitHubWorkerDryRun,
   runWorkerDryRun,
   type NormalizedTask,
@@ -198,6 +199,38 @@ The result contains stable reason codes for every task, deterministic ordering,
 and execution identities bound to the task revision, base commit, profile
 digest, and prompt version. The machine-readable projection reports
 `readOnly: true` and an empty `mutations` list.
+
+### Durable worker state
+
+Persist a dry-run result before starting execution so a worker restart can
+reconstruct the discovered task snapshots, selected execution requests, and
+active attempts:
+
+```typescript
+const state = createWorkerStateStore({
+  filePath: ".sandcastle/worker-state.json",
+});
+
+await state.recordDiscovery(liveResult);
+const request = liveResult.executionRequests[0];
+if (request !== undefined) {
+  const attempt = await state.createAttempt(request);
+  // Start execution only after createAttempt() has returned successfully.
+  await state.transitionAttempt(attempt.attemptId, {
+    status: "verified",
+    evidence: ["ci://run/42"],
+  });
+}
+```
+
+`recordDiscovery()` and `createAttempt()` are idempotent for unchanged
+snapshots and execution identities. `read()` returns the durable state after a
+restart. Attempt transitions are monotonic: an active attempt may be marked
+`interrupted`, `failed`, or `verified`; only a verified attempt may become
+`published`. Each terminal outcome retains its timestamp and evidence
+references. To deliberately retry a terminal attempt, pass a new `attemptId`
+to `createAttempt()`; an existing active attempt for the same execution
+identity still prevents duplicate work.
 
 ### All options
 
