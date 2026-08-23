@@ -165,6 +165,8 @@ export type {
 export {
   createDefaultWorkerRepositoryOperations,
   createWorkerRepositoryManager,
+  workerBranchFor,
+  workerRepositoryDirectory,
   WorkerRepositoryError,
 } from "./WorkerRepositoryManager.js";
 export type {
@@ -186,3 +188,20 @@ export type {
   WorkerExecutionEngineOptions,
   WorkerExecutionEngine,
 } from "./WorkerExecutionEngine.js";
+export {
+  createDefaultWorkerPublicationOperations,
+  createWorkerPublisher,
+  WorkerPublicationError,
+} from "./WorkerPublication.js";
+export type {
+  PublicationDestination,
+  PublishedBranch,
+  DraftPullRequest,
+  WorkerPublicationOperations,
+  WorkerPublicationResult,
+  WorkerPublisher,
+  WorkerPublisherOptions,
+  WorkerPublicationFetch,
+  DefaultWorkerPublicationOperationsOptions,
+  WorkerPublicationErrorCode,
+} from "./WorkerPublication.js";

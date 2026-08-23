@@ -215,6 +215,21 @@ const repositoryParts = (repository: string): readonly [string, string] => {
 const canonicalRemoteFor = (repository: string): string =>
   `https://github.com/${normalizeRepository(repository)}.git`;
 
+/** Return the repository-qualified cache used by execution and publication. */
+export const workerRepositoryDirectory = (
+  workspaceRoot: string,
+  repository: string,
+): string => {
+  const [owner, name] = repositoryParts(repository);
+  return join(workspaceRoot, "repositories", owner, name, "cache");
+};
+
+/** Return the deterministic branch owned by one immutable execution. */
+export const workerBranchFor = (request: ExecutionRequest): string => {
+  const [owner, name] = repositoryParts(request.task.repository);
+  return `sandcastle/worker/${owner}/${name}/${request.task.kind}-${request.task.number}/${request.executionIdentity.slice(0, 12)}`;
+};
+
 const normalizeCanonicalRemote = (remote: string): string | undefined => {
   try {
     const url = new URL(remote);
@@ -396,15 +411,12 @@ export const createWorkerRepositoryManager = (
       const repository = normalizeRepository(request.task.repository);
       const [owner, name] = repositoryParts(repository);
       const namespace = `${owner}/${name}`;
-      const repositoryDir = join(
+      const repositoryDir = workerRepositoryDirectory(
         options.workspaceRoot,
-        "repositories",
-        owner,
-        name,
-        "cache",
+        repository,
       );
       const canonicalRemote = canonicalRemoteFor(repository);
-      const branch = `sandcastle/worker/${owner}/${name}/${request.task.kind}-${request.task.number}/${request.executionIdentity.slice(0, 12)}`;
+      const branch = workerBranchFor(request);
 
       try {
         if (!(await operations.repositoryExists(repositoryDir))) {

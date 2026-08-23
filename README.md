@@ -300,6 +300,41 @@ variables through the agent API. Run logs are forced into the qualified
 repository cache, and a dirty preserved worktree is retained as cleanup
 failure evidence instead of being reported as verified.
 
+### Verification-gated draft pull requests
+
+Publish a retained verified attempt through a separate credentialed boundary.
+The publisher rechecks central authorization, validates both the cached remote
+and GitHub destination, and pushes the exact verified commit to the
+repository- and execution-qualified branch.
+
+```typescript
+import {
+  createDefaultWorkerPublicationOperations,
+  createWorkerPublisher,
+} from "@ai-hero/sandcastle";
+
+const publisher = createWorkerPublisher({
+  configuration,
+  workspaceRoot: "/srv/sandcastle-worker",
+  store: state,
+  operations: createDefaultWorkerPublicationOperations({
+    // Keep this credential in the publisher process; it is never passed to
+    // the Sandcastle agent or its sandbox.
+    token: process.env.GITHUB_TOKEN!,
+  }),
+});
+
+const publication = await publisher.publish(attempt.attemptId);
+console.log(publication.pullRequest.url);
+```
+
+Only a draft pull request can be created or reused. Its body records the source
+task, execution identity, frozen base, resulting commits, and verification
+summary. A restart after push but before pull-request creation reuses the exact
+remote branch, and subsequent retries reuse the matching draft pull request.
+The publication API cannot mark a pull request ready, merge it, or mutate the
+source issue.
+
 ### All options
 
 ```typescript
