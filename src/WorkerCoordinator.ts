@@ -500,6 +500,14 @@ const validateConfiguration = (
     }
   }
 
+  for (const [repository, policy] of repositories) {
+    if (!Object.hasOwn(profiles, policy.profileId)) {
+      issues.push(
+        `repository ${repository} references missing profile ${policy.profileId}`,
+      );
+    }
+  }
+
   const authorizedTasks = new Set<string>();
   if (!Array.isArray(configuration.authorizedTasks)) {
     issues.push("authorizedTasks must be an array");

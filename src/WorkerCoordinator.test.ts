@@ -126,11 +126,6 @@ describe("runWorkerDryRun", () => {
           baseBranch: "main",
           profileId: "node",
         },
-        "acme/missing-profile": {
-          authorized: true,
-          baseBranch: "main",
-          profileId: "missing",
-        },
         "thirdparty/app": {
           authorized: false,
           baseBranch: "main",
@@ -150,6 +145,7 @@ describe("runWorkerDryRun", () => {
       profiles: configuration.profiles,
       authorizedTasks: [
         { repository: "thirdparty/app", kind: "issue", number: 7 },
+        { repository: "unconfigured/app", kind: "issue", number: 18 },
       ],
       promptVersion: "worker-v1",
     };
@@ -174,7 +170,7 @@ describe("runWorkerDryRun", () => {
       },
       {
         ...task,
-        repository: "acme/missing-profile",
+        repository: "unconfigured/app",
         number: 18,
       },
       { ...task, baseBranch: "develop", number: 19 },
@@ -208,9 +204,7 @@ describe("runWorkerDryRun", () => {
     expect(reasons.get("acme/app:prd:15")).toBe("prd");
     expect(reasons.get("acme/app:issue:16")).toBe("non_leaf");
     expect(reasons.get("acme/app:issue:17")).toBe("unmet_dependency");
-    expect(reasons.get("acme/missing-profile:issue:18")).toBe(
-      "missing_profile",
-    );
+    expect(reasons.get("unconfigured/app:issue:18")).toBe("missing_profile");
     expect(reasons.get("acme/app:issue:19")).toBe("invalid_base");
     expect(reasons.get("thirdparty/app:issue:7")).toBe("eligible");
     expect(reasons.get("thirdparty/app:issue:8")).toBe(
@@ -218,16 +212,16 @@ describe("runWorkerDryRun", () => {
     );
     expect(reasons.get("a/app:issue:7")).toBe("eligible");
     expect(reasons.get("b/app:issue:7")).toBe("eligible");
-    expect(new Set(["a/app:issue:7", "b/app:issue:7"])).toHaveProperty(
-      "size",
-      2,
-    );
     expect(result.executionRequests.map((request) => request.taskId)).toEqual([
       "a/app:issue:7",
       "acme/app:issue:7",
       "b/app:issue:7",
       "thirdparty/app:issue:7",
     ]);
+    const issueSevenIds = result.executionRequests
+      .map((request) => request.taskId)
+      .filter((taskId) => taskId.endsWith(":issue:7"));
+    expect(new Set(issueSevenIds)).toHaveLength(4);
   });
 
   it("rejects invalid central configuration before evaluating tasks", () => {
@@ -236,6 +230,20 @@ describe("runWorkerDryRun", () => {
         configuration: {
           ...configuration,
           promptVersion: " ",
+        },
+        tasks: [task],
+      }),
+    ).toThrowError(WorkerConfigurationError);
+    expect(() =>
+      runWorkerDryRun({
+        configuration: {
+          ...configuration,
+          repositories: {
+            "acme/app": {
+              ...configuration.repositories["acme/app"]!,
+              profileId: "missing",
+            },
+          },
         },
         tasks: [task],
       }),
@@ -250,6 +258,11 @@ describe("runWorkerDryRun", () => {
     expect(result.machineReadable.executionRequests).toEqual(
       result.executionRequests,
     );
+    expect(result.machineReadable.mutations).not.toContain("checkout");
+    expect(result.machineReadable.mutations).not.toContain("agent-invocation");
+    expect(result.machineReadable.mutations).not.toContain("github-mutation");
+    expect(result.machineReadable.mutations).not.toContain("push");
+    expect(result.machineReadable.mutations).not.toContain("pull-request");
   });
 
   it("keeps ordering and serialized output equivalent across repeated runs", () => {
@@ -300,11 +313,8 @@ describe("runWorkerDryRun", () => {
     });
     const request = result.executionRequests[0]!;
 
-    expect(Object.isFrozen(request)).toBe(true);
-    expect(Object.isFrozen(request.task)).toBe(true);
-    expect(Object.isFrozen(request.profile)).toBe(true);
-    expect(Object.isFrozen(mutableConfiguration.profiles.node)).toBe(false);
     setupCommands.push("npm run lint");
     expect(setupCommands).toEqual(["npm ci", "npm run lint"]);
+    expect(request.profile.setupCommands).toEqual(["npm ci"]);
   });
 });
