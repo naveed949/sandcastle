@@ -192,6 +192,7 @@ export { createWorkerExecutionEngine } from "./WorkerExecutionEngine.js";
 export type {
   WorkerExecutionFailurePhase,
   WorkerExecutionResult,
+  WorkerExecutionOptions,
   WorkerExecutionEngineOptions,
   WorkerExecutionEngine,
 } from "./WorkerExecutionEngine.js";
@@ -230,3 +231,20 @@ export type {
   DependencyChainAcceptanceProof,
   CrossRepositoryAcceptanceProof,
 } from "./WorkerAcceptanceProof.js";
+export {
+  createJsonlWorkerDiagnostics,
+  createWorkerService,
+  workerServicePaths,
+  WorkerExecutionTimeoutError,
+  WorkerServiceLockError,
+  WorkerServiceShutdownError,
+} from "./WorkerService.js";
+export type {
+  WorkerOperationalState,
+  WorkerDiagnostic,
+  WorkerDiagnostics,
+  WorkerServicePaths,
+  WorkerCycleResult,
+  WorkerService,
+  WorkerServiceOptions,
+} from "./WorkerService.js";

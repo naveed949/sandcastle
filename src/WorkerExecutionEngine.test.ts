@@ -56,6 +56,8 @@ const createHarness = async (options?: {
   verificationExitCode?: number;
   agentError?: Error;
   preservedWorktreePath?: string;
+  waitForAbort?: boolean;
+  waitForSetupAbort?: boolean;
 }) => {
   const root = await mkdtemp(join(tmpdir(), "sandcastle-worker-engine-"));
   const store = createWorkerStateStore({
@@ -71,16 +73,36 @@ const createHarness = async (options?: {
   const close = vi.fn(async () => ({
     preservedWorktreePath: options?.preservedWorktreePath,
   }));
-  const runAgent = vi.fn(async ({ prompt }: { readonly prompt: string }) => {
-    if (options?.agentError !== undefined) throw options.agentError;
-    return {
-      commits: [{ sha: "d".repeat(40) }],
-      branch: `sandcastle/worker/acme/app/issue-6/${request.executionIdentity.slice(0, 12)}`,
-      stdout: "I completed the task successfully.",
-      iterations: [],
+  const runAgent = vi.fn(
+    async ({
       prompt,
-    };
-  });
+      signal,
+    }: {
+      readonly prompt: string;
+      readonly signal?: AbortSignal;
+    }) => {
+      if (options?.agentError !== undefined) throw options.agentError;
+      if (options?.waitForAbort) {
+        if (signal === undefined) throw new Error("missing abort signal");
+        await new Promise<never>((_resolve, reject) => {
+          if (signal.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        });
+      }
+      return {
+        commits: [{ sha: "d".repeat(40) }],
+        branch: `sandcastle/worker/acme/app/issue-6/${request.executionIdentity.slice(0, 12)}`,
+        stdout: "I completed the task successfully.",
+        iterations: [],
+        prompt,
+      };
+    },
+  );
   const operations: WorkerRepositoryOperations = {
     repositoryExists: vi.fn(async () => false),
     clone: vi.fn(async () => undefined),
@@ -98,8 +120,31 @@ const createHarness = async (options?: {
       run: runAgent as never,
       close,
     })),
-    runCommand: async ({ command, phase }) => {
+    runCommand: async ({ command, phase, signal }) => {
       commands.push(command);
+      if (phase === "setup" && options?.waitForSetupAbort) {
+        if (signal === undefined) {
+          return {
+            command,
+            phase,
+            exitCode: 1,
+            stdout: "",
+            stderr: "missing abort signal",
+          };
+        }
+        if (!signal.aborted) {
+          await new Promise<void>((resolve) => {
+            signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+        }
+        return {
+          command,
+          phase,
+          exitCode: 1,
+          stdout: "",
+          stderr: String(signal.reason),
+        };
+      }
       const exitCode =
         phase === "verification"
           ? (options?.verificationExitCode ?? 0)
@@ -217,5 +262,43 @@ describe("WorkerExecutionEngine", () => {
     expect(result.failurePhase).toBe("cleanup");
     expect(result.cleanup?.preservedWorktreePath).toContain("acme/app");
     expect((await harness.store.read()).attempts[0]?.status).toBe("failed");
+  });
+
+  it("delegates cancellation to Sandcastle and retains an interrupted attempt", async () => {
+    const harness = await createHarness({ waitForAbort: true });
+    const controller = new AbortController();
+
+    const execution = harness.engine.execute(harness.attempt, {
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(harness.runAgent).toHaveBeenCalledOnce());
+    controller.abort(new Error("worker shutting down"));
+
+    const result = await execution;
+    expect(result.status).toBe("interrupted");
+    expect(harness.runAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ signal: controller.signal }),
+    );
+    expect((await harness.store.read()).attempts[0]?.status).toBe(
+      "interrupted",
+    );
+  });
+
+  it("cancels an in-flight setup command before invoking Sandcastle", async () => {
+    const harness = await createHarness({ waitForSetupAbort: true });
+    const controller = new AbortController();
+
+    const execution = harness.engine.execute(harness.attempt, {
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(harness.commands).toEqual(["npm ci"]));
+    controller.abort(new Error("execution timed out"));
+
+    const result = await execution;
+    expect(result.status).toBe("interrupted");
+    expect(harness.runAgent).not.toHaveBeenCalled();
+    expect((await harness.store.read()).attempts[0]?.status).toBe(
+      "interrupted",
+    );
   });
 });

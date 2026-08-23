@@ -50,7 +50,7 @@ export interface WorkerExecutionResult {
   /** Normalized owner/repository identity. */
   readonly repository: string;
   /** Evidence-gated terminal result. */
-  readonly status: "failed" | "verified";
+  readonly status: "interrupted" | "failed" | "verified";
   /** Phase that failed, when the attempt was not verified. */
   readonly failurePhase?: WorkerExecutionFailurePhase;
   /** Human-readable failure detail. */
@@ -93,7 +93,16 @@ export interface WorkerExecutionEngineOptions {
 
 export interface WorkerExecutionEngine {
   /** Execute one active revision-bound claim through verification. */
-  execute(attempt: ExecutionAttempt): Promise<WorkerExecutionResult>;
+  execute(
+    attempt: ExecutionAttempt,
+    options?: WorkerExecutionOptions,
+  ): Promise<WorkerExecutionResult>;
+}
+
+/** Per-attempt controls delegated to Sandcastle execution. */
+export interface WorkerExecutionOptions {
+  /** Abort the active agent invocation while preserving recovery evidence. */
+  readonly signal?: AbortSignal;
 }
 
 const errorMessage = (error: unknown): string =>
@@ -139,12 +148,13 @@ const runCommands = async (
   prepared: PreparedWorkerRepository,
   commands: readonly string[],
   phase: "setup" | "verification",
+  signal?: AbortSignal,
 ): Promise<readonly WorkerCommandEvidence[]> => {
   const evidence: WorkerCommandEvidence[] = [];
   for (const command of commands) {
     let result: WorkerCommandEvidence;
     try {
-      result = await prepared.runCommand(command, phase);
+      result = await prepared.runCommand(command, phase, { signal });
     } catch (cause) {
       result = {
         command,
@@ -173,7 +183,7 @@ export const createWorkerExecutionEngine = (
     throw new Error("recordsRoot must be non-empty.");
   }
   return {
-    execute: async (attempt) => {
+    execute: async (attempt, executionOptions = {}) => {
       if (
         attempt.status !== "active" ||
         attempt.claim === undefined ||
@@ -198,7 +208,7 @@ export const createWorkerExecutionEngine = (
       const verification: WorkerCommandEvidence[] = [];
       let prepared: PreparedWorkerRepository | undefined;
       let agent: WorkerAgentResult | undefined;
-      let status: "failed" | "verified" = "failed";
+      let status: "interrupted" | "failed" | "verified" = "failed";
       let failurePhase: WorkerExecutionFailurePhase | undefined;
       let error: string | undefined;
       let cleanupError: string | undefined;
@@ -220,10 +230,12 @@ export const createWorkerExecutionEngine = (
             prepared,
             request.profile.setupCommands,
             "setup",
+            executionOptions.signal,
           );
           setup.push(...setupEvidence);
           const setupFailure = failedCommand(setupEvidence);
           if (setupFailure !== undefined) {
+            if (executionOptions.signal?.aborted) status = "interrupted";
             failurePhase = "setup";
             error = `Setup command failed with exit code ${setupFailure.exitCode}: ${setupFailure.command}`;
           }
@@ -248,8 +260,14 @@ export const createWorkerExecutionEngine = (
             try {
               // Only the versioned prompt crosses this boundary. The API intentionally has
               // no orchestration-env or credential field.
-              agent = await prepared.runAgent({ prompt });
+              agent = await prepared.runAgent({
+                prompt,
+                ...(executionOptions.signal === undefined
+                  ? {}
+                  : { signal: executionOptions.signal }),
+              });
             } catch (cause) {
+              if (executionOptions.signal?.aborted) status = "interrupted";
               failurePhase = "execution";
               error = errorMessage(cause);
             }
@@ -261,10 +279,12 @@ export const createWorkerExecutionEngine = (
             prepared,
             request.profile.verificationCommands,
             "verification",
+            executionOptions.signal,
           );
           verification.push(...verificationEvidence);
           const verificationFailure = failedCommand(verificationEvidence);
           if (verificationFailure !== undefined) {
+            if (executionOptions.signal?.aborted) status = "interrupted";
             failurePhase = "verification";
             error = `Verification command failed with exit code ${verificationFailure.exitCode}: ${verificationFailure.command}`;
           } else {
@@ -272,13 +292,17 @@ export const createWorkerExecutionEngine = (
           }
         }
       } catch (cause) {
+        if (executionOptions.signal?.aborted) status = "interrupted";
         failurePhase ??= prepared === undefined ? "preparation" : "execution";
         error ??= errorMessage(cause);
       } finally {
         if (prepared !== undefined) {
           try {
             cleanup = await prepared.close();
-            if (cleanup.preservedWorktreePath !== undefined) {
+            if (
+              cleanup.preservedWorktreePath !== undefined &&
+              status !== "interrupted"
+            ) {
               status = "failed";
               failurePhase = "cleanup";
               error = `Worktree contains uncommitted changes and was preserved at ${cleanup.preservedWorktreePath}.`;
@@ -329,7 +353,7 @@ export const createWorkerExecutionEngine = (
       const evidence = [recordPath];
       if (agent?.logFilePath !== undefined) evidence.push(agent.logFilePath);
       await options.store.transitionAttempt(startedAttempt.attemptId, {
-        status: status === "verified" ? "verified" : "failed",
+        status,
         evidence,
       });
       return result;

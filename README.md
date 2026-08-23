@@ -430,6 +430,61 @@ SANDCASTLE_DEPENDENCY_ACCEPTANCE_SCENARIO=/absolute/path/to/scenario.json \
   npm run test:acceptance:dependency-chain
 ```
 
+### Continuous remote worker service
+
+Compose the proven worker boundaries into a restartable, single-execution
+polling service with persistent state and diagnostics:
+
+```typescript
+import {
+  createJsonlWorkerDiagnostics,
+  createWorkerService,
+  workerServicePaths,
+} from "@ai-hero/sandcastle";
+
+const paths = workerServicePaths("/srv/sandcastle-worker");
+const service = createWorkerService({
+  configuration,
+  source,
+  store,
+  execution,
+  publisher,
+  owner: "dev-box-1",
+  lockFilePath: paths.serviceLockFilePath,
+  pollIntervalMs: 60_000,
+  leaseDurationMs: 30 * 60_000,
+  executionTimeoutMs: 2 * 60 * 60_000,
+  discovery: {
+    includeConfiguredRepositories: true,
+    includeAccountWide: true,
+  },
+  diagnostics: createJsonlWorkerDiagnostics(paths.diagnosticsFilePath),
+});
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => void service.stop());
+}
+
+await service.start();
+```
+
+`runCycle()` is also available for one-shot operation and coalesces concurrent
+calls into one cycle. `start()` waits between non-overlapping cycles and can be
+started again after `stop()` completes. A stop prevents new dispatch and aborts
+the active Sandcastle execution through its existing `AbortSignal` boundary.
+The interrupted attempt and preserved worktree remain available for inspection.
+
+On restart, an unstarted live claim resumes, an expired unstarted claim receives
+a new retry attempt, a verified attempt resumes idempotent draft publication,
+and any started attempt with possible side effects is blocked for manual
+intervention. Previously published execution identities are not dispatched
+again. Structured JSONL diagnostics distinguish `discovered`, `unauthorized`,
+`ineligible`, `ready`, `claimed`, `running`, `blocked`, `failed`, `verified`,
+and `published` states.
+
+See [Remote worker operations](docs/remote-worker.md) for credential scope,
+systemd deployment, backup, upgrade, and failure inspection guidance.
+
 ### All options
 
 ```typescript

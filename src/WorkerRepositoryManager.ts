@@ -47,6 +47,8 @@ export interface WorkerCommandEvidence {
 export interface WorkerAgentInvocation {
   /** Fully rendered immutable prompt passed to Sandcastle. */
   readonly prompt: string;
+  /** Cancellation delegated to the existing Sandcastle run boundary. */
+  readonly signal?: AbortSignal;
 }
 
 export type WorkerAgentResult = Pick<
@@ -82,6 +84,7 @@ export interface PreparedWorkerRepository {
   runCommand(
     command: string,
     phase: WorkerCommandPhase,
+    options?: { readonly signal?: AbortSignal },
   ): Promise<WorkerCommandEvidence>;
   /** Invoke Sandcastle in the prepared worktree. */
   runAgent(invocation: WorkerAgentInvocation): Promise<WorkerAgentResult>;
@@ -152,6 +155,7 @@ export interface WorkerRepositoryOperations {
     readonly command: string;
     readonly cwd: string;
     readonly phase: WorkerCommandPhase;
+    readonly signal?: AbortSignal;
   }): Promise<WorkerCommandEvidence>;
 }
 
@@ -346,12 +350,13 @@ export const createDefaultWorkerRepositoryOperations = (
       cwd: repositoryDir,
       branchStrategy: { type: "branch", branch, baseBranch: baseRef },
     }),
-  runCommand: async ({ command, cwd, phase }) => {
+  runCommand: async ({ command, cwd, phase, signal }) => {
     try {
       const { stdout, stderr } = await exec(command, {
         cwd,
         env: { ...defaultCommandEnvironment(), ...options.commandEnvironment },
         maxBuffer: 10 * 1024 * 1024,
+        ...(signal === undefined ? {} : { signal }),
       });
       return { command, phase, exitCode: 0, stdout, stderr };
     } catch (error) {
@@ -496,13 +501,16 @@ export const createWorkerRepositoryManager = (
           baseBranch: request.task.baseBranch,
           baseCommit: request.task.baseCommit,
           repositoryCredentialNames,
-          runCommand: (command, phase) =>
+          runCommand: (command, phase, commandOptions = {}) =>
             operations.runCommand({
               command,
               cwd: worktree.worktreePath,
               phase,
+              ...(commandOptions.signal === undefined
+                ? {}
+                : { signal: commandOptions.signal }),
             }),
-          runAgent: async ({ prompt }) => {
+          runAgent: async ({ prompt, signal }) => {
             for (const environmentPath of [
               join(repositoryDir, ".sandcastle", ".env"),
               join(worktree.worktreePath, ".sandcastle", ".env"),
@@ -527,6 +535,7 @@ export const createWorkerRepositoryManager = (
             return worktree.run({
               ...options.agentRunOptions,
               prompt,
+              ...(signal === undefined ? {} : { signal }),
               name: `worker:${request.taskId}`,
               logging: {
                 type: "file",
