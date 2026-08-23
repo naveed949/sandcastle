@@ -46,8 +46,10 @@ export interface WorkerConfiguration {
   readonly repositories: Readonly<Record<string, RepositoryPolicy>>;
   /** Exact task grants that may authorize work in a non-authorized repository. */
   readonly authorizedTasks: readonly TaskReference[];
-  /** Version of the prompt template used by the future execution engine. */
+  /** Version of the immutable prompt-template artifact selected for execution. */
   readonly promptVersion: string;
+  /** Immutable prompt-template artifacts keyed by version. */
+  readonly promptTemplates: Readonly<Record<string, string>>;
   /** Execution profiles keyed by the profile IDs referenced by repository policies. */
   readonly profiles: Readonly<Record<string, ExecutionProfile>>;
 }
@@ -126,6 +128,10 @@ export interface ExecutionRequest {
   readonly profileDigest: string;
   /** The prompt-template version bound to this request. */
   readonly promptVersion: string;
+  /** Digest of the immutable prompt-template artifact. */
+  readonly promptTemplateDigest: string;
+  /** Immutable prompt template containing the `{{TASK_SNAPSHOT}}` marker. */
+  readonly promptTemplate: string;
   /** The immutable profile snapshot selected for this request. */
   readonly profile: ExecutionProfile;
 }
@@ -205,6 +211,8 @@ type ValidatedConfiguration = {
   readonly authorizedTasks: ReadonlySet<string>;
   readonly profiles: Readonly<Record<string, ExecutionProfile>>;
   readonly promptVersion: string;
+  readonly promptTemplate: string;
+  readonly promptTemplateDigest: string;
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -221,7 +229,8 @@ const isTaskState = (value: unknown): value is TaskState =>
   value === "completed" ||
   value === "stale";
 
-const normalizeRepository = (repository: string): string =>
+/** Normalize a GitHub owner/repository identity for worker policy and storage. */
+export const normalizeRepository = (repository: string): string =>
   repository.trim().toLowerCase();
 
 const isRepositoryName = (repository: string): boolean =>
@@ -263,6 +272,10 @@ const canonicalize = (value: unknown): string => {
 
 const sha256 = (value: unknown): string =>
   createHash("sha256").update(canonicalize(value)).digest("hex");
+
+/** Compute the canonical digest that binds a prompt-template artifact to execution. */
+export const digestPromptTemplate = (template: string): string =>
+  sha256(template);
 
 const deepFreeze = <T>(value: T, seen = new WeakSet<object>()): T => {
   if (typeof value !== "object" || value === null || seen.has(value)) {
@@ -392,6 +405,36 @@ const validateConfiguration = (
     !configuration.promptVersion.trim()
   ) {
     issues.push("promptVersion must be a non-empty string");
+  }
+
+  const promptTemplates: Record<string, string> = {};
+  if (!isRecord(configuration.promptTemplates)) {
+    issues.push("promptTemplates must be an object");
+  } else {
+    for (const [version, template] of Object.entries(
+      configuration.promptTemplates,
+    )) {
+      if (version.trim() === "" || typeof template !== "string") {
+        issues.push("prompt template versions must map to strings");
+        continue;
+      }
+      if (!template.includes("{{TASK_SNAPSHOT}}")) {
+        issues.push(
+          `prompt template ${version} must include {{TASK_SNAPSHOT}}`,
+        );
+      }
+      promptTemplates[version.trim()] = template;
+    }
+  }
+  const selectedPromptVersion =
+    typeof configuration.promptVersion === "string"
+      ? configuration.promptVersion.trim()
+      : "";
+  const promptTemplate = promptTemplates[selectedPromptVersion];
+  if (selectedPromptVersion !== "" && promptTemplate === undefined) {
+    issues.push(
+      `promptVersion ${selectedPromptVersion} references a missing template`,
+    );
   }
 
   if (!isRecord(configuration.repositories)) {
@@ -554,7 +597,9 @@ const validateConfiguration = (
     repositories,
     authorizedTasks,
     profiles: deepFreeze(profiles),
-    promptVersion: configuration.promptVersion.trim(),
+    promptVersion: selectedPromptVersion,
+    promptTemplate: promptTemplate ?? "",
+    promptTemplateDigest: digestPromptTemplate(promptTemplate ?? ""),
   };
 };
 
@@ -776,6 +821,7 @@ export const runWorkerDryRun = ({
       baseCommit: task.baseCommit,
       profileDigest,
       promptVersion: validated.promptVersion,
+      promptTemplateDigest: validated.promptTemplateDigest,
     });
     const request = deepFreeze({
       task,
@@ -784,6 +830,8 @@ export const runWorkerDryRun = ({
       profileId: repositoryPolicy.profileId,
       profileDigest,
       promptVersion: validated.promptVersion,
+      promptTemplateDigest: validated.promptTemplateDigest,
+      promptTemplate: validated.promptTemplate,
       profile: profileSnapshot,
     });
 

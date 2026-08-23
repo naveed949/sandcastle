@@ -22,6 +22,7 @@ const configuration: WorkerConfiguration = {
   },
   authorizedTasks: [],
   promptVersion: "worker-v1",
+  promptTemplates: { "worker-v1": "Implement:\n{{TASK_SNAPSHOT}}" },
 };
 
 const task: NormalizedTask = {
@@ -102,6 +103,13 @@ describe("runWorkerDryRun", () => {
     const changedPrompt = identityFor({
       ...configuration,
       promptVersion: "worker-v2",
+      promptTemplates: { "worker-v2": "Implement v2:\n{{TASK_SNAPSHOT}}" },
+    });
+    const changedPromptArtifact = identityFor({
+      ...configuration,
+      promptTemplates: {
+        "worker-v1": "Implement with stricter checks:\n{{TASK_SNAPSHOT}}",
+      },
     });
 
     expect(baseline).toBeDefined();
@@ -111,12 +119,14 @@ describe("runWorkerDryRun", () => {
         changedBaseCommit,
         changedProfile,
         changedPrompt,
+        changedPromptArtifact,
       ]),
-    ).toHaveProperty("size", 4);
+    ).toHaveProperty("size", 5);
     expect(changedTaskRevision).not.toBe(baseline);
     expect(changedBaseCommit).not.toBe(baseline);
     expect(changedProfile).not.toBe(baseline);
     expect(changedPrompt).not.toBe(baseline);
+    expect(changedPromptArtifact).not.toBe(baseline);
   });
 
   it("returns stable authorization and eligibility reason codes", () => {
@@ -149,6 +159,7 @@ describe("runWorkerDryRun", () => {
         { repository: "unconfigured/app", kind: "issue", number: 18 },
       ],
       promptVersion: "worker-v1",
+      promptTemplates: configuration.promptTemplates,
     };
 
     const tasks: NormalizedTask[] = [
@@ -231,6 +242,15 @@ describe("runWorkerDryRun", () => {
         configuration: {
           ...configuration,
           promptVersion: " ",
+        },
+        tasks: [task],
+      }),
+    ).toThrowError(WorkerConfigurationError);
+    expect(() =>
+      runWorkerDryRun({
+        configuration: {
+          ...configuration,
+          promptTemplates: { "worker-v1": "missing snapshot marker" },
         },
         tasks: [task],
       }),

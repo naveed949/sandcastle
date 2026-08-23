@@ -162,3 +162,27 @@ export type {
   ClaimWorkerTaskInput,
   WorkerClaimErrorCode,
 } from "./WorkerClaimCoordinator.js";
+export {
+  createDefaultWorkerRepositoryOperations,
+  createWorkerRepositoryManager,
+  WorkerRepositoryError,
+} from "./WorkerRepositoryManager.js";
+export type {
+  WorkerCommandPhase,
+  WorkerCommandEvidence,
+  WorkerAgentInvocation,
+  WorkerAgentResult,
+  PreparedWorkerRepository,
+  PrepareWorkerRepositoryInput,
+  WorkerRepositoryManager,
+  WorkerRepositoryOperations,
+  WorkerRepositoryErrorCode,
+  WorkerRepositoryManagerOptions,
+} from "./WorkerRepositoryManager.js";
+export { createWorkerExecutionEngine } from "./WorkerExecutionEngine.js";
+export type {
+  WorkerExecutionFailurePhase,
+  WorkerExecutionResult,
+  WorkerExecutionEngineOptions,
+  WorkerExecutionEngine,
+} from "./WorkerExecutionEngine.js";

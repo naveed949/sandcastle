@@ -156,6 +156,9 @@ const configuration: WorkerConfiguration = {
   },
   authorizedTasks: [],
   promptVersion: "worker-v1",
+  promptTemplates: {
+    "worker-v1": "Implement this immutable task snapshot:\n{{TASK_SNAPSHOT}}",
+  },
 };
 
 declare const normalizedTasks: readonly NormalizedTask[];
@@ -198,7 +201,9 @@ same dry-run seam; it never checks out a repository or writes GitHub state.
 
 The result contains stable reason codes for every task, deterministic ordering,
 and execution identities bound to the task revision, base commit, profile
-digest, and prompt version. The machine-readable projection reports
+digest, prompt version, and prompt-template digest. The selected immutable
+template is retained in the execution request and must include a
+`{{TASK_SNAPSHOT}}` marker. The machine-readable projection reports
 `readOnly: true` and an empty `mutations` list.
 
 ### Durable worker state
@@ -250,6 +255,50 @@ restarts and idempotent re-entry does not duplicate them. Use
 never started, from `manual_intervention` claims whose retained state indicates
 that side effects may exist. A safe retry requires a new `attemptId`; the old
 claim is retained as interrupted rather than silently overwritten.
+
+### Local worker execution
+
+After a revision-bound claim, a repository manager can prepare the frozen base
+in a repository-qualified cache and worktree. It rechecks central authorization
+before any repository operation, validates the canonical GitHub remote and the
+configured base branch at the frozen commit, and creates a deterministic branch.
+
+```typescript
+import {
+  claudeCode,
+  createWorkerExecutionEngine,
+  createWorkerRepositoryManager,
+} from "@ai-hero/sandcastle";
+import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+
+const repositories = createWorkerRepositoryManager({
+  workspaceRoot: "/srv/sandcastle-worker",
+  agentRunOptions: {
+    agent: claudeCode("claude-opus-4-8"),
+    sandbox: docker(),
+  },
+});
+
+const execution = createWorkerExecutionEngine({
+  configuration,
+  repositoryManager: repositories,
+  store: state,
+  recordsRoot: "/srv/sandcastle-worker/records",
+});
+
+const result = await execution.execute(attempt);
+console.log(result.status, result.commits, result.verification);
+```
+
+The execution engine runs only centrally approved setup and verification
+commands. It invokes the existing Sandcastle worktree/provider runtime with a
+prompt derived from the immutable task snapshot, retains a structured local
+record, and transitions the durable attempt to `verified` only when every
+required verification command succeeds. It does not push, create a pull
+request, accept a no-sandbox provider, or pass orchestration environment
+variables through the agent API. Run logs are forced into the qualified
+repository cache, and a dirty preserved worktree is retained as cleanup
+failure evidence instead of being reported as verified.
 
 ### All options
 

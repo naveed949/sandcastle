@@ -25,6 +25,7 @@ const configuration: WorkerConfiguration = {
   },
   authorizedTasks: [],
   promptVersion: "worker-v1",
+  promptTemplates: { "worker-v1": "Implement:\n{{TASK_SNAPSHOT}}" },
 };
 
 const task: NormalizedTask = {

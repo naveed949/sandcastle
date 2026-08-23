@@ -27,6 +27,7 @@ const configuration: WorkerConfiguration = {
   },
   authorizedTasks: [{ repository: "thirdparty/lib", kind: "issue", number: 9 }],
   promptVersion: "worker-v1",
+  promptTemplates: { "worker-v1": "Implement:\n{{TASK_SNAPSHOT}}" },
 };
 
 const issue = (overrides: Record<string, unknown> = {}) => ({
