@@ -100,6 +100,7 @@ export type {
 } from "./SandboxProvider.js";
 export {
   runWorkerDryRun,
+  workerTaskId,
   WorkerConfigurationError,
   NormalizedTaskError,
 } from "./WorkerCoordinator.js";
@@ -205,3 +206,17 @@ export type {
   DefaultWorkerPublicationOperationsOptions,
   WorkerPublicationErrorCode,
 } from "./WorkerPublication.js";
+export {
+  runCrossRepositoryAcceptanceProof,
+  workerStateFilePath,
+  WorkerAcceptanceProofError,
+} from "./WorkerAcceptanceProof.js";
+export type {
+  WorkerAcceptanceProofErrorCode,
+  WorkerIsolationObservation,
+  WorkerAcceptanceRunPaths,
+  CrossRepositoryAcceptanceRuntime,
+  RunCrossRepositoryAcceptanceProofInput,
+  RetainedAcceptanceRun,
+  CrossRepositoryAcceptanceProof,
+} from "./WorkerAcceptanceProof.js";

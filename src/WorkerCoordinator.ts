@@ -56,6 +56,8 @@ export interface WorkerConfiguration {
 
 /** A task normalized by a task-source adapter before entering the coordinator. */
 export interface NormalizedTask extends TaskReference {
+  /** GitHub login that authored the source task, when supplied by the provider. */
+  readonly author?: string;
   /** The task title retained in the immutable execution snapshot. */
   readonly title: string;
   /** The task body retained in the immutable execution snapshot. */
@@ -236,7 +238,8 @@ export const normalizeRepository = (repository: string): string =>
 const isRepositoryName = (repository: string): boolean =>
   /^[^/\s]+\/[^/\s]+$/.test(repository);
 
-const taskIdFor = (task: TaskReference): string =>
+/** Return the stable repository-qualified worker task identity. */
+export const workerTaskId = (task: TaskReference): string =>
   `${normalizeRepository(task.repository)}:${task.kind}:${task.number}`;
 
 const displayTask = (task: TaskReference): string =>
@@ -334,6 +337,12 @@ const normalizeTask = (task: NormalizedTask, index: number): NormalizedTask => {
     throw new NormalizedTaskError(index, "title and body must be strings");
   }
   if (
+    task.author !== undefined &&
+    (typeof task.author !== "string" || task.author.trim() === "")
+  ) {
+    throw new NormalizedTaskError(index, "author must be a non-empty string");
+  }
+  if (
     !Array.isArray(task.labels) ||
     !task.labels.every((label) => typeof label === "string")
   ) {
@@ -373,6 +382,7 @@ const normalizeTask = (task: NormalizedTask, index: number): NormalizedTask => {
     number: task.number,
     title: task.title,
     body: task.body,
+    ...(task.author === undefined ? {} : { author: task.author.trim() }),
     labels: task.labels.map((label) => label.trim()),
     sourceRevision: task.sourceRevision.trim(),
     baseBranch: task.baseBranch.trim(),
@@ -583,7 +593,7 @@ const validateConfiguration = (
         issues.push(`authorizedTasks[${index}] is not a valid task reference`);
         continue;
       }
-      const id = taskIdFor({ repository, kind, number });
+      const id = workerTaskId({ repository, kind, number });
       if (authorizedTasks.has(id)) {
         issues.push(`authorizedTasks[${index}] duplicates ${id}`);
       }
@@ -609,7 +619,7 @@ const completedDependencyIds = (
   new Set(
     tasks
       .filter((task) => task.state === "completed" || task.state === "closed")
-      .map(taskIdFor),
+      .map(workerTaskId),
   );
 
 const reasonForState = (
@@ -634,7 +644,7 @@ const decision = (
 ): EligibilityDecision =>
   deepFreeze({
     task,
-    taskId: taskIdFor(task),
+    taskId: workerTaskId(task),
     eligible: reasonCode === "eligible",
     reasonCode,
     reason,
@@ -676,7 +686,7 @@ export const runWorkerDryRun = ({
   const normalizedTasks = tasks.map(normalizeTask);
   const seenTaskIds = new Set<string>();
   for (const task of normalizedTasks) {
-    const id = taskIdFor(task);
+    const id = workerTaskId(task);
     if (seenTaskIds.has(id)) {
       throw new NormalizedTaskError(
         normalizedTasks.indexOf(task),
@@ -687,14 +697,14 @@ export const runWorkerDryRun = ({
   }
 
   const orderedTasks = [...normalizedTasks].sort((left, right) =>
-    compareStrings(taskIdFor(left), taskIdFor(right)),
+    compareStrings(workerTaskId(left), workerTaskId(right)),
   );
   const completeDependencies = completedDependencyIds(orderedTasks);
   const decisions: EligibilityDecision[] = [];
   const executionRequests: ExecutionRequest[] = [];
 
   for (const task of orderedTasks) {
-    const id = taskIdFor(task);
+    const id = workerTaskId(task);
     const repositoryPolicy = validated.repositories.get(
       normalizeRepository(task.repository),
     );
@@ -756,7 +766,7 @@ export const runWorkerDryRun = ({
     }
 
     const unmetDependency = task.dependencies.find(
-      (dependency) => !completeDependencies.has(taskIdFor(dependency)),
+      (dependency) => !completeDependencies.has(workerTaskId(dependency)),
     );
     if (unmetDependency !== undefined) {
       decisions.push(

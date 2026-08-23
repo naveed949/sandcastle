@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   runWorkerDryRun,
@@ -90,6 +93,72 @@ describe("WorkerRepositoryManager", () => {
         },
       }),
     ).toThrowError(WorkerRepositoryError);
+  });
+
+  it("rejects repository credentials in agent-visible environment", () => {
+    const { operations } = createOperations();
+
+    expect(() =>
+      createWorkerRepositoryManager({
+        workspaceRoot: "/worker",
+        operations,
+        agentRunOptions: {
+          agent: { env: { GITHUB_TOKEN: "secret" } } as never,
+          sandbox: { tag: "bind-mount" } as never,
+        },
+      }),
+    ).toThrowError(/expose repository credentials: GITHUB_TOKEN/);
+  });
+
+  it("rejects repository credentials supplied by the sandbox provider", () => {
+    const { operations } = createOperations();
+
+    expect(() =>
+      createWorkerRepositoryManager({
+        workspaceRoot: "/worker",
+        operations,
+        agentRunOptions: {
+          agent: { env: {} } as never,
+          sandbox: {
+            tag: "bind-mount",
+            env: { GIT_ASKPASS: "/credential-helper" },
+          } as never,
+        },
+      }),
+    ).toThrowError(/expose repository credentials: GIT_ASKPASS/);
+  });
+
+  it("rejects credentials from the cache environment consumed by the run", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "worker-repository-"));
+    const environmentPath = join(
+      workspaceRoot,
+      "repositories",
+      "acme",
+      "app",
+      "cache",
+      ".sandcastle",
+      ".env",
+    );
+    await mkdir(dirname(environmentPath), { recursive: true });
+    await writeFile(environmentPath, "GITHUB_TOKEN=secret\n", "utf8");
+    const { operations, run } = createOperations();
+    const manager = createWorkerRepositoryManager({
+      workspaceRoot,
+      operations,
+      agentRunOptions: {
+        agent: { env: {} } as never,
+        sandbox: { tag: "bind-mount", env: {} } as never,
+      },
+    });
+    const prepared = await manager.prepare({
+      configuration: configuration(true),
+      request,
+    });
+
+    await expect(
+      prepared.runAgent({ prompt: "immutable prompt" }),
+    ).rejects.toMatchObject({ code: "repository_operation_failed" });
+    expect(run).not.toHaveBeenCalled();
   });
 
   it("performs no repository operation when the task is unauthorized", async () => {

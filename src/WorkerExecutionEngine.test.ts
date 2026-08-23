@@ -94,6 +94,7 @@ const createHarness = async (options?: {
     createWorktree: vi.fn(async ({ branch }) => ({
       branch,
       worktreePath: join(root, "repositories", "acme", "app", "worktree"),
+      repositoryCredentialNames: [],
       run: runAgent as never,
       close,
     })),

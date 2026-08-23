@@ -57,6 +57,12 @@ export interface WorkerExecutionResult {
   readonly error?: string;
   /** Deterministic local source branch. */
   readonly branch?: string;
+  /** Repository-qualified cache used for this attempt. */
+  readonly repositoryDir?: string;
+  /** Repository-qualified worktree used for this attempt. */
+  readonly worktreePath?: string;
+  /** Repository-authority credential names exposed to the agent boundary. */
+  readonly repositoryCredentialNames?: readonly string[];
   /** Commits retained by Sandcastle. */
   readonly commits: readonly { readonly sha: string }[];
   /** Structured setup command evidence. */
@@ -298,6 +304,13 @@ export const createWorkerExecutionEngine = (
         ...(failurePhase === undefined ? {} : { failurePhase }),
         ...(error === undefined ? {} : { error }),
         ...(prepared === undefined ? {} : { branch: prepared.branch }),
+        ...(prepared === undefined
+          ? {}
+          : {
+              repositoryDir: prepared.repositoryDir,
+              worktreePath: prepared.worktreePath,
+            }),
+        repositoryCredentialNames: prepared?.repositoryCredentialNames ?? [],
         commits: agent?.commits ?? [],
         setup,
         verification,

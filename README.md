@@ -335,6 +335,63 @@ remote branch, and subsequent retries reuse the matching draft pull request.
 The publication API cannot mark a pull request ready, merge it, or mutate the
 source issue.
 
+### Cross-repository acceptance evidence
+
+After live attempts have been verified and published, retain one proof that
+checks the complete authorization and isolation scenario before writing any
+acceptance artifact:
+
+```typescript
+import {
+  runCrossRepositoryAcceptanceProof,
+  workerStateFilePath,
+} from "@ai-hero/sandcastle";
+
+const proof = await runCrossRepositoryAcceptanceProof({
+  proofPath: "/srv/sandcastle-worker/acceptance/cross-repository.json",
+  workspaceRoot: "/srv/sandcastle-worker",
+  recordsRoot: "/srv/sandcastle-worker/records",
+  source,
+  initialConfiguration,
+  authorizedConfiguration,
+  approvedTasks: [sameNumberInRepositoryA, sameNumberInRepositoryB],
+  thirdPartyTask,
+  thirdPartySibling,
+  owner: "acceptance-worker",
+  leaseDurationMs: 5 * 60_000,
+  runtimeFor,
+});
+
+console.log(proof.initialAuthorization, proof.authorizedDecision);
+console.log(workerStateFilePath("/srv/sandcastle-worker", "owner/repository"));
+```
+
+The harness first performs account-only GitHub discovery and rejects the
+account-authored third-party task before requesting any runtime. It then claims,
+executes, verifies, and publishes the three authorized tasks sequentially. The
+two approved repositories must use different execution profiles, and the exact
+third-party grant must leave its sibling rejected. Each run retains a distinct
+attempt, deterministic branch, repository-qualified state, cache, worktree,
+run log, execution record, immutable snapshot, verification evidence, and
+draft pull request. It reads every cache, worktree, run log, state file, and
+execution record back from disk and rejects retained credential/configuration
+material instead of trusting a runtime-provided isolation assertion.
+
+Run the opt-in, unmocked GitHub acceptance fixture with:
+
+```bash
+SANDCASTLE_CROSS_REPO_ACCEPTANCE_FIXTURE=$PWD/scripts/cross-repository-acceptance.fixture.mts \
+SANDCASTLE_CROSS_REPO_ACCEPTANCE_SCENARIO=/absolute/path/to/scenario.json \
+  npm run test:acceptance:cross-repository
+```
+
+The committed fixture wires dedicated GitHub repositories to the real issue
+tracker, Docker-backed repository manager, execution engine, draft publisher,
+and repository-qualified state stores. The scenario JSON supplies the two
+configurations and four issue references as `RunCrossRepositoryAcceptanceProofInput`
+fields; `GITHUB_TOKEN` remains in the discovery/publication process and is
+rejected if it appears in agent-visible options or retained artifacts.
+
 ### All options
 
 ```typescript

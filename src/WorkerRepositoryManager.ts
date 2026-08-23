@@ -2,7 +2,7 @@ import {
   exec as execCallback,
   execFile as execFileCallback,
 } from "node:child_process";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -21,6 +21,10 @@ import {
   type ExecutionRequest,
   type WorkerConfiguration,
 } from "./WorkerCoordinator.js";
+import {
+  isRepositoryCredentialName,
+  repositoryCredentialNamesInEnvironmentFile,
+} from "./WorkerIsolationPolicy.js";
 
 const exec = promisify(execCallback);
 const execFile = promisify(execFileCallback);
@@ -72,6 +76,8 @@ export interface PreparedWorkerRepository {
   readonly baseBranch: string;
   /** Frozen base commit verified against the remote branch. */
   readonly baseCommit: string;
+  /** Repository-authority credential names observed in agent-visible options. */
+  readonly repositoryCredentialNames: readonly string[];
   /** Run one centrally approved setup or verification command. */
   runCommand(
     command: string,
@@ -383,6 +389,18 @@ export const createWorkerRepositoryManager = (
       "repository_operation_failed",
     );
   }
+  const agentOptions = options.agentRunOptions as WorktreeRunOptions;
+  const repositoryCredentialNames = [
+    ...Object.keys(agentOptions.agent.env ?? {}),
+    ...Object.keys(agentOptions.env ?? {}),
+    ...Object.keys(agentOptions.sandbox.env ?? {}),
+  ].filter(isRepositoryCredentialName);
+  if (repositoryCredentialNames.length > 0) {
+    throw new WorkerRepositoryError(
+      `Worker agent options expose repository credentials: ${repositoryCredentialNames.join(", ")}.`,
+      "repository_operation_failed",
+    );
+  }
   const operations =
     options.operations ??
     createDefaultWorkerRepositoryOperations({
@@ -477,13 +495,35 @@ export const createWorkerRepositoryManager = (
           canonicalRemote,
           baseBranch: request.task.baseBranch,
           baseCommit: request.task.baseCommit,
+          repositoryCredentialNames,
           runCommand: (command, phase) =>
             operations.runCommand({
               command,
               cwd: worktree.worktreePath,
               phase,
             }),
-          runAgent: ({ prompt }) => {
+          runAgent: async ({ prompt }) => {
+            for (const environmentPath of [
+              join(repositoryDir, ".sandcastle", ".env"),
+              join(worktree.worktreePath, ".sandcastle", ".env"),
+            ]) {
+              try {
+                const environmentFile = await readFile(environmentPath, "utf8");
+                const names =
+                  repositoryCredentialNamesInEnvironmentFile(environmentFile);
+                if (names.length > 0) {
+                  throw new WorkerRepositoryError(
+                    `Worker repository environment exposes credentials: ${names.join(", ")}.`,
+                    "repository_operation_failed",
+                  );
+                }
+              } catch (error) {
+                if (error instanceof WorkerRepositoryError) throw error;
+                if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                  throw error;
+                }
+              }
+            }
             return worktree.run({
               ...options.agentRunOptions,
               prompt,

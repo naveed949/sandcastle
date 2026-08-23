@@ -73,6 +73,8 @@ export interface GitHubTaskDiscoveryInput {
 
 /** Read-only task-source seam consumed by the worker dry-run coordinator. */
 export interface GitHubTaskSource {
+  /** Login whose authored issues are included by account-wide discovery. */
+  readonly account?: string;
   discover(input: GitHubTaskDiscoveryInput): Promise<readonly NormalizedTask[]>;
   /** Re-read one task without using discovery caches, for guarded claiming. */
   read(input: GitHubTaskReadInput): Promise<NormalizedTask | undefined>;
@@ -766,9 +768,16 @@ export const createGitHubTaskSource = (
         );
       }
       const title = nonEmptyString(payload.title);
-      if (title === undefined || typeof payload.body !== "string") {
+      const author = isRecord(payload.user)
+        ? nonEmptyString(payload.user.login)
+        : undefined;
+      if (
+        title === undefined ||
+        typeof payload.body !== "string" ||
+        author === undefined
+      ) {
         throw new GitHubTaskSourceError(
-          "GitHub issue response did not include title and body.",
+          "GitHub issue response did not include title, body, and author.",
           { url: issueUrl },
         );
       }
@@ -779,6 +788,7 @@ export const createGitHubTaskSource = (
         number,
         title,
         body: payload.body,
+        author,
         labels,
         sourceRevision,
         baseBranch,
@@ -814,7 +824,7 @@ export const createGitHubTaskSource = (
     return tasks.find((candidate) => taskId(candidate) === expectedId);
   };
 
-  return { discover, read };
+  return { account: options.account?.trim(), discover, read };
 };
 
 /** Discover GitHub tasks and immediately evaluate them through the pure coordinator. */
