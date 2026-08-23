@@ -79,6 +79,8 @@ export interface AttemptClaim {
   readonly owner: string;
   readonly acquiredAt: string;
   readonly leaseExpiresAt: string;
+  /** Exact task, blocker, and PRD snapshots observed immediately before claim. */
+  readonly refreshedSnapshots?: readonly NormalizedTask[];
   /** `started` means side effects may exist and expiry needs manual review. */
   readonly phase: "claimed" | "started";
 }
@@ -88,6 +90,8 @@ export interface ClaimAttemptOptions extends CreateAttemptOptions {
   readonly owner: string;
   readonly leaseDurationMs: number;
   readonly claimedAt?: string;
+  /** Exact authoritative snapshots used by the claim-time eligibility check. */
+  readonly refreshedSnapshots?: readonly NormalizedTask[];
 }
 
 /** Stable recovery classification for one expired lease. */
@@ -323,6 +327,13 @@ const parseState = (content: string, filePath: string): WorkerState => {
         typeof claim.owner !== "string" ||
         typeof claim.acquiredAt !== "string" ||
         typeof claim.leaseExpiresAt !== "string" ||
+        (claim.refreshedSnapshots !== undefined &&
+          (!Array.isArray(claim.refreshedSnapshots) ||
+            !claim.refreshedSnapshots.every(
+              (snapshot) =>
+                isRecord(snapshot) &&
+                typeof snapshot.sourceRevision === "string",
+            ))) ||
         (claim.phase !== "claimed" && claim.phase !== "started") ||
         claim.taskId !== attempt.request.taskId ||
         claim.sourceRevision !== attempt.request.task.sourceRevision ||
@@ -796,6 +807,9 @@ export const createWorkerStateStore = (
           owner,
           acquiredAt: claimedAt,
           leaseExpiresAt,
+          refreshedSnapshots: deepFreeze([
+            ...(claimOptions.refreshedSnapshots ?? [request.task]),
+          ]),
           phase: "claimed",
         };
         const created = createAttemptInState(

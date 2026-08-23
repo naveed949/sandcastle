@@ -100,6 +100,7 @@ export type {
 } from "./SandboxProvider.js";
 export {
   runWorkerDryRun,
+  configuredTaskDependencies,
   workerTaskId,
   WorkerConfigurationError,
   NormalizedTaskError,
@@ -108,10 +109,13 @@ export type {
   TaskKind,
   TaskState,
   TaskReference,
+  ConfiguredTaskDependencies,
+  DependencyCompletionState,
   ExecutionProfile,
   RepositoryPolicy,
   WorkerConfiguration,
   NormalizedTask,
+  ExecutionContext,
   EligibilityReasonCode,
   AuthorizationSource,
   EligibilityDecision,
@@ -134,6 +138,7 @@ export type {
   GitHubTaskSourceOptions,
   GitHubTaskDiscoveryInput,
   GitHubTaskSource,
+  GitHubTaskReadResult,
   GitHubWorkerDryRunInput,
   GitHubTaskReadInput,
 } from "./GitHubTaskSource.js";
@@ -160,6 +165,7 @@ export type {
 export { claimWorkerTask, WorkerClaimError } from "./WorkerClaimCoordinator.js";
 export type {
   ClaimTaskSource,
+  ClaimTaskReadResult,
   ClaimWorkerTaskInput,
   WorkerClaimErrorCode,
 } from "./WorkerClaimCoordinator.js";
@@ -208,6 +214,7 @@ export type {
 } from "./WorkerPublication.js";
 export {
   runCrossRepositoryAcceptanceProof,
+  runDependencyChainAcceptanceProof,
   workerStateFilePath,
   WorkerAcceptanceProofError,
 } from "./WorkerAcceptanceProof.js";
@@ -217,6 +224,9 @@ export type {
   WorkerAcceptanceRunPaths,
   CrossRepositoryAcceptanceRuntime,
   RunCrossRepositoryAcceptanceProofInput,
+  RunDependencyChainAcceptanceProofInput,
   RetainedAcceptanceRun,
+  RetainedDependencyStage,
+  DependencyChainAcceptanceProof,
   CrossRepositoryAcceptanceProof,
 } from "./WorkerAcceptanceProof.js";

@@ -44,6 +44,7 @@ import { containsProtectedWorkerMaterial } from "./WorkerIsolationPolicy.js";
 export type WorkerAcceptanceProofErrorCode =
   | "invalid_scenario"
   | "authorization_boundary"
+  | "dependency_order"
   | "evidence_mismatch"
   | "isolation_failure";
 
@@ -176,9 +177,71 @@ export interface CrossRepositoryAcceptanceProof {
   };
 }
 
+/** Inputs for a sequential, freshly observed three-task dependency proof. */
+export interface RunDependencyChainAcceptanceProofInput {
+  readonly proofPath: string;
+  readonly source: GitHubTaskSource;
+  readonly configuration: WorkerConfiguration;
+  readonly prd: TaskReference;
+  readonly tasks: readonly [TaskReference, TaskReference, TaskReference];
+  readonly owner: string;
+  readonly leaseDurationMs: number;
+  readonly runtimeFor: (
+    request: ExecutionRequest,
+  ) => Promise<CrossRepositoryAcceptanceRuntime>;
+  /** Optional operator-owned transition used by dedicated live fixtures. */
+  readonly afterStagePublished?: (input: {
+    readonly stageIndex: number;
+    readonly task: TaskReference;
+    readonly publication: WorkerPublicationResult;
+  }) => Promise<void>;
+  readonly createdAt?: string;
+}
+
+/** Retained evidence for one dependency-ordered execution and publication. */
+export interface RetainedDependencyStage {
+  readonly taskId: string;
+  readonly snapshot: NormalizedTask;
+  readonly prdContext: NormalizedTask;
+  readonly observedSnapshots: readonly NormalizedTask[];
+  /** Snapshots freshly re-read and durably bound to the claim. */
+  readonly claimSnapshots: readonly NormalizedTask[];
+  readonly blockedTaskIds: readonly string[];
+  readonly executionIdentity: string;
+  readonly attemptId: string;
+  readonly executionRecordPath: string;
+  readonly evidence: readonly string[];
+  readonly commits: readonly { readonly sha: string }[];
+  readonly verification: readonly {
+    readonly command: string;
+    readonly exitCode: number;
+  }[];
+  readonly pullRequest: DraftPullRequest;
+}
+
+/** Immutable proof that a PRD's three leaves were dispatched in dependency order. */
+export interface DependencyChainAcceptanceProof {
+  readonly version: 1;
+  readonly kind: "prd-dependency-chain";
+  readonly createdAt: string;
+  readonly prd: NormalizedTask;
+  readonly completionStates: readonly ("closed" | "completed")[];
+  readonly stages: readonly [
+    RetainedDependencyStage,
+    RetainedDependencyStage,
+    RetainedDependencyStage,
+  ];
+}
+
 const fail = (message: string, code: WorkerAcceptanceProofErrorCode): never => {
   throw new WorkerAcceptanceProofError(message, code);
 };
+
+const requireValue = <T>(
+  value: T | undefined,
+  message: string,
+  code: WorkerAcceptanceProofErrorCode,
+): T => (value === undefined ? fail(message, code) : value);
 
 const decisionFor = (
   decisions: readonly EligibilityDecision[],
@@ -727,10 +790,7 @@ const evaluateAcceptanceScenario = (input: {
   };
 };
 
-const retainProof = async (
-  proofPath: string,
-  proof: CrossRepositoryAcceptanceProof,
-): Promise<void> => {
+const retainProof = async <T>(proofPath: string, proof: T): Promise<void> => {
   if (proofPath.trim() === "") {
     fail("proofPath must be non-empty.", "invalid_scenario");
   }
@@ -992,4 +1052,203 @@ export const runCrossRepositoryAcceptanceProof = async (
     ],
     createdAt: input.createdAt,
   });
+};
+
+/**
+ * Execute three PRD leaves sequentially. Each cycle re-discovers the complete
+ * graph and claim-time reads re-check the selected leaf, blockers, and PRD.
+ */
+export const runDependencyChainAcceptanceProof = async (
+  input: RunDependencyChainAcceptanceProofInput,
+): Promise<DependencyChainAcceptanceProof> => {
+  if (input.prd.kind !== "prd") {
+    fail("Dependency acceptance requires a PRD reference.", "invalid_scenario");
+  }
+  if (
+    new Set(input.tasks.map(workerTaskId)).size !== 3 ||
+    input.tasks.some((task) => task.kind !== "issue")
+  ) {
+    fail(
+      "Dependency acceptance requires three distinct issue references.",
+      "invalid_scenario",
+    );
+  }
+
+  const stages: RetainedDependencyStage[] = [];
+  let retainedPrd: NormalizedTask | undefined;
+  for (const [index, selectedReference] of input.tasks.entries()) {
+    const snapshots = await input.source.discover({
+      configuration: input.configuration,
+      exactTasks: [...input.tasks, input.prd],
+      includeConfiguredRepositories: false,
+      includeAccountWide: false,
+      prdReferences: [input.prd],
+    });
+    const prd = taskFrom(snapshots, input.prd);
+    const selectedTask = taskFrom(snapshots, selectedReference);
+    const evaluation = runWorkerDryRun({
+      configuration: input.configuration,
+      tasks: snapshots,
+    });
+    const prdDecision = decisionFor(evaluation.decisions, prd);
+    const selectedDecision = decisionFor(evaluation.decisions, selectedTask);
+    const futureTaskIds = input.tasks.slice(index + 1).map(workerTaskId);
+    const blockedTaskIds = evaluation.decisions
+      .filter(
+        (candidate) =>
+          futureTaskIds.includes(candidate.taskId) &&
+          candidate.reasonCode === "unmet_dependency",
+      )
+      .map((candidate) => candidate.taskId);
+    const completedPredecessors = input.tasks
+      .slice(0, index)
+      .map((reference) =>
+        decisionFor(evaluation.decisions, taskFrom(snapshots, reference)),
+      )
+      .every(
+        (candidate) =>
+          input.configuration.dependencyCompletionStates?.includes(
+            candidate.reasonCode as "closed" | "completed",
+          ) ?? ["closed", "completed"].includes(candidate.reasonCode),
+      );
+    const request = requireValue(
+      evaluation.executionRequests.find(
+        (candidate) => candidate.taskId === workerTaskId(selectedReference),
+      ),
+      `Fresh dependency graph did not emit ${workerTaskId(selectedReference)}.`,
+      "dependency_order",
+    );
+    const prdContext = requireValue(
+      request.context.parentPrd,
+      `Execution request for ${request.taskId} is missing PRD context.`,
+      "dependency_order",
+    );
+    if (
+      prdDecision.reasonCode !== "prd" ||
+      !selectedDecision.eligible ||
+      evaluation.executionRequests.length !== 1 ||
+      blockedTaskIds.length !== futureTaskIds.length ||
+      !completedPredecessors ||
+      workerTaskId(prdContext) !== workerTaskId(prd)
+    ) {
+      fail(
+        `Fresh dependency graph did not make only ${workerTaskId(selectedReference)} executable.`,
+        "dependency_order",
+      );
+    }
+
+    const runtime = await input.runtimeFor(request);
+    await runtime.store.recordDiscovery(evaluation, {
+      discoveredAt: input.createdAt,
+    });
+    const claimed = await claimWorkerTask({
+      source: input.source,
+      store: runtime.store,
+      configuration: input.configuration,
+      request,
+      owner: input.owner,
+      leaseDurationMs: input.leaseDurationMs,
+      claimedAt: input.createdAt,
+    });
+    const execution = await runtime.execution.execute(claimed);
+    if (
+      execution.status !== "verified" ||
+      execution.commits.length === 0 ||
+      execution.verification.length !==
+        request.profile.verificationCommands.length ||
+      execution.verification.some((result) => result.exitCode !== 0)
+    ) {
+      fail(
+        `Execution evidence for ${request.taskId} is incomplete.`,
+        "evidence_mismatch",
+      );
+    }
+    const publication = await runtime.publisher.publish(claimed.attemptId);
+    const state = await runtime.store.read();
+    const attempt = requireValue(
+      state.attempts.find(
+        (candidate) => candidate.attemptId === claimed.attemptId,
+      ),
+      `Published attempt for ${request.taskId} is missing.`,
+      "evidence_mismatch",
+    );
+    const retainedClaim = requireValue(
+      attempt.claim,
+      `Published attempt for ${request.taskId} is missing claim evidence.`,
+      "evidence_mismatch",
+    );
+    const claimSnapshots = requireValue(
+      retainedClaim.refreshedSnapshots,
+      `Claim for ${request.taskId} is missing refreshed snapshots.`,
+      "evidence_mismatch",
+    );
+    const claimSnapshotIds = new Set(claimSnapshots.map(workerTaskId));
+    const requiredClaimSnapshotIds = [
+      request.task,
+      ...request.task.dependencies,
+      prdContext,
+    ].map(workerTaskId);
+    if (
+      attempt.status !== "published" ||
+      !publication.pullRequest.draft ||
+      publication.executionIdentity !== request.executionIdentity ||
+      requiredClaimSnapshotIds.some(
+        (taskId) => !claimSnapshotIds.has(taskId),
+      ) ||
+      !evidenceFor(attempt).includes(execution.recordPath) ||
+      !evidenceFor(attempt).includes(publication.pullRequest.url)
+    ) {
+      fail(
+        `Draft publication for ${request.taskId} is not fully retained.`,
+        "evidence_mismatch",
+      );
+    }
+
+    retainedPrd ??= prdContext;
+    stages.push({
+      taskId: request.taskId,
+      snapshot: request.task,
+      prdContext,
+      observedSnapshots: snapshots,
+      claimSnapshots,
+      blockedTaskIds,
+      executionIdentity: request.executionIdentity,
+      attemptId: attempt.attemptId,
+      executionRecordPath: execution.recordPath,
+      evidence: [...new Set(evidenceFor(attempt))],
+      commits: execution.commits,
+      verification: execution.verification.map(({ command, exitCode }) => ({
+        command,
+        exitCode,
+      })),
+      pullRequest: publication.pullRequest,
+    });
+    await input.afterStagePublished?.({
+      stageIndex: index,
+      task: selectedReference,
+      publication,
+    });
+  }
+
+  if (stages.length !== 3) {
+    fail("Dependency acceptance proof is incomplete.", "evidence_mismatch");
+  }
+  const proofPrd =
+    retainedPrd ??
+    fail("Dependency acceptance PRD is missing.", "evidence_mismatch");
+  const proof: DependencyChainAcceptanceProof = {
+    version: 1,
+    kind: "prd-dependency-chain",
+    createdAt: input.createdAt ?? new Date().toISOString(),
+    prd: proofPrd,
+    completionStates: [
+      ...(input.configuration.dependencyCompletionStates ?? [
+        "closed",
+        "completed",
+      ]),
+    ],
+    stages: stages as unknown as DependencyChainAcceptanceProof["stages"],
+  };
+  await retainProof(input.proofPath, proof);
+  return proof;
 };

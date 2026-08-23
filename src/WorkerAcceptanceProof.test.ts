@@ -97,14 +97,15 @@ const source = (): GitHubTaskSource => ({
       ? [thirdPartyTask, thirdPartySibling]
       : scenarioTasks,
   ),
-  read: vi.fn(async ({ task: reference }) =>
-    scenarioTasks.find(
+  read: vi.fn(async ({ task: reference }) => {
+    const task = scenarioTasks.find(
       (candidate) =>
         candidate.repository === reference.repository &&
         candidate.kind === reference.kind &&
         candidate.number === reference.number,
-    ),
-  ),
+    );
+    return task === undefined ? undefined : { task, relatedTasks: [] };
+  }),
 });
 
 const runtimeFactory =

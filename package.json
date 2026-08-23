@@ -39,6 +39,7 @@
     "postbuild": "rm -rf dist/templates && cp -r src/templates dist/templates && node scripts/check-public-types-effect-free.mjs",
     "test": "vitest run",
     "test:acceptance:cross-repository": "vitest run src/WorkerAcceptanceProof.live.test.ts",
+    "test:acceptance:dependency-chain": "vitest run src/WorkerDependencyProof.live.test.ts",
     "test:watch": "vitest",
     "typecheck": "tsgo --noEmit",
     "format": "prettier --write .",

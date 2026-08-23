@@ -129,6 +129,67 @@ describe("runWorkerDryRun", () => {
     expect(changedPromptArtifact).not.toBe(baseline);
   });
 
+  it("retains configured parent PRD context without dispatching the PRD", () => {
+    const parentPrd: NormalizedTask = {
+      ...task,
+      kind: "prd",
+      number: 1,
+      title: "PRD: Repo-agnostic worker",
+      body: "Authoritative product context.",
+      sourceRevision: "prd-revision-1",
+    };
+    const child = {
+      ...task,
+      parentPrd: { repository: "acme/app", kind: "prd", number: 1 },
+    } satisfies NormalizedTask;
+
+    const result = runWorkerDryRun({
+      configuration,
+      tasks: [child, parentPrd],
+    });
+    const changedContext = runWorkerDryRun({
+      configuration,
+      tasks: [child, { ...parentPrd, sourceRevision: "prd-revision-2" }],
+    });
+
+    expect(result.executionRequests).toHaveLength(1);
+    expect(result.executionRequests[0]).toMatchObject({
+      taskId: "acme/app:issue:7",
+      context: { parentPrd },
+    });
+    expect(
+      result.decisions.find((item) => item.task.kind === "prd"),
+    ).toMatchObject({ eligible: false, reasonCode: "prd" });
+    expect(changedContext.executionRequests[0]?.executionIdentity).not.toBe(
+      result.executionRequests[0]?.executionIdentity,
+    );
+  });
+
+  it("uses the centrally configured dependency completion rule", () => {
+    const dependent = {
+      ...task,
+      number: 8,
+    } satisfies NormalizedTask;
+
+    const result = runWorkerDryRun({
+      configuration: {
+        ...configuration,
+        taskDependencies: [
+          {
+            task: { repository: "acme/app", kind: "issue", number: 8 },
+            blockedBy: [{ repository: "acme/app", kind: "issue", number: 7 }],
+          },
+        ],
+        dependencyCompletionStates: ["completed"],
+      },
+      tasks: [{ ...task, state: "closed" }, dependent],
+    });
+
+    expect(
+      result.decisions.find((item) => item.taskId === "acme/app:issue:8"),
+    ).toMatchObject({ eligible: false, reasonCode: "unmet_dependency" });
+  });
+
   it("returns stable authorization and eligibility reason codes", () => {
     const policy: WorkerConfiguration = {
       repositories: {

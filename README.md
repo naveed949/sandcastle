@@ -155,6 +155,13 @@ const configuration: WorkerConfiguration = {
     },
   },
   authorizedTasks: [],
+  taskDependencies: [
+    {
+      task: { repository: "owner/repository", kind: "issue", number: 9 },
+      blockedBy: [{ repository: "owner/repository", kind: "issue", number: 8 }],
+    },
+  ],
+  dependencyCompletionStates: ["closed", "completed"],
   promptVersion: "worker-v1",
   promptTemplates: {
     "worker-v1": "Implement this immutable task snapshot:\n{{TASK_SNAPSHOT}}",
@@ -198,6 +205,11 @@ Each normalized task also retains its source labels, along with its source
 revision, base branch and commit, supported relationships, and optional PRD
 context. A read-only GitHub task source can produce these snapshots for the
 same dry-run seam; it never checks out a repository or writes GitHub state.
+GitHub's blocked-by and sub-issue APIs plus `taskDependencies` are the only
+authoritative graph inputs. Issue bodies and generated text cannot add or
+override edges. Every discovery cycle and claim refresh re-reads dependency
+state; the completion rule defaults to `closed` or `completed` and can be
+narrowed centrally with `dependencyCompletionStates`.
 
 The result contains stable reason codes for every task, deterministic ordering,
 and execution identities bound to the task revision, base commit, profile
@@ -205,6 +217,10 @@ digest, prompt version, and prompt-template digest. The selected immutable
 template is retained in the execution request and must include a
 `{{TASK_SNAPSHOT}}` marker. The machine-readable projection reports
 `readOnly: true` and an empty `mutations` list.
+For a leaf with a parent PRD, the marker receives an immutable
+`{ task, context: { parentPrd } }` envelope. The full PRD snapshot and its
+revision are retained in the request and bound to its execution identity;
+the PRD itself receives a `prd` rejection and is never dispatched.
 
 ### Durable worker state
 
@@ -391,6 +407,28 @@ and repository-qualified state stores. The scenario JSON supplies the two
 configurations and four issue references as `RunCrossRepositoryAcceptanceProofInput`
 fields; `GITHUB_TOKEN` remains in the discovery/publication process and is
 rejected if it appears in agent-visible options or retained artifacts.
+
+### PRD dependency-chain acceptance evidence
+
+`runDependencyChainAcceptanceProof()` executes exactly three concrete PRD
+leaves sequentially. Before every stage it re-discovers the complete graph,
+requires only the next leaf to be eligible, and requires all later leaves to
+remain rejected with `unmet_dependency`. Claiming then independently re-reads
+the selected task, its blockers, and its parent PRD before any execution side
+effect.
+
+The retained JSON includes every observed snapshot, full PRD context,
+execution identity, attempt and execution-record references, verification
+results, commits, and draft pull-request reference. A dedicated live fixture
+may use its operator-owned `afterStagePublished` hook to apply the configured
+completion label between stages; this authority never crosses the agent
+boundary.
+
+```bash
+SANDCASTLE_DEPENDENCY_ACCEPTANCE_FIXTURE=$PWD/scripts/dependency-chain-acceptance.fixture.mts \
+SANDCASTLE_DEPENDENCY_ACCEPTANCE_SCENARIO=/absolute/path/to/scenario.json \
+  npm run test:acceptance:dependency-chain
+```
 
 ### All options
 

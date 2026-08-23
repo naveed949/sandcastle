@@ -12,11 +12,21 @@ import type {
 } from "./WorkerStateStore.js";
 
 /** Source seam used to freshly re-read a task immediately before claiming. */
+export interface ClaimTaskReadResult {
+  /** Fresh snapshot of the candidate being claimed. */
+  readonly task: NormalizedTask;
+  /** Fresh blocker and PRD snapshots required to re-evaluate eligibility. */
+  readonly relatedTasks: readonly NormalizedTask[];
+}
+
+/** Source seam used to freshly re-read a task immediately before claiming. */
 export interface ClaimTaskSource {
   read(input: {
     readonly configuration: WorkerConfiguration;
     readonly task: TaskReference;
-  }): Promise<NormalizedTask | undefined>;
+    /** PRD references already bound to the immutable execution request. */
+    readonly prdReferences?: readonly TaskReference[];
+  }): Promise<ClaimTaskReadResult | undefined>;
 }
 
 /** Inputs for a guarded, revision-bound task claim. */
@@ -56,13 +66,20 @@ export const claimWorkerTask = async ({
   claimedAt,
   attemptId,
 }: ClaimWorkerTaskInput): Promise<ExecutionAttempt> => {
-  const freshTask = await source.read({ configuration, task: request.task });
-  if (freshTask === undefined) {
+  const freshRead = await source.read({
+    configuration,
+    task: request.task,
+    ...(request.context.parentPrd === undefined
+      ? {}
+      : { prdReferences: [request.context.parentPrd] }),
+  });
+  if (freshRead === undefined) {
     throw new WorkerClaimError(
       `Task ${request.taskId} was unavailable at claim time.`,
       "task_unavailable",
     );
   }
+  const freshTask = freshRead.task;
   if (freshTask.sourceRevision !== request.task.sourceRevision) {
     throw new WorkerClaimError(
       `Task ${request.taskId} changed from source revision ${request.task.sourceRevision} to ${freshTask.sourceRevision}.`,
@@ -70,9 +87,16 @@ export const claimWorkerTask = async ({
     );
   }
 
-  const refreshed = runWorkerDryRun({ configuration, tasks: [freshTask] });
-  const decision = refreshed.decisions[0];
-  const freshRequest = refreshed.executionRequests[0];
+  const refreshed = runWorkerDryRun({
+    configuration,
+    tasks: [freshTask, ...freshRead.relatedTasks],
+  });
+  const decision = refreshed.decisions.find(
+    (candidate) => candidate.taskId === request.taskId,
+  );
+  const freshRequest = refreshed.executionRequests.find(
+    (candidate) => candidate.taskId === request.taskId,
+  );
   if (
     decision === undefined ||
     !decision.eligible ||
@@ -93,6 +117,7 @@ export const claimWorkerTask = async ({
   return store.claimAttempt(freshRequest, {
     owner,
     leaseDurationMs,
+    refreshedSnapshots: [freshTask, ...freshRead.relatedTasks],
     ...(claimedAt === undefined ? {} : { claimedAt }),
     ...(attemptId === undefined ? {} : { attemptId }),
   });

@@ -58,7 +58,10 @@ describe("claimWorkerTask", () => {
       const source = {
         read: async () => {
           reads += 1;
-          return { ...task, sourceRevision: "issue-revision-2" };
+          return {
+            task: { ...task, sourceRevision: "issue-revision-2" },
+            relatedTasks: [],
+          };
         },
       };
 
@@ -84,7 +87,9 @@ describe("claimWorkerTask", () => {
     const directory = await mkdtemp(join(tmpdir(), "sandcastle-claim-"));
     const filePath = join(directory, "state.json");
     try {
-      const source = { read: async () => task };
+      const source = {
+        read: async () => ({ task, relatedTasks: [] }),
+      };
       const firstStore = createWorkerStateStore({ filePath });
       const input = {
         source,
@@ -117,6 +122,63 @@ describe("claimWorkerTask", () => {
         },
       });
       expect((await restartedStore.read()).attempts).toHaveLength(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("freshly observes every blocker before claiming a dependent task", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "sandcastle-claim-"));
+    try {
+      const store = createWorkerStateStore({
+        filePath: join(directory, "state.json"),
+      });
+      const blocker = { ...task, state: "open" } satisfies NormalizedTask;
+      const dependent = {
+        ...task,
+        number: 8,
+        sourceRevision: "issue-revision-8",
+        dependencies: [{ repository: "acme/app", kind: "issue", number: 7 }],
+      } satisfies NormalizedTask;
+      const discovered = runWorkerDryRun({
+        configuration,
+        tasks: [{ ...blocker, state: "completed" }, dependent],
+      }).executionRequests.find(
+        (request) => request.taskId === "acme/app:issue:8",
+      )!;
+
+      await expect(
+        claimWorkerTask({
+          source: {
+            read: async () => ({ task: dependent, relatedTasks: [blocker] }),
+          },
+          store,
+          configuration,
+          request: discovered,
+          owner: "worker-a",
+          leaseDurationMs: 60_000,
+        }),
+      ).rejects.toMatchObject({ code: "ineligible" });
+
+      const claimed = await claimWorkerTask({
+        source: {
+          read: async () => ({
+            task: dependent,
+            relatedTasks: [{ ...blocker, state: "completed" }],
+          }),
+        },
+        store,
+        configuration,
+        request: discovered,
+        owner: "worker-a",
+        leaseDurationMs: 60_000,
+      });
+
+      expect(claimed.request.taskId).toBe("acme/app:issue:8");
+      expect(claimed.claim?.refreshedSnapshots).toEqual([
+        dependent,
+        { ...blocker, state: "completed" },
+      ]);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

@@ -239,7 +239,11 @@ export const createWorkerExecutionEngine = (
           } else {
             const prompt = request.promptTemplate.replaceAll(
               "{{TASK_SNAPSHOT}}",
-              JSON.stringify(request.task, null, 2),
+              JSON.stringify(
+                { task: request.task, context: request.context },
+                null,
+                2,
+              ),
             );
             try {
               // Only the versioned prompt crosses this boundary. The API intentionally has

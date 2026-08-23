@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
+  configuredTaskDependencies,
   runWorkerDryRun,
   type DryRunResult,
   type NormalizedTask,
@@ -77,7 +78,13 @@ export interface GitHubTaskSource {
   readonly account?: string;
   discover(input: GitHubTaskDiscoveryInput): Promise<readonly NormalizedTask[]>;
   /** Re-read one task without using discovery caches, for guarded claiming. */
-  read(input: GitHubTaskReadInput): Promise<NormalizedTask | undefined>;
+  read(input: GitHubTaskReadInput): Promise<GitHubTaskReadResult | undefined>;
+}
+
+/** Fresh candidate plus every authoritative snapshot needed during claim. */
+export interface GitHubTaskReadResult {
+  readonly task: NormalizedTask;
+  readonly relatedTasks: readonly NormalizedTask[];
 }
 
 /** Input for a fresh, exact GitHub task read at claim time. */
@@ -446,6 +453,10 @@ export const createGitHubTaskSource = (
   >();
   const commitCache = new Map<string, Promise<string>>();
   const issueCache = new Map<string, Promise<JsonRecord | undefined>>();
+  const relationshipCache = new Map<
+    string,
+    Promise<readonly TaskReference[]>
+  >();
 
   const repositoryInfo = (
     repository: string,
@@ -541,13 +552,33 @@ export const createGitHubTaskSource = (
     number: number,
     relationship: "dependencies/blocked_by" | "sub_issues",
   ): Promise<readonly TaskReference[]> => {
+    const cacheKey = `${taskCoordinate(repository, number)}:${relationship}`;
+    const cached = relationshipCache.get(cacheKey);
+    if (cached !== undefined) return cached;
     const path = `/repos/${repositoryPath(repository)}/issues/${number}/${relationship}`;
-    const payload = await request(path);
-    const records = recordsFromArray(payload, apiUrl(baseUrl, path));
-    return records.flatMap((record) => {
-      const reference = referenceFromPayload(record, repository);
-      return reference === undefined ? [] : [reference];
-    });
+    const pending = (async () => {
+      const payload = await request(path);
+      const records = recordsFromArray(payload, apiUrl(baseUrl, path));
+      return records.flatMap((record) => {
+        const reference = referenceFromPayload(record, repository);
+        return reference === undefined ? [] : [reference];
+      });
+    })();
+    relationshipCache.set(cacheKey, pending);
+    return pending;
+  };
+
+  const mergeReferences = (
+    ...collections: readonly (readonly TaskReference[])[]
+  ): readonly TaskReference[] => {
+    const references = new Map<string, TaskReference>();
+    for (const reference of collections.flat()) {
+      const normalized = validateReference(reference);
+      references.set(taskId(normalized), normalized);
+    }
+    return [...references.values()].sort((left, right) =>
+      compareStrings(taskId(left), taskId(right)),
+    );
   };
 
   const addCandidate = (
@@ -638,6 +669,12 @@ export const createGitHubTaskSource = (
     includeAccountWide = true,
     prdReferences = [],
   }: GitHubTaskDiscoveryInput): Promise<readonly NormalizedTask[]> => {
+    // A discovery cycle is an observation boundary. Reuse within the cycle,
+    // but never carry issue, relationship, or base state into the next poll.
+    issueCache.clear();
+    relationshipCache.clear();
+    commitCache.clear();
+    const centralDependencies = configuredTaskDependencies(configuration);
     const candidates = new Map<string, Candidate>();
     const explicitPrdReferences = [
       ...(options.prdReferences ?? []),
@@ -686,6 +723,66 @@ export const createGitHubTaskSource = (
         taskCoordinate(reference.repository, reference.number),
       ),
     ]);
+    const expanded = new Set<string>();
+    for (;;) {
+      const candidate = [...candidates.values()]
+        .filter(
+          (value) =>
+            !expanded.has(taskCoordinate(value.repository, value.number)),
+        )
+        .sort((left, right) =>
+          compareStrings(
+            taskCoordinate(left.repository, left.number),
+            taskCoordinate(right.repository, right.number),
+          ),
+        )[0];
+      if (candidate === undefined) break;
+      const coordinate = taskCoordinate(candidate.repository, candidate.number);
+      expanded.add(coordinate);
+      const reference = {
+        repository: candidate.repository,
+        kind: candidate.kindHint,
+        number: candidate.number,
+      } satisfies TaskReference;
+      const payload = await issuePayload(reference);
+      if (payload === undefined) continue;
+
+      const parentReference = referenceFromIssueUrl(
+        payload.parent_issue_url,
+        "issue",
+      );
+      if (parentReference !== undefined) {
+        const parentPayload = await issuePayload(parentReference);
+        if (
+          parentPayload !== undefined &&
+          isPrdPayload(
+            parentPayload,
+            parentReference.repository,
+            parentReference.number,
+            prdKeys,
+            prdLabel,
+          )
+        ) {
+          const prdReference = { ...parentReference, kind: "prd" as const };
+          prdKeys.add(
+            taskCoordinate(prdReference.repository, prdReference.number),
+          );
+          addCandidate(candidates, prdReference, true);
+        }
+      }
+
+      const dependencies = mergeReferences(
+        await relationshipReferences(
+          reference.repository,
+          reference.number,
+          "dependencies/blocked_by",
+        ),
+        centralDependencies.get(taskId(reference)) ?? [],
+      );
+      for (const dependency of dependencies) {
+        addCandidate(candidates, dependency, true);
+      }
+    }
     const tasks: NormalizedTask[] = [];
     const sortedCandidates = [...candidates.values()].sort((left, right) =>
       compareStrings(
@@ -739,10 +836,13 @@ export const createGitHubTaskSource = (
           }
         }
       }
-      const dependencies = await relationshipReferences(
-        repository,
-        number,
-        "dependencies/blocked_by",
+      const dependencies = mergeReferences(
+        await relationshipReferences(
+          repository,
+          number,
+          "dependencies/blocked_by",
+        ),
+        centralDependencies.get(taskId(reference)) ?? [],
       );
       const children = await relationshipReferences(
         repository,
@@ -809,7 +909,7 @@ export const createGitHubTaskSource = (
     configuration,
     task,
     prdReferences = [],
-  }: GitHubTaskReadInput): Promise<NormalizedTask | undefined> => {
+  }: GitHubTaskReadInput): Promise<GitHubTaskReadResult | undefined> => {
     // A new adapter instance deliberately gives this read fresh issue and base
     // commit caches. Claiming must not reuse the snapshot populated by discovery.
     const freshSource = createGitHubTaskSource(options);
@@ -821,7 +921,26 @@ export const createGitHubTaskSource = (
       prdReferences,
     });
     const expectedId = taskId(validateReference(task));
-    return tasks.find((candidate) => taskId(candidate) === expectedId);
+    const refreshedTask = tasks.find(
+      (candidate) => taskId(candidate) === expectedId,
+    );
+    if (refreshedTask === undefined) return undefined;
+    const tasksById = new Map(
+      tasks.map((candidate) => [taskId(candidate), candidate]),
+    );
+    const relatedReferences = [
+      ...refreshedTask.dependencies,
+      ...(refreshedTask.parentPrd === undefined
+        ? []
+        : [refreshedTask.parentPrd]),
+    ];
+    return {
+      task: refreshedTask,
+      relatedTasks: relatedReferences.flatMap((reference) => {
+        const related = tasksById.get(taskId(reference));
+        return related === undefined ? [] : [related];
+      }),
+    };
   };
 
   return { account: options.account?.trim(), discover, read };

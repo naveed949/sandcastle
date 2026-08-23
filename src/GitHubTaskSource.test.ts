@@ -113,6 +113,17 @@ const responses = (): Record<string, unknown> => ({
       repository_url: "https://api.github.com/repos/acme/app",
     },
   ],
+  "/repos/acme/app/issues/2": issue({
+    number: 2,
+    title: "Prepare the worker contract",
+    body: "Machine-readable blocker.",
+    state: "closed",
+    parent_issue_url: "https://api.github.com/repos/acme/app/issues/1",
+    updated_at: "2026-08-23T11:58:00Z",
+    node_id: "I_kwDOacme2",
+  }),
+  "/repos/acme/app/issues/2/dependencies/blocked_by": [],
+  "/repos/acme/app/issues/2/sub_issues": [],
   "/repos/acme/app/issues/1": issue({
     number: 1,
     title: "PRD: Repo-agnostic worker",
@@ -220,6 +231,7 @@ describe("GitHubTaskSource", () => {
     expect(
       tasks.map((task) => `${task.repository}:${task.kind}:${task.number}`),
     ).toEqual([
+      "acme/app:issue:2",
       "acme/app:issue:7",
       "acme/app:prd:1",
       "acme/app:prd:13",
@@ -284,6 +296,45 @@ describe("GitHubTaskSource", () => {
     const second = await secondSource.discover({ configuration });
 
     expect(JSON.stringify(first)).toBe(JSON.stringify(second));
+  });
+
+  it("does not reuse dependency state across discovery cycles", async () => {
+    const payloads = responses();
+    let blockerReads = 0;
+    const fake = fakeGitHub(
+      new Proxy(payloads, {
+        get(target, property: string) {
+          if (property === "/repos/acme/app/issues/2") {
+            blockerReads += 1;
+            return issue({
+              number: 2,
+              state: blockerReads === 1 ? "open" : "closed",
+              parent_issue_url: null,
+              updated_at: `blocker-revision-${blockerReads}`,
+            });
+          }
+          return target[property];
+        },
+        has(target, property) {
+          return property in target;
+        },
+      }),
+    );
+    const source = createGitHubTaskSource({ fetch: fake.fetch });
+    const discover = () =>
+      source.discover({
+        configuration,
+        exactTasks: [{ repository: "acme/app", kind: "issue", number: 7 }],
+        includeConfiguredRepositories: false,
+        includeAccountWide: false,
+      });
+
+    const first = await discover();
+    const second = await discover();
+
+    expect(first.find((task) => task.number === 2)?.state).toBe("open");
+    expect(second.find((task) => task.number === 2)?.state).toBe("closed");
+    expect(blockerReads).toBe(2);
   });
 
   it("maps deterministic blocked and PRD states before dry-run eligibility", async () => {
@@ -360,19 +411,72 @@ describe("GitHubTaskSource", () => {
       }),
     );
     const source = createGitHubTaskSource({ fetch: fake.fetch });
-    const [discovered] = await source.discover({
+    const discoveredTasks = await source.discover({
       configuration,
       exactTasks: [{ repository: "acme/app", kind: "issue", number: 7 }],
       includeConfiguredRepositories: false,
       includeAccountWide: false,
     });
+    const discovered = discoveredTasks.find((task) => task.number === 7);
     const refreshed = await source.read({
       configuration,
       task: discovered!,
     });
 
     expect(discovered?.sourceRevision).toBe("2026-08-23T12:00:00Z");
-    expect(refreshed?.sourceRevision).toBe("2026-08-23T12:10:00Z");
+    expect(refreshed?.task.sourceRevision).toBe("2026-08-23T12:10:00Z");
+    expect(
+      refreshed?.relatedTasks.map(
+        (task) => `${task.repository}:${task.kind}:${task.number}`,
+      ),
+    ).toEqual(["acme/app:issue:2", "acme/app:prd:1"]);
     expect(issueReads).toBe(2);
+  });
+
+  it("uses only GitHub relationships and explicit central dependency edges", async () => {
+    const payloads = responses();
+    payloads["/repos/acme/app/issues/3"] = issue({
+      number: 3,
+      title: "Central blocker",
+      body: "Configured outside issue prose.",
+      state: "closed",
+      parent_issue_url: null,
+      updated_at: "2026-08-23T11:57:00Z",
+      node_id: "I_kwDOacme3",
+    });
+    payloads["/repos/acme/app/issues/3/dependencies/blocked_by"] = [];
+    payloads["/repos/acme/app/issues/3/sub_issues"] = [];
+    payloads["/repos/acme/app/issues/7"] = issue({
+      body: "Blocked by #999 according to untrusted free-form text.",
+    });
+    const fake = fakeGitHub(payloads);
+    const source = createGitHubTaskSource({ fetch: fake.fetch });
+    const configured = {
+      ...configuration,
+      taskDependencies: [
+        {
+          task: { repository: "acme/app", kind: "issue", number: 7 },
+          blockedBy: [{ repository: "acme/app", kind: "issue", number: 3 }],
+        },
+      ],
+    } satisfies WorkerConfiguration;
+
+    const fresh = await source.read({
+      configuration: configured,
+      task: {
+        repository: "acme/app",
+        kind: "issue",
+        number: 7,
+      },
+    });
+
+    expect(fresh?.task.dependencies).toEqual([
+      { repository: "acme/app", kind: "issue", number: 2 },
+      { repository: "acme/app", kind: "issue", number: 3 },
+    ]);
+    expect(fresh?.relatedTasks.map((task) => task.number)).toEqual([2, 3, 1]);
+    expect(fresh?.task.dependencies).not.toContainEqual(
+      expect.objectContaining({ number: 999 }),
+    );
   });
 });

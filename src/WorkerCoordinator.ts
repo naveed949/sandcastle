@@ -22,6 +22,17 @@ export interface TaskReference {
   readonly number: number;
 }
 
+/** Central dependency edges that supplement issue-tracker relationships. */
+export interface ConfiguredTaskDependencies {
+  /** The task whose execution is gated. */
+  readonly task: TaskReference;
+  /** Every blocker that must satisfy the configured completion rule. */
+  readonly blockedBy: readonly TaskReference[];
+}
+
+/** States that can authoritatively satisfy a task dependency. */
+export type DependencyCompletionState = "closed" | "completed";
+
 /** A centrally controlled execution profile used to build an execution request. */
 export interface ExecutionProfile {
   /** Commands that a future execution engine may run during repository setup. */
@@ -46,12 +57,22 @@ export interface WorkerConfiguration {
   readonly repositories: Readonly<Record<string, RepositoryPolicy>>;
   /** Exact task grants that may authorize work in a non-authorized repository. */
   readonly authorizedTasks: readonly TaskReference[];
+  /** Explicit central dependency edges; issue prose is never consulted. */
+  readonly taskDependencies?: readonly ConfiguredTaskDependencies[];
+  /** Source states that satisfy dependencies; defaults to closed or completed. */
+  readonly dependencyCompletionStates?: readonly DependencyCompletionState[];
   /** Version of the immutable prompt-template artifact selected for execution. */
   readonly promptVersion: string;
   /** Immutable prompt-template artifacts keyed by version. */
   readonly promptTemplates: Readonly<Record<string, string>>;
   /** Execution profiles keyed by the profile IDs referenced by repository policies. */
   readonly profiles: Readonly<Record<string, ExecutionProfile>>;
+}
+
+/** Immutable contextual snapshots supplied to one execution request. */
+export interface ExecutionContext {
+  /** Full parent PRD snapshot, when the task belongs to a configured PRD. */
+  readonly parentPrd?: NormalizedTask;
 }
 
 /** A task normalized by a task-source adapter before entering the coordinator. */
@@ -92,6 +113,7 @@ export type EligibilityReasonCode =
   | "prd"
   | "non_leaf"
   | "unmet_dependency"
+  | "missing_prd_context"
   | "missing_profile"
   | "invalid_base";
 
@@ -120,6 +142,8 @@ export interface EligibilityDecision {
 export interface ExecutionRequest {
   /** The immutable task snapshot to pass to a future execution engine. */
   readonly task: NormalizedTask;
+  /** Full immutable context that accompanies the concrete task. */
+  readonly context: ExecutionContext;
   /** Stable task identity containing repository, kind, and number. */
   readonly taskId: string;
   /** SHA-256 identity bound to task revision, base, profile, and prompt version. */
@@ -211,6 +235,8 @@ export class NormalizedTaskError extends Error {
 type ValidatedConfiguration = {
   readonly repositories: ReadonlyMap<string, RepositoryPolicy>;
   readonly authorizedTasks: ReadonlySet<string>;
+  readonly dependencyCompletionStates: ReadonlySet<DependencyCompletionState>;
+  readonly taskDependencies: ReadonlyMap<string, readonly TaskReference[]>;
   readonly profiles: Readonly<Record<string, ExecutionProfile>>;
   readonly promptVersion: string;
   readonly promptTemplate: string;
@@ -230,6 +256,11 @@ const isTaskState = (value: unknown): value is TaskState =>
   value === "claimed" ||
   value === "completed" ||
   value === "stale";
+
+const isDependencyCompletionState = (
+  value: unknown,
+): value is DependencyCompletionState =>
+  value === "closed" || value === "completed";
 
 /** Normalize a GitHub owner/repository identity for worker policy and storage. */
 export const normalizeRepository = (repository: string): string =>
@@ -601,11 +632,98 @@ const validateConfiguration = (
     }
   }
 
+  const taskDependencies = new Map<string, readonly TaskReference[]>();
+  if (
+    configuration.taskDependencies !== undefined &&
+    !Array.isArray(configuration.taskDependencies)
+  ) {
+    issues.push("taskDependencies must be an array");
+  } else {
+    const configuredTasks = new Set<string>();
+    for (const [index, edge] of (
+      configuration.taskDependencies ?? []
+    ).entries()) {
+      if (!isRecord(edge) || !Array.isArray(edge.blockedBy)) {
+        issues.push(
+          `taskDependencies[${index}] must contain task and blockedBy`,
+        );
+        continue;
+      }
+      let taskReference: TaskReference;
+      try {
+        taskReference = normalizeReference(
+          edge.task as TaskReference,
+          `taskDependencies[${index}].task`,
+          index,
+        );
+      } catch {
+        issues.push(
+          `taskDependencies[${index}].task is not a valid task reference`,
+        );
+        continue;
+      }
+      const taskId = workerTaskId(taskReference);
+      if (configuredTasks.has(taskId)) {
+        issues.push(`taskDependencies[${index}] duplicates ${taskId}`);
+      }
+      configuredTasks.add(taskId);
+      const blockers: TaskReference[] = [];
+      for (const [blockerIndex, blocker] of edge.blockedBy.entries()) {
+        try {
+          const normalizedBlocker = normalizeReference(
+            blocker,
+            `taskDependencies[${index}].blockedBy[${blockerIndex}]`,
+            index,
+          );
+          if (workerTaskId(normalizedBlocker) === taskId) {
+            issues.push(`taskDependencies[${index}] cannot block itself`);
+          } else {
+            blockers.push(normalizedBlocker);
+          }
+        } catch {
+          issues.push(
+            `taskDependencies[${index}].blockedBy[${blockerIndex}] is not a valid task reference`,
+          );
+        }
+      }
+      taskDependencies.set(
+        taskId,
+        [
+          ...new Map(
+            blockers.map((blocker) => [workerTaskId(blocker), blocker]),
+          ).values(),
+        ].sort((left, right) =>
+          compareStrings(workerTaskId(left), workerTaskId(right)),
+        ),
+      );
+    }
+  }
+
+  const completionStates = configuration.dependencyCompletionStates ?? [
+    "closed",
+    "completed",
+  ];
+  if (
+    !Array.isArray(completionStates) ||
+    completionStates.length === 0 ||
+    !completionStates.every(isDependencyCompletionState)
+  ) {
+    issues.push(
+      "dependencyCompletionStates must contain closed and/or completed",
+    );
+  }
+
   if (issues.length > 0) throw new WorkerConfigurationError(issues);
 
   return {
     repositories,
     authorizedTasks,
+    taskDependencies,
+    dependencyCompletionStates: new Set(
+      Array.isArray(completionStates)
+        ? completionStates.filter(isDependencyCompletionState)
+        : [],
+    ),
     profiles: deepFreeze(profiles),
     promptVersion: selectedPromptVersion,
     promptTemplate: promptTemplate ?? "",
@@ -613,12 +731,23 @@ const validateConfiguration = (
   };
 };
 
+/** Validate and return the central dependency graph keyed by task identity. */
+export const configuredTaskDependencies = (
+  configuration: WorkerConfiguration,
+): ReadonlyMap<string, readonly TaskReference[]> =>
+  validateConfiguration(configuration).taskDependencies;
+
 const completedDependencyIds = (
   tasks: readonly NormalizedTask[],
+  completionStates: ReadonlySet<DependencyCompletionState>,
 ): ReadonlySet<string> =>
   new Set(
     tasks
-      .filter((task) => task.state === "completed" || task.state === "closed")
+      .filter(
+        (task) =>
+          isDependencyCompletionState(task.state) &&
+          completionStates.has(task.state),
+      )
       .map(workerTaskId),
   );
 
@@ -631,6 +760,7 @@ const reasonForState = (
   | "prd"
   | "non_leaf"
   | "unmet_dependency"
+  | "missing_prd_context"
   | "missing_profile"
   | "invalid_base"
 > => state;
@@ -683,7 +813,20 @@ export const runWorkerDryRun = ({
   tasks,
 }: WorkerDryRunInput): DryRunResult => {
   const validated = validateConfiguration(configuration);
-  const normalizedTasks = tasks.map(normalizeTask);
+  const normalizedTasks = tasks.map(normalizeTask).map((task) => {
+    const dependencies = new Map(
+      [
+        ...task.dependencies,
+        ...(validated.taskDependencies.get(workerTaskId(task)) ?? []),
+      ].map((dependency) => [workerTaskId(dependency), dependency]),
+    );
+    return deepFreeze({
+      ...task,
+      dependencies: [...dependencies.values()].sort((left, right) =>
+        compareStrings(workerTaskId(left), workerTaskId(right)),
+      ),
+    });
+  });
   const seenTaskIds = new Set<string>();
   for (const task of normalizedTasks) {
     const id = workerTaskId(task);
@@ -699,7 +842,13 @@ export const runWorkerDryRun = ({
   const orderedTasks = [...normalizedTasks].sort((left, right) =>
     compareStrings(workerTaskId(left), workerTaskId(right)),
   );
-  const completeDependencies = completedDependencyIds(orderedTasks);
+  const completeDependencies = completedDependencyIds(
+    orderedTasks,
+    validated.dependencyCompletionStates,
+  );
+  const tasksById = new Map(
+    orderedTasks.map((candidate) => [workerTaskId(candidate), candidate]),
+  );
   const decisions: EligibilityDecision[] = [];
   const executionRequests: ExecutionRequest[] = [];
 
@@ -760,6 +909,25 @@ export const runWorkerDryRun = ({
           authorization,
           "non_leaf",
           "Only ready leaf tasks are executable.",
+        ),
+      );
+      continue;
+    }
+
+    const parentPrd =
+      task.parentPrd === undefined
+        ? undefined
+        : tasksById.get(workerTaskId(task.parentPrd));
+    if (
+      task.parentPrd !== undefined &&
+      (parentPrd === undefined || parentPrd.kind !== "prd")
+    ) {
+      decisions.push(
+        decision(
+          task,
+          authorization,
+          "missing_prd_context",
+          `Parent PRD ${displayTask(task.parentPrd)} was not loaded as context.`,
         ),
       );
       continue;
@@ -828,6 +996,9 @@ export const runWorkerDryRun = ({
     const executionIdentity = sha256({
       taskId: id,
       taskRevision: task.sourceRevision,
+      ...(parentPrd === undefined
+        ? {}
+        : { contextRevision: parentPrd.sourceRevision }),
       baseCommit: task.baseCommit,
       profileDigest,
       promptVersion: validated.promptVersion,
@@ -835,6 +1006,7 @@ export const runWorkerDryRun = ({
     });
     const request = deepFreeze({
       task,
+      context: parentPrd === undefined ? {} : { parentPrd },
       taskId: id,
       executionIdentity,
       profileId: repositoryPolicy.profileId,
