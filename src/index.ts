@@ -134,6 +134,7 @@ export type {
   GitHubTaskDiscoveryInput,
   GitHubTaskSource,
   GitHubWorkerDryRunInput,
+  GitHubTaskReadInput,
 } from "./GitHubTaskSource.js";
 export {
   createWorkerStateStore,
@@ -150,4 +151,14 @@ export type {
   WorkerState,
   WorkerStateStoreOptions,
   WorkerStateStore,
+  AttemptClaim,
+  ClaimAttemptOptions,
+  LeaseRecoveryDisposition,
+  ExpiredLeaseRecovery,
 } from "./WorkerStateStore.js";
+export { claimWorkerTask, WorkerClaimError } from "./WorkerClaimCoordinator.js";
+export type {
+  ClaimTaskSource,
+  ClaimWorkerTaskInput,
+  WorkerClaimErrorCode,
+} from "./WorkerClaimCoordinator.js";

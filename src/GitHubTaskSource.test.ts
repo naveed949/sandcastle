@@ -335,4 +335,43 @@ describe("GitHubTaskSource", () => {
       }),
     ).rejects.toMatchObject({ name: "GitHubTaskSourceError", status: 404 });
   });
+
+  it("uses a fresh issue read instead of the discovery cache at claim time", async () => {
+    const payloads = responses();
+    let issueReads = 0;
+    const fake = fakeGitHub(
+      new Proxy(payloads, {
+        get(target, property: string) {
+          if (property === "/repos/acme/app/issues/7") {
+            issueReads += 1;
+            return issue({
+              updated_at:
+                issueReads === 1
+                  ? "2026-08-23T12:00:00Z"
+                  : "2026-08-23T12:10:00Z",
+            });
+          }
+          return target[property];
+        },
+        has(target, property) {
+          return property in target;
+        },
+      }),
+    );
+    const source = createGitHubTaskSource({ fetch: fake.fetch });
+    const [discovered] = await source.discover({
+      configuration,
+      exactTasks: [{ repository: "acme/app", kind: "issue", number: 7 }],
+      includeConfiguredRepositories: false,
+      includeAccountWide: false,
+    });
+    const refreshed = await source.read({
+      configuration,
+      task: discovered!,
+    });
+
+    expect(discovered?.sourceRevision).toBe("2026-08-23T12:00:00Z");
+    expect(refreshed?.sourceRevision).toBe("2026-08-23T12:10:00Z");
+    expect(issueReads).toBe(2);
+  });
 });

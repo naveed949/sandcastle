@@ -68,6 +68,39 @@ export interface ExecutionAttempt {
   readonly updatedAt: string;
   /** Terminal outcomes recorded in transition order. */
   readonly outcomes: readonly AttemptOutcomeRecord[];
+  /** Revision-bound lease metadata, present for guarded claims. */
+  readonly claim?: AttemptClaim;
+}
+
+/** A durable lease acquired before repository preparation or agent invocation. */
+export interface AttemptClaim {
+  readonly taskId: string;
+  readonly sourceRevision: string;
+  readonly owner: string;
+  readonly acquiredAt: string;
+  readonly leaseExpiresAt: string;
+  /** `started` means side effects may exist and expiry needs manual review. */
+  readonly phase: "claimed" | "started";
+}
+
+/** Inputs for atomically acquiring a revision-bound task lease. */
+export interface ClaimAttemptOptions extends CreateAttemptOptions {
+  readonly owner: string;
+  readonly leaseDurationMs: number;
+  readonly claimedAt?: string;
+}
+
+/** Stable recovery classification for one expired lease. */
+export type LeaseRecoveryDisposition = "safe_retry" | "manual_intervention";
+
+/** An expired lease and the action allowed by its retained attempt state. */
+export interface ExpiredLeaseRecovery {
+  readonly attemptId: string;
+  readonly taskId: string;
+  readonly executionIdentity: string;
+  readonly owner: string;
+  readonly leaseExpiresAt: string;
+  readonly disposition: LeaseRecoveryDisposition;
 }
 
 /** A requested lifecycle transition for an execution attempt. */
@@ -120,6 +153,17 @@ export interface WorkerStateStore {
     request: ExecutionRequest,
     options?: CreateAttemptOptions,
   ): Promise<ExecutionAttempt>;
+  /** Atomically persist a revision-bound lease before any execution side effect. */
+  claimAttempt(
+    request: ExecutionRequest,
+    options: ClaimAttemptOptions,
+  ): Promise<ExecutionAttempt>;
+  /** Mark that execution side effects may now exist for a claimed attempt. */
+  markAttemptStarted(attemptId: string): Promise<ExecutionAttempt>;
+  /** Classify expired claims from durable state without mutating them. */
+  inspectExpiredLeases(options?: {
+    readonly at?: string;
+  }): Promise<readonly ExpiredLeaseRecovery[]>;
   /** Record one valid terminal lifecycle transition and its evidence. */
   transitionAttempt(
     attemptId: string,
@@ -247,11 +291,16 @@ const parseState = (content: string, filePath: string): WorkerState => {
 
   const attemptIdentities = new Set<string>();
   const activeExecutionIdentities = new Set<string>();
+  const activeTaskIds = new Set<string>();
   for (const attempt of state.attempts) {
     if (
       !isRecord(attempt) ||
       typeof attempt.attemptId !== "string" ||
       typeof attempt.executionIdentity !== "string" ||
+      !isRecord(attempt.request) ||
+      typeof attempt.request.taskId !== "string" ||
+      !isRecord(attempt.request.task) ||
+      typeof attempt.request.task.sourceRevision !== "string" ||
       !isAttemptStatus(attempt.status) ||
       !Array.isArray(attempt.outcomes)
     ) {
@@ -265,6 +314,26 @@ const parseState = (content: string, filePath: string): WorkerState => {
       );
     }
     attemptIdentities.add(attempt.attemptId);
+    if (attempt.claim !== undefined) {
+      const claim = attempt.claim;
+      if (
+        !isRecord(claim) ||
+        typeof claim.taskId !== "string" ||
+        typeof claim.sourceRevision !== "string" ||
+        typeof claim.owner !== "string" ||
+        typeof claim.acquiredAt !== "string" ||
+        typeof claim.leaseExpiresAt !== "string" ||
+        (claim.phase !== "claimed" && claim.phase !== "started") ||
+        claim.taskId !== attempt.request.taskId ||
+        claim.sourceRevision !== attempt.request.task.sourceRevision ||
+        Number.isNaN(Date.parse(claim.acquiredAt)) ||
+        Number.isNaN(Date.parse(claim.leaseExpiresAt))
+      ) {
+        throw new WorkerStateStoreError(
+          `Worker state at ${filePath} contains an invalid claim for ${attempt.attemptId}.`,
+        );
+      }
+    }
     if (attempt.status === "active") {
       if (activeExecutionIdentities.has(attempt.executionIdentity)) {
         throw new WorkerStateStoreError(
@@ -272,6 +341,13 @@ const parseState = (content: string, filePath: string): WorkerState => {
         );
       }
       activeExecutionIdentities.add(attempt.executionIdentity);
+      const activeTaskId = attempt.request.taskId;
+      if (activeTaskIds.has(activeTaskId)) {
+        throw new WorkerStateStoreError(
+          `Worker state at ${filePath} contains multiple active attempts for ${activeTaskId}.`,
+        );
+      }
+      activeTaskIds.add(activeTaskId);
     }
   }
 
@@ -397,6 +473,24 @@ const canTransition = (
   return current === "verified" && next === "published";
 };
 
+const recoveryFor = (attempt: ExecutionAttempt): ExpiredLeaseRecovery => {
+  const claim = attempt.claim!;
+  return deepFreeze({
+    attemptId: attempt.attemptId,
+    taskId: claim.taskId,
+    executionIdentity: attempt.executionIdentity,
+    owner: claim.owner,
+    leaseExpiresAt: claim.leaseExpiresAt,
+    disposition:
+      claim.phase === "claimed" ? "safe_retry" : "manual_intervention",
+  });
+};
+
+const isExpiredAt = (attempt: ExecutionAttempt, timestamp: string): boolean =>
+  attempt.status === "active" &&
+  attempt.claim !== undefined &&
+  Date.parse(attempt.claim.leaseExpiresAt) <= Date.parse(timestamp);
+
 const addTaskSnapshot = (
   taskSnapshots: TaskSnapshotRecord[],
   snapshot: TaskSnapshotRecord,
@@ -455,6 +549,54 @@ export const createWorkerStateStore = (
       () => undefined,
     );
     return result;
+  };
+
+  const createAttemptInState = (
+    state: WorkerState,
+    request: ExecutionRequest,
+    attemptId: string,
+    createdAt: string,
+    claim?: AttemptClaim,
+  ): { readonly attempt: ExecutionAttempt; readonly state: WorkerState } => {
+    const taskSnapshots = [...state.taskSnapshots];
+    const executionRequests = [...state.executionRequests];
+    addTaskSnapshot(taskSnapshots, {
+      taskId: request.taskId,
+      task: cloneJson(request.task),
+      discoveredAt: createdAt,
+    });
+    addExecutionRequest(executionRequests, {
+      executionIdentity: request.executionIdentity,
+      request: cloneJson(request),
+      selectedAt: createdAt,
+    });
+    taskSnapshots.sort((left, right) =>
+      snapshotKey(left).localeCompare(snapshotKey(right)),
+    );
+    executionRequests.sort((left, right) =>
+      requestKey(left).localeCompare(requestKey(right)),
+    );
+    const attempt = deepFreeze({
+      attemptId,
+      executionIdentity: request.executionIdentity,
+      request: cloneJson(request),
+      status: "active" as const,
+      createdAt,
+      updatedAt: createdAt,
+      outcomes: [] as readonly AttemptOutcomeRecord[],
+      ...(claim === undefined ? {} : { claim: cloneJson(claim) }),
+    });
+    return {
+      attempt,
+      state: freezeState({
+        version: 1,
+        taskSnapshots,
+        executionRequests,
+        attempts: [...state.attempts, attempt].sort((left, right) =>
+          left.attemptId.localeCompare(right.attemptId),
+        ),
+      }),
+    };
   };
 
   return {
@@ -530,7 +672,8 @@ export const createWorkerStateStore = (
         }
         const activeAttempt = state.attempts.find(
           (attempt) =>
-            attempt.executionIdentity === request.executionIdentity &&
+            (attempt.executionIdentity === request.executionIdentity ||
+              attempt.request.taskId === request.taskId) &&
             attempt.status === "active",
         );
         if (activeAttempt !== undefined) {
@@ -541,44 +684,177 @@ export const createWorkerStateStore = (
         }
 
         const createdAt = ensureTimestamp(now(), "attempt creation timestamp");
-        const taskSnapshots = [...state.taskSnapshots];
-        const executionRequests = [...state.executionRequests];
-        addTaskSnapshot(taskSnapshots, {
-          taskId: request.taskId,
-          task: cloneJson(request.task),
-          discoveredAt: createdAt,
-        });
-        addExecutionRequest(executionRequests, {
-          executionIdentity: request.executionIdentity,
-          request: cloneJson(request),
-          selectedAt: createdAt,
-        });
-        taskSnapshots.sort((left, right) =>
-          snapshotKey(left).localeCompare(snapshotKey(right)),
-        );
-        executionRequests.sort((left, right) =>
-          requestKey(left).localeCompare(requestKey(right)),
-        );
-
-        const attempt = deepFreeze({
+        const created = createAttemptInState(
+          state,
+          request,
           attemptId,
-          executionIdentity: request.executionIdentity,
-          request: cloneJson(request),
-          status: "active" as const,
           createdAt,
-          updatedAt: createdAt,
-          outcomes: [] as readonly AttemptOutcomeRecord[],
+        );
+        await writeState(options.filePath, created.state);
+        return created.attempt;
+      }),
+
+    claimAttempt: (request, claimOptions) =>
+      serialized(async () => {
+        const state = await readState(options.filePath);
+        const owner = claimOptions.owner.trim();
+        if (owner === "") {
+          throw new WorkerStateStoreError("claim owner must be non-empty.");
+        }
+        if (
+          !Number.isFinite(claimOptions.leaseDurationMs) ||
+          claimOptions.leaseDurationMs <= 0
+        ) {
+          throw new WorkerStateStoreError(
+            "leaseDurationMs must be a positive finite number.",
+          );
+        }
+        const claimedAt = ensureTimestamp(
+          claimOptions.claimedAt ?? now(),
+          "claim timestamp",
+        );
+        const leaseExpiresAt = new Date(
+          Date.parse(claimedAt) + claimOptions.leaseDurationMs,
+        ).toISOString();
+        const attemptId =
+          claimOptions.attemptId?.trim() ??
+          `attempt:${request.executionIdentity}`;
+        if (attemptId === "") {
+          throw new WorkerStateStoreError(
+            "attemptId must be a non-empty string.",
+          );
+        }
+
+        const existingById = state.attempts.find(
+          (attempt) => attempt.attemptId === attemptId,
+        );
+        if (existingById !== undefined) {
+          if (
+            !sameJson(existingById.request, request) ||
+            existingById.claim?.owner !== owner
+          ) {
+            throw new WorkerStateStoreError(
+              `Execution attempt ${attemptId} conflicts with persisted state.`,
+              "conflict",
+            );
+          }
+          if (
+            existingById.status === "active" &&
+            !isExpiredAt(existingById, claimedAt)
+          ) {
+            return existingById;
+          }
+          throw new WorkerStateStoreError(
+            `Execution attempt ${attemptId} cannot be re-entered after its lease expired or became terminal.`,
+            "conflict",
+          );
+        }
+
+        let attempts = [...state.attempts];
+        const active = attempts.find(
+          (attempt) =>
+            attempt.status === "active" &&
+            (attempt.request.taskId === request.taskId ||
+              attempt.executionIdentity === request.executionIdentity),
+        );
+        if (active !== undefined) {
+          if (!isExpiredAt(active, claimedAt)) {
+            throw new WorkerStateStoreError(
+              `Task ${request.taskId} or execution identity ${request.executionIdentity} already has active attempt ${active.attemptId}.`,
+              "conflict",
+            );
+          }
+          const recovery = recoveryFor(active);
+          if (recovery.disposition === "manual_intervention") {
+            throw new WorkerStateStoreError(
+              `Expired execution attempt ${active.attemptId} requires manual intervention.`,
+              "conflict",
+            );
+          }
+          attempts = attempts.map((attempt) =>
+            attempt.attemptId !== active.attemptId
+              ? attempt
+              : deepFreeze({
+                  ...attempt,
+                  status: "interrupted" as const,
+                  updatedAt: claimedAt,
+                  outcomes: [
+                    ...attempt.outcomes,
+                    {
+                      status: "interrupted" as const,
+                      timestamp: claimedAt,
+                      evidence: ["worker://lease-expired/safe-retry"],
+                    },
+                  ],
+                }),
+          );
+        }
+
+        const claim: AttemptClaim = {
+          taskId: request.taskId,
+          sourceRevision: request.task.sourceRevision,
+          owner,
+          acquiredAt: claimedAt,
+          leaseExpiresAt,
+          phase: "claimed",
+        };
+        const created = createAttemptInState(
+          { ...state, attempts },
+          request,
+          attemptId,
+          claimedAt,
+          claim,
+        );
+        await writeState(options.filePath, created.state);
+        return created.attempt;
+      }),
+
+    markAttemptStarted: (attemptId) =>
+      serialized(async () => {
+        const state = await readState(options.filePath);
+        const index = state.attempts.findIndex(
+          (attempt) => attempt.attemptId === attemptId,
+        );
+        if (index === -1) {
+          throw new WorkerStateStoreError(
+            `Execution attempt ${attemptId} was not found.`,
+            "not_found",
+          );
+        }
+        const current = state.attempts[index]!;
+        if (current.status !== "active" || current.claim === undefined) {
+          throw new WorkerStateStoreError(
+            `Execution attempt ${attemptId} is not an active claim.`,
+            "invalid_transition",
+          );
+        }
+        if (current.claim.phase === "started") return current;
+        const updated = deepFreeze({
+          ...current,
+          claim: { ...current.claim, phase: "started" as const },
         });
-        const next = freezeState({
-          version: 1,
-          taskSnapshots,
-          executionRequests,
-          attempts: [...state.attempts, attempt].sort((left, right) =>
-            left.attemptId.localeCompare(right.attemptId),
-          ),
-        });
+        const attempts = [...state.attempts];
+        attempts[index] = updated;
+        const next = freezeState({ ...state, attempts });
         await writeState(options.filePath, next);
-        return attempt;
+        return updated;
+      }),
+
+    inspectExpiredLeases: (inspectOptions = {}) =>
+      serialized(async () => {
+        const state = await readState(options.filePath);
+        const at = ensureTimestamp(
+          inspectOptions.at ?? now(),
+          "lease inspection timestamp",
+        );
+        return deepFreeze(
+          state.attempts
+            .filter((attempt) => isExpiredAt(attempt, at))
+            .map(recoveryFor)
+            .sort((left, right) =>
+              left.attemptId.localeCompare(right.attemptId),
+            ),
+        );
       }),
 
     transitionAttempt: (attemptId, transition) =>

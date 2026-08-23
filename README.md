@@ -131,6 +131,7 @@ adding its `{ repository, kind, number }` reference to `authorizedTasks`.
 
 ```typescript
 import {
+  claimWorkerTask,
   createGitHubTaskSource,
   createWorkerStateStore,
   runGitHubWorkerDryRun,
@@ -214,8 +215,16 @@ const state = createWorkerStateStore({
 await state.recordDiscovery(liveResult);
 const request = liveResult.executionRequests[0];
 if (request !== undefined) {
-  const attempt = await state.createAttempt(request);
-  // Start execution only after createAttempt() has returned successfully.
+  const attempt = await claimWorkerTask({
+    source,
+    store: state,
+    configuration,
+    request,
+    owner: "worker-1",
+    leaseDurationMs: 5 * 60_000,
+  });
+  // This is the boundary after which repository or agent side effects may exist.
+  await state.markAttemptStarted(attempt.attemptId);
   await state.transitionAttempt(attempt.attemptId, {
     status: "verified",
     evidence: ["ci://run/42"],
@@ -231,6 +240,16 @@ restart. Attempt transitions are monotonic: an active attempt may be marked
 references. To deliberately retry a terminal attempt, pass a new `attemptId`
 to `createAttempt()`; an existing active attempt for the same execution
 identity still prevents duplicate work.
+
+`claimWorkerTask()` freshly re-reads the task, re-evaluates authorization and
+eligibility, and rejects a changed source revision or execution identity before
+persisting an attempt. A successful claim durably binds the task ID, source
+revision, execution identity, owner, and lease expiry. Live claims survive
+restarts and idempotent re-entry does not duplicate them. Use
+`inspectExpiredLeases()` to distinguish `safe_retry` claims, where execution
+never started, from `manual_intervention` claims whose retained state indicates
+that side effects may exist. A safe retry requires a new `attemptId`; the old
+claim is retained as interrupted rather than silently overwritten.
 
 ### All options
 

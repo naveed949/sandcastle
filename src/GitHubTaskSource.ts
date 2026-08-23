@@ -74,6 +74,18 @@ export interface GitHubTaskDiscoveryInput {
 /** Read-only task-source seam consumed by the worker dry-run coordinator. */
 export interface GitHubTaskSource {
   discover(input: GitHubTaskDiscoveryInput): Promise<readonly NormalizedTask[]>;
+  /** Re-read one task without using discovery caches, for guarded claiming. */
+  read(input: GitHubTaskReadInput): Promise<NormalizedTask | undefined>;
+}
+
+/** Input for a fresh, exact GitHub task read at claim time. */
+export interface GitHubTaskReadInput {
+  /** Central policy used to resolve the configured base branch. */
+  readonly configuration: WorkerConfiguration;
+  /** The exact task whose current source revision must be observed. */
+  readonly task: TaskReference;
+  /** Operator-controlled PRD references used while normalizing the task. */
+  readonly prdReferences?: readonly TaskReference[];
 }
 
 /** Convenience input that connects a GitHub source to the dry-run coordinator. */
@@ -783,7 +795,26 @@ export const createGitHubTaskSource = (
     );
   };
 
-  return { discover };
+  const read = async ({
+    configuration,
+    task,
+    prdReferences = [],
+  }: GitHubTaskReadInput): Promise<NormalizedTask | undefined> => {
+    // A new adapter instance deliberately gives this read fresh issue and base
+    // commit caches. Claiming must not reuse the snapshot populated by discovery.
+    const freshSource = createGitHubTaskSource(options);
+    const tasks = await freshSource.discover({
+      configuration,
+      exactTasks: [task],
+      includeConfiguredRepositories: false,
+      includeAccountWide: false,
+      prdReferences,
+    });
+    const expectedId = taskId(validateReference(task));
+    return tasks.find((candidate) => taskId(candidate) === expectedId);
+  };
+
+  return { discover, read };
 };
 
 /** Discover GitHub tasks and immediately evaluate them through the pure coordinator. */
