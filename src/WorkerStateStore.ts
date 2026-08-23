@@ -1,4 +1,12 @@
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  open,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { dirname } from "node:path";
 import type {
   DryRunResult,
@@ -72,6 +80,12 @@ export interface AttemptTransition {
   readonly timestamp?: string;
 }
 
+/** Optional identity used when explicitly retrying a terminal attempt. */
+export interface CreateAttemptOptions {
+  /** A new stable attempt identity; repeated calls with it remain idempotent. */
+  readonly attemptId?: string;
+}
+
 /** Durable worker state format. */
 export interface WorkerState {
   /** Persisted state format version. */
@@ -102,7 +116,10 @@ export interface WorkerStateStore {
     options?: { readonly discoveredAt?: string },
   ): Promise<WorkerState>;
   /** Persist an active attempt before an execution engine starts work. */
-  createAttempt(request: ExecutionRequest): Promise<ExecutionAttempt>;
+  createAttempt(
+    request: ExecutionRequest,
+    options?: CreateAttemptOptions,
+  ): Promise<ExecutionAttempt>;
   /** Record one valid terminal lifecycle transition and its evidence. */
   transitionAttempt(
     attemptId: string,
@@ -192,7 +209,9 @@ const parseState = (content: string, filePath: string): WorkerState => {
       !isRecord(snapshot) ||
       typeof snapshot.taskId !== "string" ||
       !isRecord(snapshot.task) ||
-      typeof snapshot.task.sourceRevision !== "string"
+      typeof snapshot.task.sourceRevision !== "string" ||
+      typeof snapshot.task.baseBranch !== "string" ||
+      typeof snapshot.task.baseCommit !== "string"
     ) {
       throw new WorkerStateStoreError(
         `Worker state at ${filePath} contains an invalid task snapshot.`,
@@ -227,6 +246,7 @@ const parseState = (content: string, filePath: string): WorkerState => {
   }
 
   const attemptIdentities = new Set<string>();
+  const activeExecutionIdentities = new Set<string>();
   for (const attempt of state.attempts) {
     if (
       !isRecord(attempt) ||
@@ -239,12 +259,20 @@ const parseState = (content: string, filePath: string): WorkerState => {
         `Worker state at ${filePath} contains an invalid execution attempt.`,
       );
     }
-    if (attemptIdentities.has(attempt.executionIdentity)) {
+    if (attemptIdentities.has(attempt.attemptId)) {
       throw new WorkerStateStoreError(
-        `Worker state at ${filePath} contains duplicate active-attempt identity ${attempt.executionIdentity}.`,
+        `Worker state at ${filePath} contains duplicate attempt ${attempt.attemptId}.`,
       );
     }
-    attemptIdentities.add(attempt.executionIdentity);
+    attemptIdentities.add(attempt.attemptId);
+    if (attempt.status === "active") {
+      if (activeExecutionIdentities.has(attempt.executionIdentity)) {
+        throw new WorkerStateStoreError(
+          `Worker state at ${filePath} contains multiple active attempts for ${attempt.executionIdentity}.`,
+        );
+      }
+      activeExecutionIdentities.add(attempt.executionIdentity);
+    }
   }
 
   return freezeState(state);
@@ -273,16 +301,36 @@ const acquireStateLock = async (
   await mkdir(dirname(filePath), { recursive: true });
   for (let attempt = 0; attempt < 200; attempt += 1) {
     try {
-      await mkdir(lockPath);
+      const handle = await open(lockPath, "wx");
+      try {
+        await handle.writeFile(String(process.pid));
+      } catch (error) {
+        await rm(lockPath, { force: true });
+        throw error;
+      } finally {
+        await handle.close();
+      }
       return async () => {
-        await rm(lockPath, { recursive: true, force: true });
+        await rm(lockPath, { force: true });
       };
     } catch (error) {
       if (!isRecord(error) || error.code !== "EEXIST") throw error;
       try {
+        const owner = (await readFile(lockPath, "utf8")).trim();
+        const ownerPid = Number(owner);
+        let ownerIsAlive = false;
+        if (Number.isInteger(ownerPid) && ownerPid > 0) {
+          try {
+            process.kill(ownerPid, 0);
+            ownerIsAlive = true;
+          } catch (processError) {
+            ownerIsAlive =
+              isRecord(processError) && processError.code === "EPERM";
+          }
+        }
         const lockAge = Date.now() - (await stat(lockPath)).mtimeMs;
-        if (lockAge > 30_000) {
-          await rm(lockPath, { recursive: true, force: true });
+        if (!ownerIsAlive && (owner !== "" ? true : lockAge > 1_000)) {
+          await rm(lockPath, { force: true });
           continue;
         }
       } catch (statError) {
@@ -326,7 +374,7 @@ const writeState = async (
 };
 
 const snapshotKey = (record: TaskSnapshotRecord): string =>
-  `${record.taskId}\u0000${record.task.sourceRevision}`;
+  `${record.taskId}\u0000${record.task.sourceRevision}\u0000${record.task.baseBranch}\u0000${record.task.baseCommit}`;
 
 const requestKey = (record: ExecutionRequestRecord): string =>
   record.executionIdentity;
@@ -457,20 +505,39 @@ export const createWorkerStateStore = (
         return next;
       }),
 
-    createAttempt: (request) =>
+    createAttempt: (request, attemptOptions = {}) =>
       serialized(async () => {
         const state = await readState(options.filePath);
+        const attemptId =
+          attemptOptions.attemptId?.trim() ??
+          `attempt:${request.executionIdentity}`;
+        if (attemptId === "") {
+          throw new WorkerStateStoreError(
+            "attemptId must be a non-empty string.",
+          );
+        }
         const existing = state.attempts.find(
-          (attempt) => attempt.executionIdentity === request.executionIdentity,
+          (attempt) => attempt.attemptId === attemptId,
         );
         if (existing !== undefined) {
           if (!sameJson(existing.request, request)) {
             throw new WorkerStateStoreError(
-              `Execution attempt ${request.executionIdentity} conflicts with persisted state.`,
+              `Execution attempt ${attemptId} conflicts with persisted state.`,
               "conflict",
             );
           }
           return existing;
+        }
+        const activeAttempt = state.attempts.find(
+          (attempt) =>
+            attempt.executionIdentity === request.executionIdentity &&
+            attempt.status === "active",
+        );
+        if (activeAttempt !== undefined) {
+          throw new WorkerStateStoreError(
+            `Execution identity ${request.executionIdentity} already has active attempt ${activeAttempt.attemptId}.`,
+            "conflict",
+          );
         }
 
         const createdAt = ensureTimestamp(now(), "attempt creation timestamp");
@@ -494,7 +561,7 @@ export const createWorkerStateStore = (
         );
 
         const attempt = deepFreeze({
-          attemptId: `attempt:${request.executionIdentity}`,
+          attemptId,
           executionIdentity: request.executionIdentity,
           request: cloneJson(request),
           status: "active" as const,
@@ -506,7 +573,9 @@ export const createWorkerStateStore = (
           version: 1,
           taskSnapshots,
           executionRequests,
-          attempts: [...state.attempts, attempt],
+          attempts: [...state.attempts, attempt].sort((left, right) =>
+            left.attemptId.localeCompare(right.attemptId),
+          ),
         });
         await writeState(options.filePath, next);
         return attempt;

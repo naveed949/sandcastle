@@ -145,6 +145,7 @@ export type {
   AttemptStatus,
   AttemptOutcomeRecord,
   ExecutionAttempt,
+  CreateAttemptOptions,
   AttemptTransition,
   WorkerState,
   WorkerStateStoreOptions,

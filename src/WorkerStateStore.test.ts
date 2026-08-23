@@ -101,6 +101,36 @@ describe("createWorkerStateStore", () => {
     }
   });
 
+  it("retains a new snapshot when the observed base commit changes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "sandcastle-worker-state-"));
+    const filePath = join(directory, "state.json");
+
+    try {
+      const firstResult = runWorkerDryRun({ configuration, tasks: [task] });
+      const secondResult = runWorkerDryRun({
+        configuration,
+        tasks: [{ ...task, baseCommit: "base-commit-2" }],
+      });
+      const store = createWorkerStateStore({
+        filePath,
+        now: () => "2026-08-23T20:00:00.000Z",
+      });
+
+      await store.recordDiscovery(firstResult);
+      const state = await store.recordDiscovery(secondResult, {
+        discoveredAt: "2026-08-23T20:01:00.000Z",
+      });
+
+      expect(state.taskSnapshots).toHaveLength(2);
+      expect(state.executionRequests).toHaveLength(2);
+      expect(
+        new Set(state.taskSnapshots.map((item) => item.task.baseCommit)).size,
+      ).toBe(2);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("creates one durable active attempt for an execution identity", async () => {
     const directory = await mkdtemp(join(tmpdir(), "sandcastle-worker-state-"));
     const filePath = join(directory, "state.json");
@@ -216,12 +246,24 @@ describe("createWorkerStateStore", () => {
           timestamp: "2026-08-23T20:03:00.000Z",
         }),
       ).rejects.toMatchObject({ code: "invalid_transition" });
+      await expect(
+        store.createAttempt(result.executionRequests[0]!, {
+          attemptId: "attempt:duplicate-7",
+        }),
+      ).rejects.toMatchObject({ code: "conflict" });
 
       const failed = await store.transitionAttempt(first.attemptId, {
         status: "failed",
         timestamp: "2026-08-23T20:04:00.000Z",
         evidence: ["log://attempt/7"],
       });
+      const retry = await store.createAttempt(result.executionRequests[0]!, {
+        attemptId: "attempt:retry-7",
+      });
+      const repeatedRetry = await store.createAttempt(
+        result.executionRequests[0]!,
+        { attemptId: "attempt:retry-7" },
+      );
       const interrupted = await store.transitionAttempt(second.attemptId, {
         status: "interrupted",
         timestamp: "2026-08-23T20:05:00.000Z",
@@ -235,6 +277,12 @@ describe("createWorkerStateStore", () => {
           evidence: ["log://attempt/7"],
         },
       ]);
+      expect(retry).toMatchObject({
+        attemptId: "attempt:retry-7",
+        executionIdentity: result.executionRequests[0]!.executionIdentity,
+        status: "active",
+      });
+      expect(repeatedRetry).toEqual(retry);
       expect(interrupted.outcomes).toEqual([
         {
           status: "interrupted",
