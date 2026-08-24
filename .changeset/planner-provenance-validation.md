@@ -3,4 +3,5 @@
 ---
 
 Fail closed when planner task, profile, eligibility, or dependency provenance
-does not match the claim-time evidence.
+does not match claim-time evidence, and reject plan IDs reused with different
+immutable input.

@@ -2,9 +2,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { canonicalJsonDigest } from "./CanonicalJson.js";
 import {
   createRepositoryWorkflowControl,
   createRepositoryWorkflowStore,
+  RepositoryWorkflowStoreError,
 } from "./RepositoryWorkflowControl.js";
 import {
   createRepositoryWorkflowPlanStore,
@@ -52,7 +54,10 @@ const input = (): RepositoryWorkflowPlanningInput => ({
       taskId: "acme/one:issue:23",
       executionIdentity: "execution-1",
       profileId: "node-v1",
-      profileDigest: "profile-v1",
+      profileDigest: canonicalJsonDigest({
+        setupCommands: [],
+        verificationCommands: ["npm test"],
+      }),
       promptVersion: "worker-v1",
       promptTemplateDigest: "prompt-v1",
       promptTemplate: "{{TASK_SNAPSHOT}}",
@@ -194,6 +199,46 @@ describe("createRepositoryWorkflowPlanner", () => {
     expect(invoke).toHaveBeenCalledOnce();
   });
 
+  it("rejects reuse of a plan ID with different immutable input", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "repository-planner-plan-conflict-"),
+    );
+    directories.push(directory);
+    const planStore = createRepositoryWorkflowPlanStore({
+      store: createRepositoryWorkflowStore({
+        filePath: join(directory, "workflows.json"),
+      }),
+    });
+    const invoke = vi.fn(async () => ({
+      stdout: `<plan>${JSON.stringify({
+        version: 1,
+        taskIntent: "Retain the original plan.",
+        proposedWork: ["Keep immutable plan identity."],
+        verificationStrategy: ["Inspect the retained record."],
+        risks: [],
+        evidence: [],
+        needsHumanClarification: false,
+      })}</plan>`,
+    }));
+    const planner = createRepositoryWorkflowPlanner({ invoke, planStore });
+
+    await planner.plan({ ...input(), planId: "plan-1" });
+
+    await expect(
+      planner.plan({
+        ...input(),
+        planId: "plan-1",
+        promptVersion: "planner-v2",
+      }),
+    ).rejects.toMatchObject(
+      new RepositoryWorkflowStoreError(
+        "Planner record plan-1 conflicts with persisted evidence.",
+        "conflict",
+      ),
+    );
+    expect(invoke).toHaveBeenCalledOnce();
+  });
+
   it("records cancellation as resumable and never advances beyond the claimed task", async () => {
     const directory = await mkdtemp(
       join(tmpdir(), "repository-planner-cancel-"),
@@ -311,6 +356,37 @@ describe("createRepositoryWorkflowPlanner", () => {
     expect(await planStore.list()).toEqual([]);
   });
 
+  it("requires claim-time task snapshot evidence before invoking the planner", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "repository-planner-claim-context-"),
+    );
+    directories.push(directory);
+    const planStore = createRepositoryWorkflowPlanStore({
+      store: createRepositoryWorkflowStore({
+        filePath: join(directory, "workflows.json"),
+      }),
+    });
+    const invoke = vi.fn(async () => ({ stdout: "" }));
+    const planner = createRepositoryWorkflowPlanner({ invoke, planStore });
+    const base = input();
+    const incomplete = {
+      ...base,
+      attempt: {
+        ...base.attempt,
+        claim: { ...base.attempt.claim!, refreshedSnapshots: undefined },
+      },
+    };
+
+    await expect(planner.plan(incomplete)).rejects.toMatchObject(
+      new RepositoryWorkflowPlannerContextError(
+        "missing_context",
+        "Planner requires claim-time task snapshot evidence.",
+      ),
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    expect(await planStore.list()).toEqual([]);
+  });
+
   it("fails prompt expansion before invocation when the repository profile is missing", async () => {
     const directory = await mkdtemp(
       join(tmpdir(), "repository-planner-profile-context-"),
@@ -335,6 +411,43 @@ describe("createRepositoryWorkflowPlanner", () => {
       new RepositoryWorkflowPlannerContextError(
         "missing_context",
         "Planner requires the repository execution profile.",
+      ),
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    expect(await planStore.list()).toEqual([]);
+  });
+
+  it("rejects a repository profile that does not match its claimed digest", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "repository-planner-profile-provenance-"),
+    );
+    directories.push(directory);
+    const planStore = createRepositoryWorkflowPlanStore({
+      store: createRepositoryWorkflowStore({
+        filePath: join(directory, "workflows.json"),
+      }),
+    });
+    const invoke = vi.fn(async () => ({ stdout: "" }));
+    const planner = createRepositoryWorkflowPlanner({ invoke, planStore });
+    const base = input();
+    const forgedProfileInput = {
+      ...base,
+      attempt: {
+        ...base.attempt,
+        request: {
+          ...base.attempt.request,
+          profile: {
+            setupCommands: ["make setup"],
+            verificationCommands: ["npm test"],
+          },
+        },
+      },
+    };
+
+    await expect(planner.plan(forgedProfileInput)).rejects.toMatchObject(
+      new RepositoryWorkflowPlannerContextError(
+        "invalid_context",
+        "Planner repository profile does not match the claimed profile digest.",
       ),
     );
     expect(invoke).not.toHaveBeenCalled();

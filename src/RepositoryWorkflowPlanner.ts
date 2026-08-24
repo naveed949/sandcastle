@@ -1,4 +1,5 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
+import { canonicalJsonDigest } from "./CanonicalJson.js";
 import {
   digestPromptTemplate,
   normalizeRepository,
@@ -357,6 +358,30 @@ const requirePositiveInteger = (value: unknown, name: string): number => {
   return value;
 };
 
+const profileDigestFor = (profile: unknown): string | undefined => {
+  if (
+    !isRecord(profile) ||
+    Object.keys(profile).some(
+      (key) => key !== "setupCommands" && key !== "verificationCommands",
+    ) ||
+    !Array.isArray(profile.setupCommands) ||
+    !Array.isArray(profile.verificationCommands) ||
+    !profile.setupCommands.every(
+      (command) => typeof command === "string" && command.trim().length > 0,
+    ) ||
+    profile.verificationCommands.length === 0 ||
+    !profile.verificationCommands.every(
+      (command) => typeof command === "string" && command.trim().length > 0,
+    )
+  ) {
+    return undefined;
+  }
+  return canonicalJsonDigest({
+    setupCommands: profile.setupCommands,
+    verificationCommands: profile.verificationCommands,
+  });
+};
+
 const outputIssue = (message: string) => ({ message });
 
 const stringArray = (
@@ -675,6 +700,19 @@ const validateInput = (
       "Planner requires the repository execution profile.",
     );
   }
+  const profileDigest = profileDigestFor(request.profile);
+  if (profileDigest === undefined) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "invalid_context",
+      "Planner repository execution profile is malformed.",
+    );
+  }
+  if (profileDigest !== request.profileDigest) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "invalid_context",
+      "Planner repository profile does not match the claimed profile digest.",
+    );
+  }
   const repository = requireString(input.repository, "claimed repository");
   const workflowIdentity = requireString(
     input.repositoryWorkflow.workflowIdentity,
@@ -732,14 +770,49 @@ const validateInput = (
       "Planner task context does not match the claimed execution request.",
     );
   }
-  if (
-    claim.refreshedSnapshots !== undefined &&
-    !Array.isArray(claim.refreshedSnapshots)
-  ) {
+  if (claim.refreshedSnapshots === undefined) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "missing_context",
+      "Planner requires claim-time task snapshot evidence.",
+    );
+  }
+  if (!Array.isArray(claim.refreshedSnapshots)) {
     throw new RepositoryWorkflowPlannerContextError(
       "invalid_context",
       "Planner claim-time snapshots must be an array.",
     );
+  }
+  const claimSnapshotIds = new Set<string>();
+  for (const snapshot of claim.refreshedSnapshots) {
+    if (
+      !isRecord(snapshot) ||
+      typeof snapshot.repository !== "string" ||
+      (snapshot.kind !== "issue" && snapshot.kind !== "prd") ||
+      typeof snapshot.number !== "number" ||
+      !Number.isInteger(snapshot.number) ||
+      snapshot.number < 1 ||
+      typeof snapshot.sourceRevision !== "string" ||
+      snapshot.sourceRevision.trim() === "" ||
+      (snapshot.state !== "open" &&
+        snapshot.state !== "blocked" &&
+        snapshot.state !== "closed" &&
+        snapshot.state !== "claimed" &&
+        snapshot.state !== "completed" &&
+        snapshot.state !== "stale")
+    ) {
+      throw new RepositoryWorkflowPlannerContextError(
+        "invalid_context",
+        "Planner claim-time snapshots are malformed.",
+      );
+    }
+    const snapshotId = workerTaskId(snapshot as unknown as NormalizedTask);
+    if (claimSnapshotIds.has(snapshotId)) {
+      throw new RepositoryWorkflowPlannerContextError(
+        "invalid_context",
+        `Planner claim-time snapshots repeat ${snapshotId}.`,
+      );
+    }
+    claimSnapshotIds.add(snapshotId);
   }
   const claimedSnapshot = claim.refreshedSnapshots?.find(
     (snapshot) => workerTaskId(snapshot) === request.taskId,
@@ -964,9 +1037,6 @@ export const createRepositoryWorkflowPlanner = (
     ): Promise<RepositoryWorkflowPlanRecord> {
       const { task, request, dependencyEvidence } = validateInput(input);
       const planId = requireString(input.planId ?? createId(), "plan ID");
-      const existing = await options.planStore.get(planId);
-      if (existing !== undefined) return existing;
-      const createdAt = validTimestamp(now(), "planner timestamp");
       const provenance: RepositoryWorkflowPlanInput = {
         repository: task.repository,
         workflowIdentity: input.repositoryWorkflow.workflowIdentity,
@@ -1000,6 +1070,17 @@ export const createRepositoryWorkflowPlanner = (
         taskSnapshot: task,
         repositoryProfile: request.profile,
       };
+      const existing = await options.planStore.get(planId);
+      if (existing !== undefined) {
+        if (JSON.stringify(existing.input) !== JSON.stringify(provenance)) {
+          throw new RepositoryWorkflowStoreError(
+            `Planner record ${planId} conflicts with persisted evidence.`,
+            "conflict",
+          );
+        }
+        return existing;
+      }
+      const createdAt = validTimestamp(now(), "planner timestamp");
       const evidence = systemEvidenceFor(provenance);
       const baseRecord = {
         id: planId,
@@ -1115,9 +1196,12 @@ export const planOneEligibleTask = async (
     (candidate) =>
       candidate.task.repository === repository && candidate.eligible,
   );
-  const request = dryRun.executionRequests.find(
-    (candidate) => candidate.task.repository === repository,
-  );
+  const request =
+    decision === undefined
+      ? undefined
+      : dryRun.executionRequests.find(
+          (candidate) => candidate.taskId === decision.taskId,
+        );
   if (decision === undefined || request === undefined) {
     return {
       status: "no_eligible_task",

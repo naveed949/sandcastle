@@ -600,7 +600,8 @@ again before invocation; missing or conflicting context fails closed.
 Accepted plans and their input provenance are retained in the same workflow
 state and appear under the projection's `plans` collection. Missing context,
 malformed output, cancellation, and timeout do not advance implementation;
-cancellation and timeout remain resumable planner outcomes.
+cancellation and timeout remain resumable planner outcomes. Reusing a plan ID
+with different immutable input is rejected as a persistence conflict.
 
 Override the defaults with `SANDCASTLE_FEATURE_BRANCH`,
 `SANDCASTLE_CODEX_AUTH_PATH`, `SANDCASTLE_BASE_BRANCH`,
