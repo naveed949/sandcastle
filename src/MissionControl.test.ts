@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -68,6 +68,16 @@ const createHost = async () => {
   return { address, host, source };
 };
 
+const postCommand = async (
+  address: { readonly host: string; readonly port: number },
+  request: Record<string, unknown>,
+) =>
+  fetch(`http://${address.host}:${address.port}/api/v1/commands`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(request),
+  });
+
 afterEach(async () => {
   while (temporaryDirectories.length > 0) {
     const directory = temporaryDirectories.pop();
@@ -112,6 +122,7 @@ describe("Mission Control host", () => {
       expect(page.status).toBe(200);
       expect(html).toContain("Mission Control");
       expect(html).toContain("/api/v1/overview");
+      expect(html).toContain("/api/v1/commands");
       expect(html).toMatch(/@media[^{]*\{/);
     } finally {
       await host.stop();
@@ -190,5 +201,72 @@ describe("Mission Control host", () => {
       }),
     ).toThrow(/missing profile/i);
     expect(source.discover).not.toHaveBeenCalled();
+  });
+
+  it("guards runtime commands with a revision, idempotency key, and append-only audit", async () => {
+    const { address, host, source } = await createHost();
+    try {
+      const statusResponse = await fetch(
+        `http://${address.host}:${address.port}/api/v1/status`,
+      );
+      expect(statusResponse.status).toBe(200);
+      const initialStatus = (await statusResponse.json()) as {
+        revision: number;
+        mode: string;
+      };
+      expect(initialStatus).toMatchObject({ revision: 0, mode: "stopped" });
+
+      const pauseRequest = {
+        command: "pause",
+        commandId: "pause-for-maintenance",
+        expectedRevision: initialStatus.revision,
+        reason: "maintenance window",
+      };
+      const pauseResponse = await postCommand(address, pauseRequest);
+      expect(pauseResponse.status).toBe(200);
+      const pauseOutcome = await pauseResponse.json();
+      expect(pauseOutcome).toMatchObject({
+        version: 1,
+        command: "pause",
+        commandId: pauseRequest.commandId,
+        code: "accepted",
+        revision: 1,
+      });
+
+      const duplicateResponse = await postCommand(address, {
+        ...pauseRequest,
+        expectedRevision: 999,
+        reason: undefined,
+      });
+      expect(duplicateResponse.status).toBe(200);
+      expect(await duplicateResponse.json()).toEqual(pauseOutcome);
+
+      const staleResponse = await postCommand(address, {
+        command: "resume",
+        commandId: "stale-resume",
+        expectedRevision: 0,
+        reason: "resume after maintenance",
+      });
+      expect(staleResponse.status).toBe(409);
+      expect(await staleResponse.json()).toMatchObject({
+        code: "stale_revision",
+        revision: 1,
+      });
+      expect(source.discover).not.toHaveBeenCalled();
+
+      const audit = (await readFile(host.paths.operatorAuditFilePath, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(audit.map((record) => record.kind)).toEqual([
+        "request",
+        "outcome",
+        "request",
+        "outcome",
+      ]);
+      expect(JSON.stringify(audit)).not.toContain("TOP_SECRET");
+    } finally {
+      await host.stop();
+    }
   });
 });

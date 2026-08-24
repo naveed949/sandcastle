@@ -29,6 +29,8 @@ import {
   createWorkerService,
   workerServicePaths,
   type WorkerDiagnostic,
+  type WorkerControlRequest,
+  type WorkerServiceControl,
   type WorkerDiagnostics,
   type WorkerOperationalState,
   type WorkerService,
@@ -130,7 +132,9 @@ export type MissionControlOperationalStateCounts = Readonly<
 /** Versioned, secret-free read model returned by the overview endpoint. */
 export interface MissionControlOverview {
   readonly version: 1;
+  readonly revision: number;
   readonly mode: WorkerServiceMode;
+  readonly pauseRequested: boolean;
   readonly activeAttempt: MissionControlActiveAttempt | null;
   readonly lastCompletedCycle: string | null;
   readonly nextExpectedCycle: string | null;
@@ -155,7 +159,7 @@ export class MissionControlConfigurationError extends Error {
   }
 }
 
-/** Composed production host and its read-only operator surface. */
+/** Composed production host and its overview plus guarded control surface. */
 export interface MissionControlHost {
   readonly paths: WorkerServicePaths;
   readonly source: GitHubTaskSource;
@@ -165,6 +169,7 @@ export interface MissionControlHost {
   readonly publisher: WorkerPublisher;
   readonly diagnostics: WorkerDiagnostics;
   readonly service: WorkerService;
+  readonly control: WorkerServiceControl;
   readonly server: Server;
   listen(): Promise<MissionControlListeningAddress>;
   /** Listen and run the continuous worker until it is stopped. */
@@ -425,6 +430,10 @@ const overviewHtml = `<!doctype html>
       #warnings { color: #fbbf24; }
       #counts { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
       .count { display: flex; justify-content: space-between; gap: 1rem; }
+      .controls { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 0.9rem; }
+      .controls input { flex: 1 1 240px; min-width: 0; padding: 0.55rem 0.7rem; border: 1px solid #4b5563; border-radius: 0.45rem; background: #111827; color: inherit; }
+      .controls button { padding: 0.55rem 0.8rem; border: 1px solid #60a5fa; border-radius: 0.45rem; background: #1d4ed8; color: #eff6ff; cursor: pointer; }
+      .controls button:disabled { cursor: not-allowed; opacity: 0.45; }
       code { color: #bfdbfe; overflow-wrap: anywhere; }
       @media (max-width: 720px) {
         main { padding: 1rem; }
@@ -451,6 +460,18 @@ const overviewHtml = `<!doctype html>
       </section>
       <div class="stack">
         <section class="panel"><h2>Recovery warnings</h2><div id="warnings" class="muted">None</div></section>
+        <section class="panel">
+          <h2>Runtime controls</h2>
+          <p class="muted">Every action is revision-checked and retained in the operator audit.</p>
+          <div class="controls">
+            <input id="reason" aria-label="Operator reason" placeholder="Operator reason" autocomplete="off">
+            <button data-command="run-now">Run cycle now</button>
+            <button data-command="pause">Pause polling</button>
+            <button data-command="resume">Resume polling</button>
+            <button id="cancel" data-command="cancel" disabled>Cancel active execution</button>
+          </div>
+          <p class="muted" id="control-status" aria-live="polite"></p>
+        </section>
         <section class="panel"><h2>Operational state counts</h2><div id="counts" class="grid"></div></section>
       </div>
     </main>
@@ -458,11 +479,16 @@ const overviewHtml = `<!doctype html>
       const labels = { discovered: "Discovered", unauthorized: "Unauthorized", ineligible: "Ineligible", ready: "Ready", claimed: "Claimed", running: "Running", blocked: "Blocked", failed: "Failed", verified: "Verified", published: "Published" };
       const text = (id, value) => { document.getElementById(id).textContent = value; };
       const formatTime = (value) => value ? new Date(value).toLocaleString() : "—";
+      let latestRevision = 0;
+      let activeAttemptId = null;
       async function refresh() {
         try {
           const response = await fetch("/api/v1/overview", { cache: "no-store" });
           if (!response.ok) throw new Error("overview unavailable");
           const overview = await response.json();
+          latestRevision = overview.revision;
+          activeAttemptId = overview.activeAttempt ? overview.activeAttempt.attemptId : null;
+          document.getElementById("cancel").disabled = activeAttemptId === null;
           text("mode", overview.mode);
           text("attempt", overview.activeAttempt ? overview.activeAttempt.attemptId : "None");
           text("last-cycle", formatTime(overview.lastCompletedCycle));
@@ -479,6 +505,22 @@ const overviewHtml = `<!doctype html>
           }));
         } catch { text("updated", "Overview unavailable"); }
       }
+      async function sendCommand(command) {
+        const reasonInput = document.getElementById("reason");
+        const reason = reasonInput.value.trim();
+        if (!reason) { text("control-status", "Enter an operator reason first."); return; }
+        const commandId = command + "-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+        const payload = { command, commandId, expectedRevision: latestRevision, reason };
+        if (command === "cancel") payload.attemptId = activeAttemptId;
+        try {
+          const response = await fetch("/api/v1/commands", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+          const outcome = await response.json();
+          if (typeof outcome.revision === "number") latestRevision = outcome.revision;
+          text("control-status", outcome.code + ": " + outcome.message);
+          void refresh();
+        } catch { text("control-status", "Command unavailable."); }
+      }
+      document.querySelectorAll("[data-command]").forEach((button) => button.addEventListener("click", () => void sendCommand(button.dataset.command)));
       void refresh();
       setInterval(() => void refresh(), 5000);
     </script>
@@ -509,6 +551,71 @@ const writeHtml = (
   response.setHeader("Content-Length", Buffer.byteLength(value));
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.end(value);
+};
+
+const readJsonBody = (
+  request: import("node:http").IncomingMessage,
+): Promise<unknown> =>
+  new Promise((resolve, reject) => {
+    let body = "";
+    let tooLarge = false;
+    request.setEncoding("utf8");
+    request.on("data", (chunk: string) => {
+      if (tooLarge) return;
+      if (Buffer.byteLength(body) + Buffer.byteLength(chunk) > 64 * 1024) {
+        tooLarge = true;
+        return;
+      }
+      body += chunk;
+    });
+    request.on("end", () => {
+      if (tooLarge) {
+        reject(new Error("request_body_too_large"));
+        return;
+      }
+      try {
+        resolve(JSON.parse(body));
+      } catch {
+        reject(new Error("invalid_json"));
+      }
+    });
+    request.on("error", reject);
+  });
+
+const parseControlRequest = (
+  value: unknown,
+): WorkerControlRequest | undefined => {
+  if (!isRecord(value)) return undefined;
+  const command = value.command;
+  if (
+    command !== "run-now" &&
+    command !== "pause" &&
+    command !== "resume" &&
+    command !== "cancel"
+  ) {
+    return undefined;
+  }
+  if (
+    !isNonEmptyString(value.commandId) ||
+    typeof value.expectedRevision !== "number" ||
+    !Number.isInteger(value.expectedRevision) ||
+    value.expectedRevision < 0
+  ) {
+    return undefined;
+  }
+  if (value.reason !== undefined && typeof value.reason !== "string") {
+    return undefined;
+  }
+  if (value.attemptId !== undefined && typeof value.attemptId !== "string") {
+    return undefined;
+  }
+  return {
+    command,
+    commandId: value.commandId,
+    expectedRevision: value.expectedRevision,
+    ...(value.reason === undefined ? {} : { reason: value.reason }),
+    ...(value.attemptId === undefined ? {} : { attemptId: value.attemptId }),
+  };
 };
 
 const closeServer = (server: Server): Promise<void> => {
@@ -605,6 +712,7 @@ export const createMissionControlHost = (
     lockFilePath: paths.serviceLockFilePath,
     discovery: configuration.discovery,
     diagnostics,
+    operatorAuditFilePath: paths.operatorAuditFilePath,
   });
 
   const serverOptions = configuration.server ?? {};
@@ -620,6 +728,49 @@ export const createMissionControlHost = (
           writeJson(response, 503, {
             version: 1,
             error: "overview_unavailable",
+          });
+        }
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/v1/status") {
+        writeJson(response, 200, { version: 1, ...service.status() });
+        return;
+      }
+      if (
+        request.method === "POST" &&
+        (url.pathname === "/api/v1/commands" ||
+          url.pathname === "/api/v1/control")
+      ) {
+        try {
+          const controlRequest = parseControlRequest(
+            await readJsonBody(request),
+          );
+          if (controlRequest === undefined) {
+            writeJson(response, 400, {
+              version: 1,
+              code: "invalid_request",
+              message: "A valid guarded worker command is required.",
+            });
+            return;
+          }
+          const outcome = await service.control.command(controlRequest);
+          const statusCode =
+            outcome.code === "accepted" || outcome.code === "already_applied"
+              ? 200
+              : outcome.code === "command_failed" ||
+                  outcome.code === "service_unhealthy"
+                ? 503
+                : 409;
+          writeJson(response, statusCode, outcome);
+        } catch (error) {
+          writeJson(response, 400, {
+            version: 1,
+            code: "invalid_request",
+            message:
+              error instanceof Error &&
+              error.message === "request_body_too_large"
+                ? "Request body is too large."
+                : "Request body must be valid JSON.",
           });
         }
         return;
@@ -660,7 +811,9 @@ export const createMissionControlHost = (
     const warnings = await recoveryWarnings(state, store);
     return {
       version: 1,
+      revision: serviceStatus.revision,
       mode: serviceStatus.mode,
+      pauseRequested: serviceStatus.pauseRequested,
       activeAttempt: activeAttemptView(state.attempts),
       lastCompletedCycle:
         serviceStatus.lastCompletedCycle ?? lastDiagnostic?.timestamp ?? null,
@@ -743,6 +896,7 @@ export const createMissionControlHost = (
     publisher,
     diagnostics,
     service,
+    control: service.control,
     server,
     listen,
     start,

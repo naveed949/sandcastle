@@ -12,6 +12,7 @@ import {
   createJsonlWorkerDiagnostics,
   workerServicePaths,
   WorkerExecutionTimeoutError,
+  WorkerServiceOperatorCancellationError,
   WorkerServiceLockError,
   type WorkerDiagnostic,
 } from "./WorkerService.js";
@@ -77,6 +78,7 @@ describe("WorkerService", () => {
         recordsRoot: join(directory, "records"),
         repositoriesRoot: join(directory, "repositories"),
         diagnosticsFilePath: join(directory, "diagnostics", "worker.jsonl"),
+        operatorAuditFilePath: join(directory, "operator", "commands.jsonl"),
         serviceLockFilePath: join(directory, "state", "service.lock"),
       });
       expect(
@@ -126,6 +128,49 @@ describe("WorkerService", () => {
       }),
     ).toThrow(/missing profile/i);
     expect(source.discover).not.toHaveBeenCalled();
+  });
+
+  it("replays a retained control outcome and revision after service recreation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "sandcastle-service-"));
+    try {
+      const makeService = () =>
+        createWorkerService({
+          configuration,
+          source: { discover: vi.fn(async () => []), read: vi.fn() },
+          store: createWorkerStateStore({
+            filePath: join(directory, "state.json"),
+          }),
+          execution: {} as never,
+          publisher: {} as never,
+          owner: "worker-1",
+          lockFilePath: join(directory, "state", "service.lock"),
+          operatorAuditFilePath: join(directory, "operator", "commands.jsonl"),
+          pollIntervalMs: 1_000,
+          leaseDurationMs: 60_000,
+        });
+
+      const first = makeService();
+      const outcome = await first.control.command({
+        command: "pause",
+        commandId: "persisted-pause",
+        expectedRevision: 0,
+        reason: "restart verification",
+      });
+      await first.stop();
+
+      const second = makeService();
+      expect(second.status().revision).toBe(1);
+      await expect(
+        second.control.command({
+          command: "pause",
+          commandId: "persisted-pause",
+          expectedRevision: 999,
+        }),
+      ).resolves.toEqual(outcome);
+      await second.stop();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("claims, executes, verifies, and publishes at most one ready task per cycle", async () => {
@@ -278,6 +323,215 @@ describe("WorkerService", () => {
         { events: [], attempted: false },
       ]);
       expect(source.discover).toHaveBeenCalledOnce();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("coalesces guarded run-now commands onto the existing cycle", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "sandcastle-service-"));
+    try {
+      const store = createWorkerStateStore({
+        filePath: join(directory, "state.json"),
+      });
+      let releaseDiscovery!: () => void;
+      const discoveryBlocked = new Promise<void>((resolve) => {
+        releaseDiscovery = resolve;
+      });
+      const source = {
+        discover: vi.fn(async () => {
+          await discoveryBlocked;
+          return [];
+        }),
+        read: vi.fn(),
+      };
+      const service = createWorkerService({
+        configuration,
+        source,
+        store,
+        execution: {} as never,
+        publisher: {} as never,
+        owner: "worker-1",
+        lockFilePath: join(directory, "service.lock"),
+        pollIntervalMs: 1_000,
+        leaseDurationMs: 60_000,
+      });
+
+      const first = service.control.command({
+        command: "run-now",
+        commandId: "cycle-1",
+        expectedRevision: 0,
+        reason: "operator requested an immediate cycle",
+      });
+      await vi.waitFor(() => expect(source.discover).toHaveBeenCalledOnce());
+
+      const second = service.control.command({
+        command: "run-now",
+        commandId: "cycle-2",
+        expectedRevision: service.status().revision,
+        reason: "operator repeated the immediate cycle request",
+      });
+      releaseDiscovery();
+
+      await expect(Promise.all([first, second])).resolves.toMatchObject([
+        { code: "accepted" },
+        { code: "accepted" },
+      ]);
+      expect(source.discover).toHaveBeenCalledOnce();
+      expect(service.status().revision).toBe(2);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("pauses at a cycle boundary and resumes the same polling service", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "sandcastle-service-"));
+    try {
+      const store = createWorkerStateStore({
+        filePath: join(directory, "state.json"),
+      });
+      const source = {
+        discover: vi.fn(async () => []),
+        read: vi.fn(),
+      };
+      const service = createWorkerService({
+        configuration,
+        source,
+        store,
+        execution: {} as never,
+        publisher: {} as never,
+        owner: "worker-1",
+        lockFilePath: join(directory, "service.lock"),
+        pollIntervalMs: 60_000,
+        leaseDurationMs: 60_000,
+      });
+      const running = service.start();
+      await vi.waitFor(() => expect(source.discover).toHaveBeenCalledOnce());
+
+      await expect(
+        service.control.command({
+          command: "pause",
+          commandId: "pause-1",
+          expectedRevision: 0,
+          reason: "maintenance window",
+        }),
+      ).resolves.toMatchObject({ code: "accepted", revision: 1 });
+      await vi.waitFor(() => expect(service.status().mode).toBe("paused"));
+      expect(source.discover).toHaveBeenCalledOnce();
+
+      await expect(
+        service.control.command({
+          command: "resume",
+          commandId: "resume-1",
+          expectedRevision: 1,
+          reason: "maintenance completed",
+        }),
+      ).resolves.toMatchObject({ code: "accepted", revision: 2 });
+      await vi.waitFor(() => expect(source.discover).toHaveBeenCalledTimes(2));
+      expect(service.status().mode).toBe("running");
+
+      await service.stop();
+      await running;
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("cancels the active execution through its abort signal and retains the outcome", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "sandcastle-service-"));
+    try {
+      const store = createWorkerStateStore({
+        filePath: join(directory, "state.json"),
+      });
+      let observedSignal!: AbortSignal;
+      let observedAttemptId!: string;
+      const execution = {
+        execute: vi.fn(async (attempt, options) => {
+          observedAttemptId = attempt.attemptId;
+          observedSignal = options?.signal as AbortSignal;
+          await store.markAttemptStarted(attempt.attemptId);
+          await new Promise<void>((resolve) => {
+            if (observedSignal.aborted) {
+              resolve();
+              return;
+            }
+            observedSignal.addEventListener("abort", () => resolve(), {
+              once: true,
+            });
+          });
+          await store.transitionAttempt(attempt.attemptId, {
+            status: "interrupted",
+            evidence: ["operator://cancelled"],
+          });
+          return {
+            attemptId: attempt.attemptId,
+            taskId: attempt.request.taskId,
+            executionIdentity: attempt.executionIdentity,
+            baseCommit: attempt.request.task.baseCommit,
+            profileId: attempt.request.profileId,
+            profileDigest: attempt.request.profileDigest,
+            promptVersion: attempt.request.promptVersion,
+            promptTemplateDigest: attempt.request.promptTemplateDigest,
+            repository: attempt.request.task.repository,
+            status: "interrupted" as const,
+            failurePhase: "execution" as const,
+            error: "operator cancelled execution",
+            repositoryCredentialNames: [],
+            commits: [],
+            setup: [],
+            verification: [],
+            published: false as const,
+            recordPath: join(directory, "record.json"),
+          };
+        }),
+      };
+      const service = createWorkerService({
+        configuration,
+        source: {
+          discover: async () => [task],
+          read: async () => ({ task, relatedTasks: [] }),
+        },
+        store,
+        execution,
+        publisher: {} as never,
+        owner: "worker-1",
+        lockFilePath: join(directory, "service.lock"),
+        operatorAuditFilePath: join(directory, "operator", "commands.jsonl"),
+        pollIntervalMs: 1_000,
+        leaseDurationMs: 60_000,
+      });
+
+      const cycle = service.runCycle();
+      await vi.waitFor(() => expect(execution.execute).toHaveBeenCalledOnce());
+      await vi.waitFor(() =>
+        expect(service.status().activeAttemptId).toBe(observedAttemptId),
+      );
+
+      await expect(
+        service.control.command({
+          command: "cancel",
+          commandId: "cancel-1",
+          expectedRevision: 0,
+          attemptId: observedAttemptId,
+          reason: "GITHUB_TOKEN=do-not-retain",
+        }),
+      ).resolves.toMatchObject({
+        code: "accepted",
+        revision: 1,
+        attemptId: observedAttemptId,
+      });
+      expect(observedSignal.reason).toBeInstanceOf(
+        WorkerServiceOperatorCancellationError,
+      );
+      await cycle;
+
+      expect((await store.read()).attempts[0]?.status).toBe("interrupted");
+      const audit = await readFile(
+        join(directory, "operator", "commands.jsonl"),
+        "utf8",
+      );
+      expect(audit).not.toContain("GITHUB_TOKEN=do-not-retain");
+      expect(audit).toContain("Protected worker material redacted.");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

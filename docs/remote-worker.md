@@ -16,6 +16,7 @@ with `workerServicePaths()`:
   state/worker.json
   state/service.lock
   diagnostics/worker.jsonl
+  operator/commands.jsonl
   records/
   repositories/<owner>/<repository>/
 ```
@@ -62,13 +63,28 @@ that token in `WorkerConfiguration`, `agentRunOptions`, command profiles, or
 the browser-visible overview. The host binds to `127.0.0.1` by default; set
 `server.bindAddress` explicitly only for an operator-controlled private ingress.
 
-The host serves a responsive overview at `GET /api/v1/overview`. Its version 1
-read model contains only the worker mode, active attempt identity, last
-completed cycle, next expected cycle, recovery warnings, and counts for the
-diagnostic operational states. It rebuilds counts from the durable worker state
-and append-only diagnostics, so it is disposable and cannot become a second
-source of scheduling authority. All other `/api/` routes are read-only and do
-not accept commands.
+The host serves a responsive overview at `GET /api/v1/overview` and a compact
+status response at `GET /api/v1/status`. Both expose the worker's current mode,
+monotonic command revision, and pause state; the overview also includes the
+active attempt, cycle timing, recovery warnings, and counts for the diagnostic
+operational states. It rebuilds counts from the durable worker state and
+append-only diagnostics, so it is disposable and cannot become a second source
+of scheduling authority.
+
+The guarded command endpoint is `POST /api/v1/commands` (the compatibility path
+`/api/v1/control` has the same fixed allowlist). Its JSON body must contain
+`commandId`, `expectedRevision`, `command` (`run-now`, `pause`, `resume`, or
+`cancel`), and a non-empty operator `reason`; cancellation additionally
+requires `attemptId`. Requests are revision-checked and idempotent. A stale
+revision returns `stale_revision` without changing worker state, while a
+repeated command ID returns the retained outcome without repeating its side
+effect. Pause only takes effect after the current polling cycle reaches a safe
+boundary and never aborts an active agent invocation. Resume reuses the
+existing service lock and polling loop. Cancellation delegates to the
+execution abort signal, so the normal attempt evidence and interrupted outcome
+are retained. Requests and outcomes are retained in append-only,
+secret-redacted `operator/commands.jsonl`; the audit is not a generic state
+transition or shell-command interface.
 
 For a standalone worker without the HTTP surface, compose the lower-level
 boundaries directly as shown below. Use the same `workspaceRoot` for

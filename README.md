@@ -491,7 +491,7 @@ systemd deployment, backup, upgrade, and failure inspection guidance.
 ### Mission Control production host
 
 `createMissionControlHost()` is the production composition root for the worker
-and its read-only operator overview. It constructs the GitHub source, durable
+and its operator overview plus guarded runtime controls. It constructs the GitHub source, durable
 state store, repository manager, execution engine, draft publisher, diagnostics,
 and `WorkerService` from one central configuration. The same durable root also
 supplies the kernel-owned service lock, so the HTTP surface cannot start a
@@ -532,8 +532,36 @@ await host.start();
 
 Configuration is validated before the host constructs a ready HTTP server or
 allows discovery, checkout, agent invocation, or publication. The versioned
-read-only endpoint is `GET /api/v1/overview`; it returns worker mode, active
-attempt, cycle timing, recovery warnings, and current operational-state counts.
+read-only endpoints are `GET /api/v1/overview` and `GET /api/v1/status`; they
+return worker mode, the monotonic command revision, active attempt, cycle
+timing, recovery warnings, and current operational-state counts. Runtime
+controls use `POST /api/v1/commands` with one of `run-now`, `pause`, `resume`,
+or `cancel`:
+
+```typescript
+const status = await fetch("http://127.0.0.1:3000/api/v1/status").then(
+  (response) => response.json(),
+);
+
+await fetch("http://127.0.0.1:3000/api/v1/commands", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({
+    command: "pause",
+    commandId: "maintenance-2026-08-24",
+    expectedRevision: status.revision,
+    reason: "maintenance window",
+  }),
+});
+```
+
+Every command has an idempotency key, expected revision, and operator reason.
+Cancellation also requires the active attempt ID. Stale revisions are rejected
+without worker mutation; duplicate command IDs return their retained outcome.
+Pause stops new polling at a cycle boundary while allowing an active agent
+invocation to finish, and resume reuses the existing single polling loop. The
+request and outcome records are append-only JSONL under the durable
+`operator/commands.jsonl` path and redact protected worker material.
 The bundled overview polls that endpoint and adapts from desktop to tablet
 widths. It does not expose task bodies, central configuration, credentials, or
 arbitrary filesystem content. Set `server.bindAddress` explicitly only when an
