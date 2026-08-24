@@ -15,6 +15,7 @@ with `workerServicePaths()`:
 /srv/sandcastle-worker/
   state/worker.json
   state/service.lock
+  policy/worker.json
   diagnostics/worker.jsonl
   operator/commands.jsonl
   records/
@@ -115,6 +116,18 @@ editing attempts, outcomes, evidence, leases, branches, records, or task state.
 Recovery rejections expose stable reason codes. Requests and outcomes are
 retained in append-only, secret-redacted `operator/commands.jsonl`; the audit
 is not a generic state-transition or shell-command interface.
+
+Staged policy administration uses `GET /api/v1/policy` for the safe current
+projection, followed by `POST /api/v1/policy/validate` and
+`POST /api/v1/policy/preview`. The preview contains a deterministic semantic
+diff and redacted dry-run impact; it does not return task bodies, comments,
+prompt contents, or credentials. `POST /api/v1/policy/apply` requires the
+preview ID, command ID, expected worker revision, proposed policy, and an
+operator reason. The default `policy/worker.json` is written atomically, and
+preview/request/outcome records are appended to the operator audit. Invalid,
+stale, and unpreviewed changes fail closed. Exact-task grants remain scoped to
+their repository, kind, and number; discovered task content never becomes
+authorization policy.
 
 For a standalone worker without the HTTP surface, compose the lower-level
 boundaries directly as shown below. Use the same `workspaceRoot` for

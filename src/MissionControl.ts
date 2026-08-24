@@ -1,6 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
+import { join } from "node:path";
 import {
   createGitHubTaskSource,
   type GitHubTaskDiscoveryInput,
@@ -63,8 +64,16 @@ import {
   type MissionControlTaskView,
 } from "./MissionControlReadModel.js";
 import { containsProtectedWorkerMaterial } from "./WorkerIsolationPolicy.js";
-
 export { createMissionControlReadModel } from "./MissionControlReadModel.js";
+import {
+  createMissionControlPolicyAdministration,
+  MissionControlPolicyError,
+  readMissionControlPolicyConfiguration,
+  type MissionControlPolicyAdministration,
+  type MissionControlPolicyApplyOutcomeCode,
+  type MissionControlPolicyValidation,
+  type MissionControlPolicyPreview,
+} from "./MissionControlPolicy.js";
 
 /** HTTP bind and listen settings for the Mission Control operator surface. */
 export interface MissionControlServerOptions {
@@ -98,6 +107,10 @@ export interface MissionControlConfiguration {
   readonly discovery?: Omit<GitHubTaskDiscoveryInput, "configuration">;
   /** Operator HTTP settings. */
   readonly server?: MissionControlServerOptions;
+  /** Optional server-owned policy file; defaults under the durable root. */
+  readonly policyFilePath?: string;
+  /** Optional append-only policy audit; defaults to operator/commands.jsonl. */
+  readonly policyAuditFilePath?: string;
 }
 
 /** Injectable boundaries used by integration tests and alternate deployments. */
@@ -213,6 +226,9 @@ export interface MissionControlHost {
   readonly service: WorkerService;
   readonly control: WorkerServiceControl;
   readonly readModel: MissionControlReadModel;
+  readonly policy: MissionControlPolicyAdministration;
+  readonly policyFilePath: string;
+  readonly policyAuditFilePath: string;
   readonly server: Server;
   listen(): Promise<MissionControlListeningAddress>;
   /** Listen and run the continuous worker until it is stopped. */
@@ -886,6 +902,23 @@ const controlOutcomeStatusCode = (code: WorkerControlOutcomeCode): number => {
   }
 };
 
+const policyOutcomeStatusCode = (
+  code: MissionControlPolicyApplyOutcomeCode,
+): number => {
+  switch (code) {
+    case "accepted":
+    case "already_applied":
+      return 200;
+    case "command_failed":
+      return 503;
+    case "invalid_request":
+    case "invalid_policy":
+      return 422;
+    default:
+      return 409;
+  }
+};
+
 const closeServer = (server: Server): Promise<void> => {
   if (!server.listening) return Promise.resolve();
   return new Promise((resolve, reject) => {
@@ -923,6 +956,24 @@ export const createMissionControlHost = (
   }
 
   const paths = workerServicePaths(configuration.workspaceRoot);
+  const policyFilePath =
+    configuration.policyFilePath ??
+    join(paths.workspaceRoot, "policy", "worker.json");
+  const policyAuditFilePath =
+    configuration.policyAuditFilePath ?? paths.operatorAuditFilePath;
+  let activeWorkerConfiguration: WorkerConfiguration;
+  try {
+    activeWorkerConfiguration = readMissionControlPolicyConfiguration(
+      policyFilePath,
+      configuration.worker,
+    );
+  } catch (error) {
+    throw new MissionControlConfigurationError([
+      error instanceof MissionControlPolicyError
+        ? error.message
+        : "The server-owned policy configuration could not be loaded.",
+    ]);
+  }
   const source =
     boundaries.source ?? createGitHubTaskSource(configuration.github ?? {});
   const store = createWorkerStateStore({ filePath: paths.stateFilePath });
@@ -941,7 +992,8 @@ export const createMissionControlHost = (
   const execution =
     boundaries.execution ??
     createWorkerExecutionEngine({
-      configuration: configuration.worker,
+      configuration: activeWorkerConfiguration,
+      configurationProvider: () => activeWorkerConfiguration,
       repositoryManager,
       store,
       recordsRoot: paths.recordsRoot,
@@ -949,7 +1001,8 @@ export const createMissionControlHost = (
   const publisher =
     boundaries.publisher ??
     createWorkerPublisher({
-      configuration: configuration.worker,
+      configuration: activeWorkerConfiguration,
+      configurationProvider: () => activeWorkerConfiguration,
       workspaceRoot: paths.workspaceRoot,
       store,
       operations:
@@ -1019,7 +1072,11 @@ export const createMissionControlHost = (
   };
   const diagnostics: WorkerDiagnostics = { emit: emitDiagnostic };
   const service = createWorkerService({
-    configuration: configuration.worker,
+    configuration: activeWorkerConfiguration,
+    configurationProvider: () => activeWorkerConfiguration,
+    onConfigurationApplied: (nextConfiguration) => {
+      activeWorkerConfiguration = nextConfiguration;
+    },
     source,
     store,
     execution,
@@ -1032,6 +1089,39 @@ export const createMissionControlHost = (
     discovery: configuration.discovery,
     diagnostics,
     operatorAuditFilePath: paths.operatorAuditFilePath,
+    additionalOperatorAuditFilePaths:
+      policyAuditFilePath === paths.operatorAuditFilePath
+        ? undefined
+        : [policyAuditFilePath],
+  });
+
+  const policy = createMissionControlPolicyAdministration({
+    configuration: () => activeWorkerConfiguration,
+    policyFilePath,
+    auditFilePath: policyAuditFilePath,
+    getWorkerRevision: () => service.status().revision,
+    readTasks: async () => {
+      const state = await store.read();
+      const latest = new Map<
+        string,
+        {
+          readonly discoveredAt: string;
+          readonly task: (typeof state.taskSnapshots)[number]["task"];
+        }
+      >();
+      for (const snapshot of state.taskSnapshots) {
+        const existing = latest.get(snapshot.taskId);
+        if (
+          existing === undefined ||
+          snapshot.discoveredAt >= existing.discoveredAt
+        ) {
+          latest.set(snapshot.taskId, snapshot);
+        }
+      }
+      return [...latest.values()].map((snapshot) => snapshot.task);
+    },
+    updateWorkerConfiguration: (request) =>
+      service.updateConfiguration(request),
   });
   const readModel = createMissionControlReadModel({
     configuration: configuration.worker,
@@ -1047,6 +1137,78 @@ export const createMissionControlHost = (
   const server = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? "/", "http://mission-control.invalid");
+      if (request.method === "GET" && url.pathname === "/api/v1/policy") {
+        try {
+          writeJson(response, 200, await host.policy.inspect());
+        } catch {
+          writeJson(response, 503, {
+            version: 1,
+            code: "policy_unavailable",
+            message: "The current policy is unavailable.",
+          });
+        }
+        return;
+      }
+      if (
+        request.method === "POST" &&
+        url.pathname === "/api/v1/policy/validate"
+      ) {
+        try {
+          const validation: MissionControlPolicyValidation =
+            host.policy.validate(await readJsonBody(request));
+          writeJson(response, validation.valid ? 200 : 422, validation);
+        } catch {
+          writeJson(response, 422, {
+            version: 1,
+            valid: false,
+            code: "invalid_policy",
+            issues: ["Policy configuration could not be parsed."],
+          });
+        }
+        return;
+      }
+      if (
+        request.method === "POST" &&
+        url.pathname === "/api/v1/policy/preview"
+      ) {
+        try {
+          const preview: MissionControlPolicyPreview =
+            await host.policy.preview(await readJsonBody(request));
+          writeJson(response, 200, preview);
+        } catch (error) {
+          if (error instanceof MissionControlPolicyError) {
+            writeJson(response, 422, {
+              version: 1,
+              valid: false,
+              code: error.code,
+              issues: error.issues.length > 0 ? error.issues : [error.message],
+            });
+          } else {
+            writeJson(response, 503, {
+              version: 1,
+              code: "policy_preview_unavailable",
+              message: "Policy preview is unavailable.",
+            });
+          }
+        }
+        return;
+      }
+      if (
+        request.method === "POST" &&
+        url.pathname === "/api/v1/policy/apply"
+      ) {
+        try {
+          const outcome = await host.policy.apply(await readJsonBody(request));
+          writeJson(response, policyOutcomeStatusCode(outcome.code), outcome);
+        } catch {
+          writeJson(response, 422, {
+            version: 1,
+            code: "invalid_request",
+            message: "Policy apply request must be valid JSON.",
+          });
+        }
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/api/v1/overview") {
         try {
           writeJson(response, 200, await host.getOverview());
@@ -1450,6 +1612,9 @@ export const createMissionControlHost = (
     service,
     control: service.control,
     readModel,
+    policy,
+    policyFilePath,
+    policyAuditFilePath,
     server,
     listen,
     start,

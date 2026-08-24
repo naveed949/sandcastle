@@ -84,6 +84,8 @@ export interface WorkerExecutionResult {
 export interface WorkerExecutionEngineOptions {
   /** Current central authorization and execution policy. */
   readonly configuration: WorkerConfiguration;
+  /** Return the active policy after a staged Mission Control apply. */
+  readonly configurationProvider?: () => WorkerConfiguration;
   /** Repository preparation boundary. */
   readonly repositoryManager: WorkerRepositoryManager;
   /** Durable attempt lifecycle boundary. */
@@ -219,7 +221,8 @@ export const createWorkerExecutionEngine = (
       try {
         try {
           prepared = await options.repositoryManager.prepare({
-            configuration: options.configuration,
+            configuration:
+              options.configurationProvider?.() ?? options.configuration,
             request,
             relatedTasks: startedAttempt.claim?.refreshedSnapshots,
           });

@@ -293,6 +293,28 @@ export interface WorkerService {
   status(): WorkerServiceStatus;
   /** Execute only the fixed, revision-checked operator command set. */
   readonly control: WorkerServiceControl;
+  /**
+   * Replace central policy only after an atomic persistence callback succeeds.
+   * The same revision gate used by runtime controls protects this update.
+   */
+  updateConfiguration(
+    request: WorkerConfigurationUpdateRequest,
+  ): Promise<WorkerConfigurationUpdateOutcome>;
+}
+
+/** A guarded active-policy update requested by a server-owned administrator. */
+export interface WorkerConfigurationUpdateRequest {
+  readonly expectedRevision: number;
+  readonly configuration: WorkerConfiguration;
+  /** Persist the proposed configuration atomically before it becomes active. */
+  readonly persist: () => Promise<void>;
+}
+
+/** Stable result from the guarded active-policy update seam. */
+export interface WorkerConfigurationUpdateOutcome {
+  readonly code: "accepted" | "stale_revision" | "command_failed";
+  readonly revision: number;
+  readonly message: string;
 }
 
 /** Central configuration and injected boundaries for one remote worker. */
@@ -323,6 +345,14 @@ export interface WorkerServiceOptions {
   readonly diagnostics?: WorkerDiagnostics;
   /** Append-only operator command audit path. */
   readonly operatorAuditFilePath?: string;
+  /** Additional append-only audit paths that contribute revision history. */
+  readonly additionalOperatorAuditFilePaths?: readonly string[];
+  /** Return the currently active policy after a staged policy apply. */
+  readonly configurationProvider?: () => WorkerConfiguration;
+  /** Update the host-owned policy holder after durable persistence succeeds. */
+  readonly onConfigurationApplied?: (
+    configuration: WorkerConfiguration,
+  ) => void;
 }
 
 /** Raised when another live service process owns the persistent worker lock. */
@@ -593,59 +623,61 @@ interface LoadedControlAudit {
   readonly outcomes: ReadonlyMap<string, WorkerControlOutcome>;
 }
 
-const loadControlAudit = (filePath: string): LoadedControlAudit => {
-  let content: string;
-  try {
-    content = readFileSync(filePath, "utf8");
-  } catch (error) {
-    if (isRecord(error) && error.code === "ENOENT") {
-      return { revision: 0, outcomes: new Map() };
-    }
-    throw error;
-  }
-
+const loadControlAudit = (
+  filePath: string,
+  additionalFilePaths: readonly string[] = [],
+): LoadedControlAudit => {
   let revision = 0;
   const outcomes = new Map<string, WorkerControlOutcome>();
-  for (const line of content.split(/\r?\n/)) {
-    if (line.trim() === "") continue;
-    let value: unknown;
+  for (const auditPath of [filePath, ...additionalFilePaths]) {
+    let content: string;
     try {
-      value = JSON.parse(line);
-    } catch {
-      continue;
+      content = readFileSync(auditPath, "utf8");
+    } catch (error) {
+      if (isRecord(error) && error.code === "ENOENT") continue;
+      throw error;
     }
-    if (!isRecord(value) || value.version !== 1) continue;
-    if (
-      typeof value.revision === "number" &&
-      Number.isInteger(value.revision)
-    ) {
-      revision = Math.max(revision, value.revision);
+    for (const line of content.split(/\r?\n/)) {
+      if (line.trim() === "") continue;
+      let value: unknown;
+      try {
+        value = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!isRecord(value) || value.version !== 1) continue;
+      if (
+        typeof value.revision === "number" &&
+        Number.isInteger(value.revision)
+      ) {
+        revision = Math.max(revision, value.revision);
+      }
+      if (
+        value.kind !== "outcome" ||
+        typeof value.commandId !== "string" ||
+        !isWorkerControlCommand(value.command) ||
+        !isWorkerControlOutcomeCode(value.code) ||
+        typeof value.revision !== "number" ||
+        !Number.isInteger(value.revision) ||
+        typeof value.message !== "string"
+      ) {
+        continue;
+      }
+      outcomes.set(value.commandId, {
+        version: 1,
+        commandId: value.commandId,
+        command: value.command,
+        code: value.code,
+        revision: value.revision,
+        message: redactedOperatorText(value.message),
+        ...(typeof value.attemptId === "string"
+          ? { attemptId: value.attemptId }
+          : {}),
+        ...(isWorkerRecoveryReasonCode(value.reasonCode)
+          ? { reasonCode: value.reasonCode }
+          : {}),
+      });
     }
-    if (
-      value.kind !== "outcome" ||
-      typeof value.commandId !== "string" ||
-      !isWorkerControlCommand(value.command) ||
-      !isWorkerControlOutcomeCode(value.code) ||
-      typeof value.revision !== "number" ||
-      !Number.isInteger(value.revision) ||
-      typeof value.message !== "string"
-    ) {
-      continue;
-    }
-    outcomes.set(value.commandId, {
-      version: 1,
-      commandId: value.commandId,
-      command: value.command,
-      code: value.code,
-      revision: value.revision,
-      message: redactedOperatorText(value.message),
-      ...(typeof value.attemptId === "string"
-        ? { attemptId: value.attemptId }
-        : {}),
-      ...(isWorkerRecoveryReasonCode(value.reasonCode)
-        ? { reasonCode: value.reasonCode }
-        : {}),
-    });
   }
   return { revision, outcomes };
 };
@@ -689,7 +721,14 @@ export const createWorkerService = (
   if (operatorAuditFilePath.trim() === "") {
     throw new Error("operatorAuditFilePath must be non-empty.");
   }
-  const loadedAudit = loadControlAudit(operatorAuditFilePath);
+  const loadedAudit = loadControlAudit(
+    operatorAuditFilePath,
+    options.additionalOperatorAuditFilePaths,
+  );
+
+  let activeConfiguration = options.configuration;
+  const currentConfiguration = (): WorkerConfiguration =>
+    options.configurationProvider?.() ?? activeConfiguration;
 
   const now = (): string => new Date().toISOString();
   const diagnostics = options.diagnostics ?? { emit: async () => undefined };
@@ -966,6 +1005,9 @@ export const createWorkerService = (
   };
 
   const performCycle = async (): Promise<WorkerCycleResult> => {
+    // A cycle observes one policy snapshot. A staged policy apply can therefore
+    // only affect the next cycle, never half of an in-flight decision set.
+    const configuration = currentConfiguration();
     const events: WorkerDiagnostic[] = [];
     const emit = async (
       event: Omit<WorkerDiagnostic, "timestamp">,
@@ -1023,7 +1065,7 @@ export const createWorkerService = (
           ? await claimWorkerTask({
               source: options.source,
               store: options.store,
-              configuration: options.configuration,
+              configuration,
               request: activeAttempt.request,
               owner: options.owner,
               leaseDurationMs: options.leaseDurationMs,
@@ -1044,10 +1086,10 @@ export const createWorkerService = (
 
     const tasks = await options.source.discover({
       ...options.discovery,
-      configuration: options.configuration,
+      configuration,
     });
     const dryRun = runWorkerDryRun({
-      configuration: options.configuration,
+      configuration,
       tasks,
     });
     await options.store.recordDiscovery(dryRun, { discoveredAt: now() });
@@ -1099,7 +1141,7 @@ export const createWorkerService = (
       attempt = await claimWorkerTask({
         source: options.source,
         store: options.store,
-        configuration: options.configuration,
+        configuration,
         request,
         owner: options.owner,
         leaseDurationMs: options.leaseDurationMs,
@@ -1569,9 +1611,10 @@ export const createWorkerService = (
         readonly prepared: AcceptedControl;
       };
   let controlGate = Promise.resolve();
-  const reserveControl = async (
-    request: WorkerControlRequest,
-  ): Promise<ControlReservation> => {
+
+  const withControlGate = async <T>(
+    operation: () => Promise<T>,
+  ): Promise<T> => {
     let release!: () => void;
     const previous = controlGate;
     controlGate = new Promise<void>((resolveRelease) => {
@@ -1579,6 +1622,16 @@ export const createWorkerService = (
     });
     await previous;
     try {
+      return await operation();
+    } finally {
+      release();
+    }
+  };
+
+  const reserveControl = async (
+    request: WorkerControlRequest,
+  ): Promise<ControlReservation> =>
+    withControlGate(async () => {
       if (request.expectedRevision !== revision) {
         return {
           outcome: {
@@ -1634,10 +1687,7 @@ export const createWorkerService = (
       }
       revision += 1;
       return { revision, prepared };
-    } finally {
-      release();
-    }
-  };
+    });
 
   const finishControl = async (
     request: WorkerControlRequest,
@@ -1768,6 +1818,55 @@ export const createWorkerService = (
     }
   };
 
+  const updateConfiguration = async (
+    request: WorkerConfigurationUpdateRequest,
+  ): Promise<WorkerConfigurationUpdateOutcome> =>
+    withControlGate(async () => {
+      if (
+        !Number.isInteger(request.expectedRevision) ||
+        request.expectedRevision < 0 ||
+        request.expectedRevision !== revision
+      ) {
+        return {
+          code: "stale_revision",
+          revision,
+          message: "Expected worker revision is stale; no policy was applied.",
+        };
+      }
+      try {
+        runWorkerDryRun({ configuration: request.configuration, tasks: [] });
+      } catch (error) {
+        return {
+          code: "command_failed",
+          revision,
+          message: redactedOperatorText(
+            error instanceof Error
+              ? error.message
+              : "The proposed worker policy is invalid.",
+          ),
+        };
+      }
+      try {
+        await request.persist();
+      } catch (error) {
+        return {
+          code: "command_failed",
+          revision,
+          message: `Policy persistence failed: ${redactedOperatorText(
+            error instanceof Error ? error.message : String(error),
+          )}`,
+        };
+      }
+      activeConfiguration = request.configuration;
+      options.onConfigurationApplied?.(request.configuration);
+      revision += 1;
+      return {
+        code: "accepted",
+        revision,
+        message: "Policy persisted and activated.",
+      };
+    });
+
   const inFlightCommands = new Map<
     string,
     {
@@ -1836,5 +1935,12 @@ export const createWorkerService = (
     recover: (request) => command({ ...request, command: "recover" }),
   };
 
-  return { runCycle, start, stop, status, control };
+  return {
+    runCycle,
+    start,
+    stop,
+    status,
+    control,
+    updateConfiguration,
+  };
 };
