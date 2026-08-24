@@ -1,10 +1,13 @@
 # ISSUES
 
-Here are the open issues in the repo:
+`$GH_REPO` is the authoritative issue tracker. Do not query or modify issues in
+any other repository, including `upstream`.
+
+Here are the open issues in `$GH_REPO`:
 
 <issues-json>
 
-!`gh issue list --state open --label ready-for-agent --limit 100 --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'`
+!`gh issue list --repo "$GH_REPO" --state open --label ready-for-agent --limit 100 --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'`
 
 </issues-json>
 

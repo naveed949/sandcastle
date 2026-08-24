@@ -4,6 +4,9 @@ Merge the following branches into the current branch:
 
 {{BRANCHES}}
 
+`$GH_REPO` is the authoritative issue tracker. Close issues only in this
+repository; never query or modify issues in `upstream` or another repository.
+
 For each branch:
 
 1. Run `git merge <branch> --no-edit`

@@ -3,21 +3,28 @@ import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 
 const MAX_ITERATIONS = 10;
 const MAX_PARALLEL = 4;
+const ISSUE_REPOSITORY = "naveed949/sandcastle";
+
+const createDockerSandbox = () =>
+  docker({
+    env: { GH_REPO: ISSUE_REPOSITORY },
+    mounts: [
+      {
+        hostPath: `${process.env.HOME}/.codex/auth.json`,
+        sandboxPath: "/home/agent/.codex/auth.json",
+        readonly: true,
+      },
+    ],
+  });
 
 for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   console.log(`\n=== Iteration ${iteration}/${MAX_ITERATIONS} ===\n`);
 
   // Phase 1: Plan — orchestrator agent analyzes issues and picks parallelizable work
   const plan = await sandcastle.run({
-    sandbox: docker({
-  mounts: [{
-    hostPath: `${process.env.HOME}/.codex/auth.json`,
-    sandboxPath: "/home/agent/.codex/auth.json",
-    readonly: true,
-  }],
-}),
+    sandbox: createDockerSandbox(),
     name: "Planner",
-    agent: sandcastle.codex("gpt-5.6-terra", {effort: "medium",}),
+    agent: sandcastle.codex("gpt-5.6-terra", { effort: "medium" }),
     promptFile: "./.sandcastle/plan-prompt.md",
   });
 
@@ -65,13 +72,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
       await acquire();
       try {
         await using sandbox = await sandcastle.createSandbox({
-          sandbox: docker({
-  mounts: [{
-    hostPath: `${process.env.HOME}/.codex/auth.json`,
-    sandboxPath: "/home/agent/.codex/auth.json",
-    readonly: true,
-  }],
-}),
+          sandbox: createDockerSandbox(),
           branch: issue.branch,
           copyToWorktree: ["node_modules"],
           hooks: {
@@ -83,10 +84,10 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
 
         const result = await sandbox.run({
           name: "Implementer #" + issue.number,
-          agent: sandcastle.codex("gpt-5.6-luna", {effort: "max",}),
+          agent: sandcastle.codex("gpt-5.6-luna", { effort: "max" }),
           promptFile: "./.sandcastle/implement-prompt.md",
           promptArgs: {
-            TASK_ID: String(issue.number),
+            ISSUE_NUMBER: String(issue.number),
             ISSUE_TITLE: issue.title,
             BRANCH: issue.branch,
           },
@@ -95,10 +96,10 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
         if (result.commits.length > 0) {
           await sandbox.run({
             name: "Reviewer #" + issue.number,
-            agent: sandcastle.codex("gpt-5.6-sol", {effort: "medium",}),
+            agent: sandcastle.codex("gpt-5.6-sol", { effort: "medium" }),
             promptFile: "./.sandcastle/review-prompt.md",
             promptArgs: {
-              TASK_ID: String(issue.number),
+              ISSUE_NUMBER: String(issue.number),
               ISSUE_TITLE: issue.title,
               BRANCH: issue.branch,
             },
@@ -152,13 +153,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
 
   // Phase 3: Merge — one agent merges all branches together
   await sandcastle.run({
-    sandbox: docker({
-  mounts: [{
-    hostPath: `${process.env.HOME}/.codex/auth.json`,
-    sandboxPath: "/home/agent/.codex/auth.json",
-    readonly: true,
-  }],
-}),
+    sandbox: createDockerSandbox(),
     name: "Merger",
     maxIterations: 10,
     agent: sandcastle.codex("gpt-5.6-terra"),

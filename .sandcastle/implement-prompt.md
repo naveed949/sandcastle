@@ -2,7 +2,11 @@
 
 Fix issue #{{ISSUE_NUMBER}}: {{ISSUE_TITLE}}
 
-Pull in the issue using `gh issue view`, with comments. If it has a parent PRD, pull that in too.
+`$GH_REPO` is the authoritative issue tracker. Never query or modify issues in
+any other repository, including `upstream`.
+
+Pull in the issue using `gh issue view {{ISSUE_NUMBER}} --repo "$GH_REPO" --comments`.
+If it has a parent PRD, pull that in from `$GH_REPO` too.
 
 Only work on the issue specified.
 
@@ -51,7 +55,7 @@ Keep it concise.
 
 # THE ISSUE
 
-If the task is not complete, leave a comment on the GitHub issue with what was done.
+If the task is not complete, leave a comment on the GitHub issue in `$GH_REPO` with what was done.
 
 Do not close the issue - this will be done later.
 
