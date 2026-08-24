@@ -913,46 +913,54 @@ export const createWorkerService = (
     }
   };
 
-  interface PreparedControl {
-    readonly code: WorkerControlOutcomeCode;
+  interface AcceptedControl {
+    readonly code: "accepted";
     readonly message: string;
-    readonly accepted: boolean;
+    readonly accepted: true;
     readonly action: Promise<void>;
     readonly attemptId?: string;
   }
+
+  interface RejectedControl {
+    readonly code: Exclude<WorkerControlOutcomeCode, "accepted">;
+    readonly message: string;
+    readonly accepted: false;
+    readonly attemptId?: string;
+  }
+
+  type PreparedControl = AcceptedControl | RejectedControl;
+
+  const rejectControl = (
+    code: RejectedControl["code"],
+    message: string,
+  ): RejectedControl => ({ code, message, accepted: false });
 
   const prepareControl = (request: WorkerControlRequest): PreparedControl => {
     switch (request.command) {
       case "run-now": {
         if (!serviceIsHealthy()) {
-          return {
-            code: "service_unhealthy",
-            message: "The worker is unhealthy and cannot run a cycle.",
-            accepted: false,
-            action: Promise.resolve(),
-          };
+          return rejectControl(
+            "service_unhealthy",
+            "The worker is unhealthy and cannot run a cycle.",
+          );
         }
         if (serviceMode === "stopping") {
-          return {
-            code: "command_failed",
-            message: "The worker is stopping and cannot run a cycle.",
-            accepted: false,
-            action: Promise.resolve(),
-          };
+          return rejectControl(
+            "command_failed",
+            "The worker is stopping and cannot run a cycle.",
+          );
         }
         let cycle: Promise<WorkerCycleResult>;
         try {
           // runCycle already coalesces concurrent calls and shares the service lock.
           cycle = runCycle();
         } catch (error) {
-          return {
-            code: "command_failed",
-            message: redactedOperatorText(
+          return rejectControl(
+            "command_failed",
+            redactedOperatorText(
               error instanceof Error ? error.message : String(error),
             ),
-            accepted: false,
-            action: Promise.resolve(),
-          };
+          );
         }
         return {
           code: "accepted",
@@ -963,28 +971,22 @@ export const createWorkerService = (
       }
       case "pause": {
         if (!serviceIsHealthy()) {
-          return {
-            code: "service_unhealthy",
-            message: "The worker is unhealthy and cannot be paused.",
-            accepted: false,
-            action: Promise.resolve(),
-          };
+          return rejectControl(
+            "service_unhealthy",
+            "The worker is unhealthy and cannot be paused.",
+          );
         }
         if (pauseRequested || serviceMode === "paused") {
-          return {
-            code: "already_applied",
-            message: "Worker polling is already paused.",
-            accepted: false,
-            action: Promise.resolve(),
-          };
+          return rejectControl(
+            "already_applied",
+            "Worker polling is already paused.",
+          );
         }
         if (serviceMode === "stopping") {
-          return {
-            code: "command_failed",
-            message: "The worker is stopping and cannot be paused.",
-            accepted: false,
-            action: Promise.resolve(),
-          };
+          return rejectControl(
+            "command_failed",
+            "The worker is stopping and cannot be paused.",
+          );
         }
         pauseRequested = true;
         if (loopInFlight !== undefined) {
@@ -1004,31 +1006,25 @@ export const createWorkerService = (
       }
       case "resume": {
         if (!serviceIsHealthy()) {
-          return {
-            code: "service_unhealthy",
-            message: "The worker is unhealthy and cannot be resumed.",
-            accepted: false,
-            action: Promise.resolve(),
-          };
+          return rejectControl(
+            "service_unhealthy",
+            "The worker is unhealthy and cannot be resumed.",
+          );
         }
         if (
           !pauseRequested &&
           (serviceMode === "running" || serviceMode === "starting")
         ) {
-          return {
-            code: "already_applied",
-            message: "Worker polling is already running.",
-            accepted: false,
-            action: Promise.resolve(),
-          };
+          return rejectControl(
+            "already_applied",
+            "Worker polling is already running.",
+          );
         }
         if (serviceMode === "stopping") {
-          return {
-            code: "command_failed",
-            message: "The worker is stopping and cannot be resumed.",
-            accepted: false,
-            action: Promise.resolve(),
-          };
+          return rejectControl(
+            "command_failed",
+            "The worker is stopping and cannot be resumed.",
+          );
         }
         pauseRequested = false;
         if (loopInFlight !== undefined) {
@@ -1069,31 +1065,25 @@ export const createWorkerService = (
           request.attemptId === undefined ||
           request.attemptId.trim() === ""
         ) {
-          return {
-            code: "target_required",
-            message: "Cancellation requires an active attempt ID.",
-            accepted: false,
-            action: Promise.resolve(),
-          };
+          return rejectControl(
+            "target_required",
+            "Cancellation requires an active attempt ID.",
+          );
         }
         if (
           activeAttemptId === undefined ||
           executionController === undefined
         ) {
-          return {
-            code: "no_active_execution",
-            message: "There is no active execution to cancel.",
-            accepted: false,
-            action: Promise.resolve(),
-          };
+          return rejectControl(
+            "no_active_execution",
+            "There is no active execution to cancel.",
+          );
         }
         if (request.attemptId !== activeAttemptId) {
-          return {
-            code: "target_mismatch",
-            message: "The requested attempt is not the active execution.",
-            accepted: false,
-            action: Promise.resolve(),
-          };
+          return rejectControl(
+            "target_mismatch",
+            "The requested attempt is not the active execution.",
+          );
         }
         executionController.abort(
           new WorkerServiceOperatorCancellationError(
@@ -1117,7 +1107,7 @@ export const createWorkerService = (
     | { readonly outcome: WorkerControlOutcome }
     | {
         readonly revision: number;
-        readonly prepared: PreparedControl;
+        readonly prepared: AcceptedControl;
       };
   let controlGate = Promise.resolve();
   const reserveControl = async (

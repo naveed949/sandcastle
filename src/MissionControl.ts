@@ -30,6 +30,7 @@ import {
   workerServicePaths,
   type WorkerDiagnostic,
   type WorkerControlRequest,
+  type WorkerControlOutcomeCode,
   type WorkerServiceControl,
   type WorkerDiagnostics,
   type WorkerOperationalState,
@@ -618,6 +619,19 @@ const parseControlRequest = (
   };
 };
 
+const controlOutcomeStatusCode = (code: WorkerControlOutcomeCode): number => {
+  switch (code) {
+    case "accepted":
+    case "already_applied":
+      return 200;
+    case "command_failed":
+    case "service_unhealthy":
+      return 503;
+    default:
+      return 409;
+  }
+};
+
 const closeServer = (server: Server): Promise<void> => {
   if (!server.listening) return Promise.resolve();
   return new Promise((resolve, reject) => {
@@ -754,14 +768,7 @@ export const createMissionControlHost = (
             return;
           }
           const outcome = await service.control.command(controlRequest);
-          const statusCode =
-            outcome.code === "accepted" || outcome.code === "already_applied"
-              ? 200
-              : outcome.code === "command_failed" ||
-                  outcome.code === "service_unhealthy"
-                ? 503
-                : 409;
-          writeJson(response, statusCode, outcome);
+          writeJson(response, controlOutcomeStatusCode(outcome.code), outcome);
         } catch (error) {
           writeJson(response, 400, {
             version: 1,
