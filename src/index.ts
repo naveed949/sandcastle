@@ -248,6 +248,8 @@ export {
 } from "./WorkerService.js";
 export type {
   WorkerOperationalState,
+  WorkerServiceMode,
+  WorkerServiceStatus,
   WorkerDiagnostic,
   WorkerDiagnostics,
   WorkerServicePaths,
@@ -255,6 +257,23 @@ export type {
   WorkerService,
   WorkerServiceOptions,
 } from "./WorkerService.js";
+export {
+  createMissionControlHost,
+  validateMissionControlConfiguration,
+  MissionControlConfigurationError,
+} from "./MissionControl.js";
+export type {
+  MissionControlServerOptions,
+  MissionControlConfiguration,
+  MissionControlHostBoundaries,
+  MissionControlHostOptions,
+  MissionControlActiveAttempt,
+  MissionControlRecoveryWarning,
+  MissionControlOperationalStateCounts,
+  MissionControlOverview,
+  MissionControlListeningAddress,
+  MissionControlHost,
+} from "./MissionControl.js";
 export { runWorkerPocGate, WorkerPocGateError } from "./WorkerPocGate.js";
 export { createWorkerPocBoundaryAuditRecorder } from "./WorkerPocGateAudit.js";
 export { runWorkerRestartAcceptanceProof } from "./WorkerRestartAcceptanceProof.js";

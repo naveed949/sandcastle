@@ -49,9 +49,29 @@ profiles, service arguments, or the agent/sandbox environment.
 
 ## Startup and shutdown
 
-Build a small operator-owned entry point that constructs the task source, state
-store, repository manager, execution engine, publisher, and `WorkerService`
-from one central configuration. Use the same `workspaceRoot` for
+Use `createMissionControlHost()` as the operator-owned production entry point.
+It validates the existing worker policy and host settings before constructing
+the task source, state store, repository manager, execution engine, publisher,
+diagnostics, and `WorkerService`. It derives one `WorkerServicePaths` value from
+`workspaceRoot`, uses its `recordsRoot` for execution evidence, and uses its
+`serviceLockFilePath` for the same kernel-owned single-instance lock as the
+standalone service.
+
+Keep GitHub credentials in the server-side `github.token` setting. Do not put
+that token in `WorkerConfiguration`, `agentRunOptions`, command profiles, or
+the browser-visible overview. The host binds to `127.0.0.1` by default; set
+`server.bindAddress` explicitly only for an operator-controlled private ingress.
+
+The host serves a responsive overview at `GET /api/v1/overview`. Its version 1
+read model contains only the worker mode, active attempt identity, last
+completed cycle, next expected cycle, recovery warnings, and counts for the
+diagnostic operational states. It rebuilds counts from the durable worker state
+and append-only diagnostics, so it is disposable and cannot become a second
+source of scheduling authority. All other `/api/` routes are read-only and do
+not accept commands.
+
+For a standalone worker without the HTTP surface, compose the lower-level
+boundaries directly as shown below. Use the same `workspaceRoot` for
 `workerServicePaths()` and `createWorkerRepositoryManager()`, and use the
 derived `recordsRoot` for `createWorkerExecutionEngine()`.
 

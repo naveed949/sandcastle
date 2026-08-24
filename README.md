@@ -488,6 +488,57 @@ and `published` states.
 See [Remote worker operations](docs/remote-worker.md) for credential scope,
 systemd deployment, backup, upgrade, and failure inspection guidance.
 
+### Mission Control production host
+
+`createMissionControlHost()` is the production composition root for the worker
+and its read-only operator overview. It constructs the GitHub source, durable
+state store, repository manager, execution engine, draft publisher, diagnostics,
+and `WorkerService` from one central configuration. The same durable root also
+supplies the kernel-owned service lock, so the HTTP surface cannot start a
+second worker loop.
+
+```typescript
+import { codex, createMissionControlHost } from "@ai-hero/sandcastle";
+import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+
+const host = createMissionControlHost({
+  configuration: {
+    worker: configuration,
+    workspaceRoot: "/srv/sandcastle-worker",
+    owner: "dev-box-1",
+    pollIntervalMs: 60_000,
+    leaseDurationMs: 30 * 60_000,
+    executionTimeoutMs: 2 * 60 * 60_000,
+    github: { token: process.env.GITHUB_TOKEN },
+    agentRunOptions: {
+      agent: codex("gpt-5.6-luna"),
+      sandbox: docker(),
+    },
+    discovery: {
+      includeConfiguredRepositories: true,
+      includeAccountWide: true,
+    },
+    // Omit bindAddress to keep the default 127.0.0.1 binding.
+    server: { port: 3000 },
+  },
+});
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => void host.stop());
+}
+
+await host.start();
+```
+
+Configuration is validated before the host constructs a ready HTTP server or
+allows discovery, checkout, agent invocation, or publication. The versioned
+read-only endpoint is `GET /api/v1/overview`; it returns worker mode, active
+attempt, cycle timing, recovery warnings, and current operational-state counts.
+The bundled overview polls that endpoint and adapts from desktop to tablet
+widths. It does not expose task bodies, central configuration, credentials, or
+arbitrary filesystem content. Set `server.bindAddress` explicitly only when an
+operator-controlled private ingress requires a non-loopback interface.
+
 ### Consolidated retained POC gate
 
 `runWorkerPocGate()` is the final fail-closed acceptance boundary. It performs
