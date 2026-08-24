@@ -601,6 +601,9 @@ the claimed task and its authoritative dependency or PRD context. Those
 retained snapshots include policy-normalized dependency edges, so centrally
 configured blockers remain reproducible in planner evidence. Missing or
 conflicting context fails closed.
+The planned result exposes that same claim-time eligibility decision, keeping
+returned authorization and eligibility evidence aligned with the retained
+claim and plan.
 Accepted plans and their input provenance are retained in the same workflow
 state and appear under the projection's `plans` collection. Missing context,
 malformed output, cancellation, and timeout do not advance implementation;

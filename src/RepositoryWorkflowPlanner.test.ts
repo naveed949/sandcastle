@@ -871,6 +871,7 @@ describe("createRepositoryWorkflowPlanner", () => {
       promptTemplate: "Repository {{REPOSITORY}} Task {{TASK_SNAPSHOT}}",
     });
 
+    expect(result.decision?.authorization).toBe("task");
     expect(result.record?.input.authorization).toBe("task");
   });
 

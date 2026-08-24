@@ -1295,7 +1295,7 @@ export const planOneEligibleTask = async (
     promptTemplate: options.promptTemplate,
     signal: options.signal,
   });
-  return { status: "planned", decision, attempt, record };
+  return { status: "planned", decision: claimDecision, attempt, record };
 };
 
 /** Convert a retained plan into the safe Mission Control workflow projection. */
