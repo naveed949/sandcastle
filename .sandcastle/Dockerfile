@@ -23,13 +23,11 @@ ARG AGENT_GID=1000
 
 # Rename the base image's "node" user to "agent" and align UID/GID.
 RUN groupmod -o -g $AGENT_GID node && usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
-USER ${AGENT_UID}:${AGENT_GID}
 
-# Install Codex CLI
+# Install Codex CLI while still root: global npm installs write to /usr/local.
 RUN npm install -g @openai/codex
 
-# Add Claude to PATH
-ENV PATH="/home/agent/.local/bin:$PATH"
+USER ${AGENT_UID}:${AGENT_GID}
 
 WORKDIR /home/agent
 
