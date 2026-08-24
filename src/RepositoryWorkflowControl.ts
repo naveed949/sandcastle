@@ -14,6 +14,10 @@ import type {
   RepositoryWorkflowIssue,
   RepositoryWorkflowRuntime,
 } from "./RepositoryWorkflowRuntime.js";
+import type {
+  RepositoryWorkflowPlanProjection,
+  RepositoryWorkflowPlanRecord,
+} from "./RepositoryWorkflowPlanner.js";
 
 export type RepositoryWorkflowMode = "active" | "pausing" | "paused";
 
@@ -99,6 +103,8 @@ export interface RepositoryWorkflowState {
   readonly scheduleSequence?: number;
   readonly repositories: readonly AuthorizedRepositoryWorkflow[];
   readonly runs: readonly RepositoryWorkflowRunRecord[];
+  /** Structured planner attempts retained alongside workflow runs. */
+  readonly plans?: readonly RepositoryWorkflowPlanRecord[];
 }
 
 export interface RepositoryWorkflowStoreUpdateOptions {
@@ -241,6 +247,8 @@ export interface RepositoryWorkflowProjection {
   /** Ready entries only, ordered by the authoritative scheduler. */
   readonly queue: readonly RepositoryWorkflowQueueEntry[];
   readonly entries: readonly RepositoryWorkflowQueueEntry[];
+  /** Redacted structured planner attempts and accepted plans. */
+  readonly plans?: readonly RepositoryWorkflowPlanProjection[];
 }
 
 export interface RepositoryWorkflowControl {
@@ -301,6 +309,7 @@ const emptyState = (): RepositoryWorkflowState => ({
   scheduleSequence: 0,
   repositories: [],
   runs: [],
+  plans: [],
 });
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -396,6 +405,55 @@ const normalizeClaim = (
     leaseExpiresAt: value.leaseExpiresAt,
     phase: value.phase,
   };
+};
+
+const normalizePlanRecords = (
+  value: unknown,
+): readonly RepositoryWorkflowPlanRecord[] => {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new RepositoryWorkflowStoreError(
+      "Repository workflow state plans must be an array.",
+    );
+  }
+  const ids = new Set<string>();
+  return value.map((candidate) => {
+    if (!isRecord(candidate) || typeof candidate.id !== "string") {
+      throw new RepositoryWorkflowStoreError(
+        "Repository workflow state contains an invalid planner record.",
+      );
+    }
+    if (ids.has(candidate.id)) {
+      throw new RepositoryWorkflowStoreError(
+        `Repository workflow state contains duplicate planner record ${candidate.id}.`,
+        "conflict",
+      );
+    }
+    ids.add(candidate.id);
+    if (
+      candidate.version !== 1 ||
+      (candidate.status !== "accepted" &&
+        candidate.status !== "failed" &&
+        candidate.status !== "cancelled" &&
+        candidate.status !== "timed_out") ||
+      (candidate.recovery !== "resumable" &&
+        candidate.recovery !== "terminal") ||
+      typeof candidate.repository !== "string" ||
+      typeof candidate.workflowIdentity !== "string" ||
+      typeof candidate.taskId !== "string" ||
+      typeof candidate.attemptId !== "string" ||
+      typeof candidate.executionIdentity !== "string" ||
+      typeof candidate.createdAt !== "string" ||
+      typeof candidate.completedAt !== "string" ||
+      !isRecord(candidate.input) ||
+      !Array.isArray(candidate.evidence)
+    ) {
+      throw new RepositoryWorkflowStoreError(
+        `Repository workflow planner record ${candidate.id} is invalid.`,
+      );
+    }
+    return cloneJson(candidate) as unknown as RepositoryWorkflowPlanRecord;
+  });
 };
 
 const normalizeState = (value: unknown): RepositoryWorkflowState => {
@@ -597,6 +655,7 @@ const normalizeState = (value: unknown): RepositoryWorkflowState => {
       "Repository workflow schedule sequence must be a non-negative integer.",
     );
   }
+  const plans = normalizePlanRecords(value.plans);
   return {
     version: 1,
     revision,
@@ -605,6 +664,7 @@ const normalizeState = (value: unknown): RepositoryWorkflowState => {
       left.repository.localeCompare(right.repository),
     ),
     runs: runs.sort((left, right) => left.id.localeCompare(right.id)),
+    plans: [...plans].sort((left, right) => left.id.localeCompare(right.id)),
   };
 };
 
@@ -899,6 +959,41 @@ const projectionStageFor = (
   return stageForRun(run);
 };
 
+const projectPlan = (
+  record: RepositoryWorkflowPlanRecord,
+): RepositoryWorkflowPlanProjection => ({
+  id: record.id,
+  version: 1,
+  status: record.status,
+  recovery: record.recovery,
+  repository: record.repository,
+  workflowIdentity: record.workflowIdentity,
+  taskId: record.taskId,
+  attemptId: record.attemptId,
+  executionIdentity: record.executionIdentity,
+  cycle: record.input.cycle,
+  workflowRevision: record.input.workflowRevision,
+  ...(record.input.queuePosition === undefined
+    ? {}
+    : { queuePosition: record.input.queuePosition }),
+  taskSourceRevision: record.input.taskSourceRevision,
+  baseBranch: record.input.baseBranch,
+  baseRevision: record.input.baseRevision,
+  profileId: record.input.profileId,
+  profileDigest: record.input.profileDigest,
+  promptVersion: record.input.promptVersion,
+  promptTemplateDigest: record.input.promptTemplateDigest,
+  authorization: record.input.authorization,
+  eligibilityReasonCode: record.input.eligibilityReasonCode,
+  dependencyOrder: record.input.dependencyOrder,
+  dependencyEvidence: record.input.dependencyEvidence,
+  createdAt: record.createdAt,
+  completedAt: record.completedAt,
+  ...(record.plan === undefined ? {} : { plan: record.plan }),
+  evidence: record.evidence,
+  ...(record.error === undefined ? {} : { errorCode: record.error.code }),
+});
+
 const runStatusForFailure = (
   classification: RepositoryWorkflowFailure["classification"],
   aborted: boolean,
@@ -1144,6 +1239,11 @@ export const createRepositoryWorkflowControl = (
       repositories,
       queue,
       entries: queue,
+      ...(state.plans === undefined
+        ? {}
+        : {
+            plans: state.plans.map(projectPlan),
+          }),
     };
   };
 

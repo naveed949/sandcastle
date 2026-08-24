@@ -587,6 +587,19 @@ projection, including repository, task stage, owner, timestamps, queue
 position, recovery state, and safe blocking reasons. Mission Control embeds the
 same projection in its overview; it does not calculate a competing queue.
 
+The planner stage is available through `planOneEligibleTask()` and
+`createRepositoryWorkflowPlanner()`. It first runs the worker's deterministic
+eligibility check and refresh-bound claim for one repository-qualified task,
+then sends only the immutable task snapshot, selected profile, frozen base
+revision, and dependency evidence to the agent. The agent must emit a versioned
+`<plan>` object containing task intent, proposed work, verification strategy,
+risks, and evidence. Authorization, dependency order, queue position, and merge
+policy are server-owned fields and are rejected if included in agent output.
+Accepted plans and their input provenance are retained in the same workflow
+state and appear under the projection's `plans` collection. Missing context,
+malformed output, cancellation, and timeout do not advance implementation;
+cancellation and timeout remain resumable planner outcomes.
+
 Override the defaults with `SANDCASTLE_FEATURE_BRANCH`,
 `SANDCASTLE_CODEX_AUTH_PATH`, `SANDCASTLE_BASE_BRANCH`,
 `SANDCASTLE_MISSION_CONTROL_ROOT`, `SANDCASTLE_WORKER_OWNER`,

@@ -86,6 +86,35 @@ export type {
   RepositoryWorkflowCoordinatorOptions,
   RepositoryWorkflowCoordinatorStatus,
 } from "./RepositoryWorkflowCoordinator.js";
+export {
+  createRepositoryWorkflowPlanStore,
+  createRepositoryWorkflowPlanner,
+  expandRepositoryWorkflowPlannerPrompt,
+  planOneEligibleTask,
+  projectRepositoryWorkflowPlan,
+  RepositoryWorkflowPlannerContextError,
+} from "./RepositoryWorkflowPlanner.js";
+export type {
+  RepositoryWorkflowPlanStatus,
+  RepositoryWorkflowPlanRecovery,
+  RepositoryWorkflowDependencyEvidence,
+  RepositoryWorkflowPlanEvidence,
+  RepositoryWorkflowPlannerOutput,
+  RepositoryWorkflowPlan,
+  RepositoryWorkflowPlanInput,
+  RepositoryWorkflowPlanRecord,
+  RepositoryWorkflowPlanProjection,
+  RepositoryWorkflowPlannerInvocation,
+  RepositoryWorkflowPlannerInvocationResult,
+  RepositoryWorkflowPlannerInvoker,
+  RepositoryWorkflowPlanStore,
+  RepositoryWorkflowPlanStoreOptions,
+  RepositoryWorkflowPlanningInput,
+  RepositoryWorkflowPlannerOptions,
+  RepositoryWorkflowPlannerStage,
+  PlanOneEligibleTaskOptions,
+  PlanOneEligibleTaskResult,
+} from "./RepositoryWorkflowPlanner.js";
 export { createRepositoryWorkflowSupervisor } from "./RepositoryWorkflowSupervisor.js";
 export type {
   RepositoryWorkflowSupervisorControl,
