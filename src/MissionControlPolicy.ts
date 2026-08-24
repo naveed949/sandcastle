@@ -818,6 +818,33 @@ export const createMissionControlPolicyAdministration = (
     return normalizeMissionControlPolicy(value);
   };
 
+  const updateFallbackConfiguration = async (
+    request: MissionControlWorkerConfigurationUpdateRequest,
+    currentRevision: number,
+  ): Promise<MissionControlWorkerConfigurationUpdateResult> => {
+    if (fallbackConfiguration === undefined) {
+      return {
+        code: "command_failed",
+        revision: currentRevision,
+        message: "No worker configuration update seam is available.",
+      };
+    }
+    if (request.expectedRevision !== currentRevision) {
+      return {
+        code: "stale_revision",
+        revision: currentRevision,
+        message: "Expected worker revision is stale; no policy was applied.",
+      };
+    }
+    await request.persist();
+    fallbackConfiguration = request.configuration;
+    return {
+      code: "accepted",
+      revision: currentRevision + 1,
+      message: "Policy applied atomically.",
+    };
+  };
+
   const readTasks = async (): Promise<readonly NormalizedTask[]> => {
     const tasks = (await options.readTasks?.()) ?? [];
     const latest = new Map<string, NormalizedTask>();
@@ -1076,36 +1103,14 @@ export const createMissionControlPolicyAdministration = (
     const persist = (): Promise<void> =>
       writeMissionControlPolicyConfiguration(options.policyFilePath, proposed);
     try {
+      const updateRequest = {
+        expectedRevision: parsed.expectedWorkerRevision,
+        configuration: proposed,
+        persist,
+      };
       const update = options.updateWorkerConfiguration
-        ? await options.updateWorkerConfiguration({
-            expectedRevision: parsed.expectedWorkerRevision,
-            configuration: proposed,
-            persist,
-          })
-        : await (async (): Promise<MissionControlWorkerConfigurationUpdateResult> => {
-            if (fallbackConfiguration === undefined) {
-              return {
-                code: "command_failed",
-                revision: currentRevision,
-                message: "No worker configuration update seam is available.",
-              };
-            }
-            if (parsed.expectedWorkerRevision !== currentRevision) {
-              return {
-                code: "stale_revision",
-                revision: currentRevision,
-                message:
-                  "Expected worker revision is stale; no policy was applied.",
-              };
-            }
-            await persist();
-            fallbackConfiguration = proposed;
-            return {
-              code: "accepted",
-              revision: currentRevision + 1,
-              message: "Policy applied atomically.",
-            };
-          })();
+        ? await options.updateWorkerConfiguration(updateRequest)
+        : await updateFallbackConfiguration(updateRequest, currentRevision);
       if (update.code !== "accepted") {
         return finish(request, {
           version: 1,

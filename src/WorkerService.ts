@@ -1152,9 +1152,10 @@ export const createWorkerService = (
         readonly prepared: AcceptedControl;
       };
   let controlGate = Promise.resolve();
-  const reserveControl = async (
-    request: WorkerControlRequest,
-  ): Promise<ControlReservation> => {
+
+  const withControlGate = async <T>(
+    operation: () => Promise<T>,
+  ): Promise<T> => {
     let release!: () => void;
     const previous = controlGate;
     controlGate = new Promise<void>((resolveRelease) => {
@@ -1162,6 +1163,16 @@ export const createWorkerService = (
     });
     await previous;
     try {
+      return await operation();
+    } finally {
+      release();
+    }
+  };
+
+  const reserveControl = async (
+    request: WorkerControlRequest,
+  ): Promise<ControlReservation> =>
+    withControlGate(async () => {
       if (request.expectedRevision !== revision) {
         return {
           outcome: {
@@ -1208,10 +1219,7 @@ export const createWorkerService = (
       }
       revision += 1;
       return { revision, prepared };
-    } finally {
-      release();
-    }
-  };
+    });
 
   const finishControl = async (
     request: WorkerControlRequest,
@@ -1305,14 +1313,8 @@ export const createWorkerService = (
 
   const updateConfiguration = async (
     request: WorkerConfigurationUpdateRequest,
-  ): Promise<WorkerConfigurationUpdateOutcome> => {
-    let release!: () => void;
-    const previous = controlGate;
-    controlGate = new Promise<void>((resolveRelease) => {
-      release = resolveRelease;
-    });
-    await previous;
-    try {
+  ): Promise<WorkerConfigurationUpdateOutcome> =>
+    withControlGate(async () => {
       if (
         !Number.isInteger(request.expectedRevision) ||
         request.expectedRevision < 0 ||
@@ -1356,10 +1358,7 @@ export const createWorkerService = (
         revision,
         message: "Policy persisted and activated.",
       };
-    } finally {
-      release();
-    }
-  };
+    });
 
   const inFlightCommands = new Map<
     string,
