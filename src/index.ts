@@ -94,6 +94,17 @@ export {
   RepositoryWorkflowPlannerContextError,
 } from "./RepositoryWorkflowPlanner.js";
 export { projectRepositoryWorkflowPlan } from "./RepositoryWorkflowPlanProjection.js";
+export {
+  createRepositoryWorkflowImplementer,
+  RepositoryWorkflowImplementerContextError,
+} from "./RepositoryWorkflowImplementer.js";
+export type {
+  RepositoryWorkflowImplementationStatus,
+  RepositoryWorkflowImplementationRecovery,
+  RepositoryWorkflowImplementationReasonCode,
+  RepositoryWorkflowImplementationInput,
+  RepositoryWorkflowImplementationRecord,
+} from "./RepositoryWorkflowImplementer.js";
 export type {
   RepositoryWorkflowPlanStatus,
   RepositoryWorkflowPlanRecovery,

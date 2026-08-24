@@ -107,7 +107,28 @@ export interface WorkerExecutionEngine {
 export interface WorkerExecutionOptions {
   /** Abort the active agent invocation while preserving recovery evidence. */
   readonly signal?: AbortSignal;
+  /**
+   * Structured context expanded into an {{ACCEPTED_PLAN}} marker when the
+   * immutable prompt template references it. Execution fails fast when the
+   * marker is present without a supplied plan.
+   */
+  readonly acceptedPlan?: unknown;
 }
+
+/** Maximum retained characters per output stream in command evidence. */
+const evidenceOutputLimit = 10_000;
+
+const boundEvidenceOutput = (
+  output: string,
+): { output: string; truncated: boolean } => {
+  if (output.length <= evidenceOutputLimit) {
+    return { output, truncated: false };
+  }
+  return {
+    output: `${output.slice(0, evidenceOutputLimit)}\n...[truncated]`,
+    truncated: true,
+  };
+};
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -156,6 +177,7 @@ const runCommands = async (
 ): Promise<readonly WorkerCommandEvidence[]> => {
   const evidence: WorkerCommandEvidence[] = [];
   for (const command of commands) {
+    const startedAt = Date.now();
     let result: WorkerCommandEvidence;
     try {
       result = await prepared.runCommand(command, phase, { signal });
@@ -168,7 +190,15 @@ const runCommands = async (
         stderr: errorMessage(cause),
       };
     }
-    evidence.push(result);
+    const stdout = boundEvidenceOutput(result.stdout);
+    const stderr = boundEvidenceOutput(result.stderr);
+    evidence.push({
+      ...result,
+      durationMs: Date.now() - startedAt,
+      stdout: stdout.output,
+      stderr: stderr.output,
+      ...(stdout.truncated || stderr.truncated ? { truncated: true } : {}),
+    });
     if (result.exitCode !== 0) break;
   }
   return evidence;
@@ -255,7 +285,7 @@ export const createWorkerExecutionEngine = (
             failurePhase = "execution";
             error = `Prompt template ${request.promptVersion} does not match its immutable digest.`;
           } else {
-            const prompt = request.promptTemplate.replaceAll(
+            let prompt = request.promptTemplate.replaceAll(
               "{{TASK_SNAPSHOT}}",
               JSON.stringify(
                 { task: request.task, context: request.context },
@@ -263,19 +293,33 @@ export const createWorkerExecutionEngine = (
                 2,
               ),
             );
-            try {
-              // Only the versioned prompt crosses this boundary. The API intentionally has
-              // no orchestration-env or credential field.
-              agent = await prepared.runAgent({
-                prompt,
-                ...(executionOptions.signal === undefined
-                  ? {}
-                  : { signal: executionOptions.signal }),
-              });
-            } catch (cause) {
-              if (executionOptions.signal?.aborted) status = "interrupted";
-              failurePhase = "execution";
-              error = errorMessage(cause);
+            if (prompt.includes("{{ACCEPTED_PLAN}}")) {
+              if (executionOptions.acceptedPlan === undefined) {
+                failurePhase = "execution";
+                error =
+                  "Prompt template references {{ACCEPTED_PLAN}} but no accepted plan was supplied.";
+              } else {
+                prompt = prompt.replaceAll(
+                  "{{ACCEPTED_PLAN}}",
+                  JSON.stringify(executionOptions.acceptedPlan, null, 2),
+                );
+              }
+            }
+            if (failurePhase === undefined) {
+              try {
+                // Only the versioned prompt crosses this boundary. The API intentionally has
+                // no orchestration-env or credential field.
+                agent = await prepared.runAgent({
+                  prompt,
+                  ...(executionOptions.signal === undefined
+                    ? {}
+                    : { signal: executionOptions.signal }),
+                });
+              } catch (cause) {
+                if (executionOptions.signal?.aborted) status = "interrupted";
+                failurePhase = "execution";
+                error = errorMessage(cause);
+              }
             }
           }
         }

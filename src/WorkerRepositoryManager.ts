@@ -39,6 +39,10 @@ export interface WorkerCommandEvidence {
   readonly stdout: string;
   /** Captured standard error. */
   readonly stderr: string;
+  /** Wall-clock duration of the command in milliseconds, when measured. */
+  readonly durationMs?: number;
+  /** True when stdout or stderr exceeded the retained-output bound. */
+  readonly truncated?: boolean;
 }
 
 export interface WorkerAgentInvocation {
