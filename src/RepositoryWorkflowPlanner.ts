@@ -1,5 +1,5 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
-import { canonicalJsonDigest } from "./CanonicalJson.js";
+import { canonicalJsonDigest, sameCanonicalJson } from "./CanonicalJson.js";
 import {
   digestPromptTemplate,
   normalizeRepository,
@@ -56,6 +56,23 @@ export interface RepositoryWorkflowPlanEvidence {
   readonly summary: string;
 }
 
+/** Identity shared by every record of one planner attempt. */
+export interface RepositoryWorkflowPlanIdentity {
+  readonly repository: string;
+  readonly workflowIdentity: string;
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly executionIdentity: string;
+}
+
+/** Server-owned frozen base context retained with a plan. */
+export interface RepositoryWorkflowPlanBaseContext {
+  readonly baseBranch: string;
+  readonly baseRevision: string;
+  readonly profileId: string;
+  readonly profileDigest: string;
+}
+
 /** The versioned content emitted by the planner agent. */
 export interface RepositoryWorkflowPlannerOutput {
   readonly version: 1;
@@ -64,37 +81,24 @@ export interface RepositoryWorkflowPlannerOutput {
   readonly verificationStrategy: readonly string[];
   readonly risks: readonly string[];
   readonly evidence: readonly Omit<RepositoryWorkflowPlanEvidence, "source">[];
-  readonly needsHumanClarification: boolean;
 }
 
 /** The accepted plan after server-owned repository context is attached. */
 export interface RepositoryWorkflowPlan extends RepositoryWorkflowPlannerOutput {
-  readonly repositoryContext: {
+  readonly repositoryContext: RepositoryWorkflowPlanBaseContext & {
     readonly repository: string;
-    readonly baseBranch: string;
-    readonly baseRevision: string;
-    readonly profileId: string;
-    readonly profileDigest: string;
   };
 }
 
 /** Immutable planner input provenance retained for later stages and inspection. */
-export interface RepositoryWorkflowPlanInput {
-  readonly repository: string;
-  readonly workflowIdentity: string;
+export interface RepositoryWorkflowPlanInput
+  extends RepositoryWorkflowPlanIdentity, RepositoryWorkflowPlanBaseContext {
   readonly runId?: string;
   readonly cycle: number;
   readonly workflowRevision: number;
   readonly queuePosition?: number;
   readonly mergePolicyDigest?: string;
-  readonly taskId: string;
-  readonly attemptId: string;
-  readonly executionIdentity: string;
   readonly taskSourceRevision: string;
-  readonly baseBranch: string;
-  readonly baseRevision: string;
-  readonly profileId: string;
-  readonly profileDigest: string;
   readonly promptVersion: string;
   readonly promptTemplateDigest: string;
   readonly authorization: AuthorizationSource;
@@ -108,16 +112,11 @@ export interface RepositoryWorkflowPlanInput {
 }
 
 /** Retained result of one planner stage attempt. */
-export interface RepositoryWorkflowPlanRecord {
+export interface RepositoryWorkflowPlanRecord extends RepositoryWorkflowPlanIdentity {
   readonly id: string;
   readonly version: 1;
   readonly status: RepositoryWorkflowPlanStatus;
   readonly recovery: RepositoryWorkflowPlanRecovery;
-  readonly repository: string;
-  readonly workflowIdentity: string;
-  readonly taskId: string;
-  readonly attemptId: string;
-  readonly executionIdentity: string;
   readonly createdAt: string;
   readonly completedAt: string;
   readonly input: RepositoryWorkflowPlanInput;
@@ -134,16 +133,11 @@ export interface RepositoryWorkflowPlanRecord {
 }
 
 /** Safe Mission Control projection of one retained planner attempt. */
-export interface RepositoryWorkflowPlanProjection {
+export interface RepositoryWorkflowPlanProjection extends RepositoryWorkflowPlanIdentity {
   readonly id: string;
   readonly version: 1;
   readonly status: RepositoryWorkflowPlanStatus;
   readonly recovery: RepositoryWorkflowPlanRecovery;
-  readonly repository: string;
-  readonly workflowIdentity: string;
-  readonly taskId: string;
-  readonly attemptId: string;
-  readonly executionIdentity: string;
   readonly cycle: number;
   readonly workflowRevision: number;
   readonly queuePosition?: number;
@@ -204,7 +198,7 @@ export const createRepositoryWorkflowPlanStore = (
       const plans = [...(state.plans ?? [])];
       const existing = plans.find((candidate) => candidate.id === record.id);
       if (existing !== undefined) {
-        if (JSON.stringify(existing) !== JSON.stringify(record)) {
+        if (!sameCanonicalJson(existing, record)) {
           throw new RepositoryWorkflowStoreError(
             `Planner record ${record.id} conflicts with persisted evidence.`,
             "conflict",
@@ -416,7 +410,6 @@ const plannerOutputSchema: StandardSchemaV1<
         "verificationStrategy",
         "risks",
         "evidence",
-        "needsHumanClarification",
       ]);
       const unexpected = Object.keys(value).find((key) => !allowed.has(key));
       if (unexpected !== undefined) {
@@ -483,11 +476,6 @@ const plannerOutputSchema: StandardSchemaV1<
           summary: item.summary.trim(),
         });
       }
-      if (typeof value.needsHumanClarification !== "boolean") {
-        return {
-          issues: [outputIssue("needsHumanClarification must be a boolean.")],
-        };
-      }
       return {
         value: {
           version: 1,
@@ -496,7 +484,6 @@ const plannerOutputSchema: StandardSchemaV1<
           verificationStrategy,
           risks,
           evidence,
-          needsHumanClarification: value.needsHumanClarification,
         },
       };
     },
@@ -617,46 +604,23 @@ const normalizeDependencyEvidence = (
   return uniqueReferences.map(evidenceFor);
 };
 
-const validateInput = (
-  input: RepositoryWorkflowPlanningInput,
-): {
-  readonly task: NormalizedTask;
-  readonly request: ExecutionAttempt["request"];
-  readonly dependencyEvidence: readonly RepositoryWorkflowDependencyEvidence[];
-} => {
-  if (!isRecord(input)) {
-    throw new RepositoryWorkflowPlannerContextError(
-      "missing_context",
-      "Planner input is required.",
-    );
-  }
-  if (!isRecord(input.repositoryWorkflow)) {
-    throw new RepositoryWorkflowPlannerContextError(
-      "missing_context",
-      "Planner requires the repository workflow context.",
-    );
-  }
-  const task = input.taskSnapshot;
-  const attempt = input.attempt;
-  if (task === undefined) {
-    throw new RepositoryWorkflowPlannerContextError(
-      "missing_context",
-      "Planner requires an immutable task snapshot.",
-    );
-  }
-  if (!isRecord(task)) {
-    throw new RepositoryWorkflowPlannerContextError(
-      "invalid_context",
-      "Planner task snapshot must be an object.",
-    );
-  }
+const taskStates: readonly NormalizedTask["state"][] = [
+  "open",
+  "blocked",
+  "closed",
+  "claimed",
+  "completed",
+  "stale",
+];
+
+const requireClaimedAttempt = (attempt: ExecutionAttempt): ExecutionAttempt => {
   if (!isRecord(attempt)) {
     throw new RepositoryWorkflowPlannerContextError(
       "missing_context",
       "Planner requires the claimed execution attempt.",
     );
   }
-  const request = attempt?.request;
+  const request = attempt.request;
   if (request === undefined) {
     throw new RepositoryWorkflowPlannerContextError(
       "missing_context",
@@ -669,12 +633,6 @@ const validateInput = (
       "Planner claimed execution request is malformed.",
     );
   }
-  if (!isRecord(input.eligibility)) {
-    throw new RepositoryWorkflowPlannerContextError(
-      "missing_context",
-      "Planner requires the deterministic eligibility decision.",
-    );
-  }
   if (
     attempt.status !== "active" ||
     attempt.claim === undefined ||
@@ -685,11 +643,10 @@ const validateInput = (
       "Planner requires an active unstarted task claim.",
     );
   }
-  const claim = attempt.claim;
-  requireString(task.repository, "task repository");
-  requireString(task.sourceRevision, "task source revision");
-  requireString(task.baseBranch, "task base branch");
-  requireString(task.baseCommit, "task base revision");
+  return attempt;
+};
+
+const validateProfile = (request: ExecutionAttempt["request"]): void => {
   requireString(request.taskId, "claimed task identity");
   requireString(request.executionIdentity, "claimed execution identity");
   requireString(request.profileId, "repository profile ID");
@@ -713,18 +670,17 @@ const validateInput = (
       "Planner repository profile does not match the claimed profile digest.",
     );
   }
-  const repository = requireString(input.repository, "claimed repository");
-  const workflowIdentity = requireString(
-    input.repositoryWorkflow.workflowIdentity,
-    "repository workflow identity",
-  );
-  if (
-    task.repository !== repository ||
-    !workflowIdentity.startsWith(`${repository}:`)
-  ) {
+};
+
+const validateEligibilityProvenance = (
+  input: RepositoryWorkflowPlanningInput,
+  request: ExecutionAttempt["request"],
+  task: NormalizedTask,
+): void => {
+  if (!isRecord(input.eligibility)) {
     throw new RepositoryWorkflowPlannerContextError(
-      "invalid_context",
-      "Planner repository context does not match the claimed task.",
+      "missing_context",
+      "Planner requires the deterministic eligibility decision.",
     );
   }
   if (
@@ -742,14 +698,14 @@ const validateInput = (
       "Eligibility does not describe the claimed task.",
     );
   }
-  if (JSON.stringify(input.eligibility.task) !== JSON.stringify(task)) {
+  if (!sameCanonicalJson(input.eligibility.task, task)) {
     throw new RepositoryWorkflowPlannerContextError(
       "invalid_context",
       "Eligibility does not describe the claimed task snapshot.",
     );
   }
   if (
-    attempt.executionIdentity !== request.executionIdentity ||
+    input.attempt.executionIdentity !== request.executionIdentity ||
     input.eligibility.executionIdentity !== request.executionIdentity
   ) {
     throw new RepositoryWorkflowPlannerContextError(
@@ -757,8 +713,15 @@ const validateInput = (
       "Planner execution identity does not match the claimed task.",
     );
   }
+};
+
+const validateClaimSnapshots = (
+  claim: NonNullable<ExecutionAttempt["claim"]>,
+  request: ExecutionAttempt["request"],
+  task: NormalizedTask,
+): void => {
   if (
-    JSON.stringify(request.task) !== JSON.stringify(task) ||
+    !sameCanonicalJson(request.task, task) ||
     workerTaskId(task) !== request.taskId ||
     task.sourceRevision !== request.task.sourceRevision ||
     task.baseCommit !== request.task.baseCommit ||
@@ -793,12 +756,7 @@ const validateInput = (
       snapshot.number < 1 ||
       typeof snapshot.sourceRevision !== "string" ||
       snapshot.sourceRevision.trim() === "" ||
-      (snapshot.state !== "open" &&
-        snapshot.state !== "blocked" &&
-        snapshot.state !== "closed" &&
-        snapshot.state !== "claimed" &&
-        snapshot.state !== "completed" &&
-        snapshot.state !== "stale")
+      !taskStates.includes(snapshot.state as NormalizedTask["state"])
     ) {
       throw new RepositoryWorkflowPlannerContextError(
         "invalid_context",
@@ -814,13 +772,12 @@ const validateInput = (
     }
     claimSnapshotIds.add(snapshotId);
   }
-  const claimedSnapshot = claim.refreshedSnapshots?.find(
+  const claimedSnapshot = claim.refreshedSnapshots.find(
     (snapshot) => workerTaskId(snapshot) === request.taskId,
   );
   if (
-    claim.refreshedSnapshots !== undefined &&
-    (claimedSnapshot === undefined ||
-      JSON.stringify(claimedSnapshot) !== JSON.stringify(task))
+    claimedSnapshot === undefined ||
+    !sameCanonicalJson(claimedSnapshot, task)
   ) {
     throw new RepositoryWorkflowPlannerContextError(
       "invalid_context",
@@ -840,6 +797,64 @@ const validateInput = (
       );
     }
   }
+};
+
+const validateInput = (
+  input: RepositoryWorkflowPlanningInput,
+): {
+  readonly task: NormalizedTask;
+  readonly request: ExecutionAttempt["request"];
+  readonly dependencyEvidence: readonly RepositoryWorkflowDependencyEvidence[];
+} => {
+  if (!isRecord(input)) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "missing_context",
+      "Planner input is required.",
+    );
+  }
+  if (!isRecord(input.repositoryWorkflow)) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "missing_context",
+      "Planner requires the repository workflow context.",
+    );
+  }
+  const task = input.taskSnapshot;
+  if (task === undefined) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "missing_context",
+      "Planner requires an immutable task snapshot.",
+    );
+  }
+  if (!isRecord(task)) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "invalid_context",
+      "Planner task snapshot must be an object.",
+    );
+  }
+  const attempt = requireClaimedAttempt(input.attempt);
+  const request = attempt.request;
+  const claim = attempt.claim!;
+  requireString(task.repository, "task repository");
+  requireString(task.sourceRevision, "task source revision");
+  requireString(task.baseBranch, "task base branch");
+  requireString(task.baseCommit, "task base revision");
+  validateProfile(request);
+  const repository = requireString(input.repository, "claimed repository");
+  const workflowIdentity = requireString(
+    input.repositoryWorkflow.workflowIdentity,
+    "repository workflow identity",
+  );
+  if (
+    task.repository !== repository ||
+    !workflowIdentity.startsWith(`${repository}:`)
+  ) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "invalid_context",
+      "Planner repository context does not match the claimed task.",
+    );
+  }
+  validateEligibilityProvenance(input, request, task);
+  validateClaimSnapshots(claim, request, task);
   requirePositiveInteger(input.repositoryWorkflow.cycle, "workflow cycle");
   requirePositiveInteger(
     input.repositoryWorkflow.revision,
@@ -847,6 +862,12 @@ const validateInput = (
   );
   requireString(input.promptVersion, "prompt version");
   requireString(input.promptTemplate, "planner prompt template");
+  if (!input.promptTemplate.includes("<plan>")) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "invalid_context",
+      "Planner prompt template must instruct the <plan> structured output tag.",
+    );
+  }
   validTimestamp(attempt.createdAt, "attempt createdAt");
   validTimestamp(attempt.updatedAt, "attempt updatedAt");
   return {
@@ -1017,40 +1038,32 @@ const toPlannerError = (
       status: "timed_out",
     };
   }
+  // A malformed structured plan is resumable: the agent session can be
+  // resumed with feedback per the structured-output recovery surface.
+  if (error instanceof Error && error.name === "StructuredOutputError") {
+    return {
+      code: "invalid_structured_output",
+      message: error.message,
+      recovery: "resumable",
+      status: "failed",
+    };
+  }
+  // Any other failure is terminal for this stage; only operator-classified
+  // cancellation and timeout may resume without re-planning from scratch.
   if (isRecord(error) && typeof error.code === "string") {
     return {
       code: error.code,
       message: errorMessage(error),
-      recovery: "resumable",
+      recovery: "terminal",
       status: "failed",
     };
   }
   return {
     code: "planner_invocation_failed",
     message: errorMessage(error),
-    recovery: "resumable",
+    recovery: "terminal",
     status: "failed",
   };
-};
-
-const plannerErrorRecord = (
-  error: unknown,
-): {
-  readonly code: string;
-  readonly message: string;
-  readonly recovery: RepositoryWorkflowPlanRecovery;
-  readonly status: RepositoryWorkflowPlanStatus;
-} => {
-  const result = toPlannerError(error);
-  if (error instanceof Error && error.name === "StructuredOutputError") {
-    return {
-      code: "invalid_structured_output",
-      message: result.message,
-      recovery: "resumable",
-      status: "failed",
-    };
-  }
-  return result;
 };
 
 /** Create a planner that handles exactly one claimed eligible task and no later stage. */
@@ -1105,7 +1118,7 @@ export const createRepositoryWorkflowPlanner = (
       };
       const existing = await options.planStore.get(planId);
       if (existing !== undefined) {
-        if (JSON.stringify(existing.input) !== JSON.stringify(provenance)) {
+        if (!sameCanonicalJson(existing.input, provenance)) {
           throw new RepositoryWorkflowStoreError(
             `Planner record ${planId} conflicts with persisted evidence.`,
             "conflict",
@@ -1186,7 +1199,7 @@ export const createRepositoryWorkflowPlanner = (
         await options.planStore.save(record);
         return record;
       } catch (error) {
-        const failure = plannerErrorRecord(error);
+        const failure = toPlannerError(error);
         const record: RepositoryWorkflowPlanRecord = {
           ...baseRecord,
           status: failure.status,
@@ -1297,39 +1310,3 @@ export const planOneEligibleTask = async (
   });
   return { status: "planned", decision: claimDecision, attempt, record };
 };
-
-/** Convert a retained plan into the safe Mission Control workflow projection. */
-export const projectRepositoryWorkflowPlan = (
-  record: RepositoryWorkflowPlanRecord,
-): RepositoryWorkflowPlanProjection => ({
-  id: record.id,
-  version: 1,
-  status: record.status,
-  recovery: record.recovery,
-  repository: record.repository,
-  workflowIdentity: record.workflowIdentity,
-  taskId: record.taskId,
-  attemptId: record.attemptId,
-  executionIdentity: record.executionIdentity,
-  cycle: record.input.cycle,
-  workflowRevision: record.input.workflowRevision,
-  ...(record.input.queuePosition === undefined
-    ? {}
-    : { queuePosition: record.input.queuePosition }),
-  taskSourceRevision: record.input.taskSourceRevision,
-  baseBranch: record.input.baseBranch,
-  baseRevision: record.input.baseRevision,
-  profileId: record.input.profileId,
-  profileDigest: record.input.profileDigest,
-  promptVersion: record.input.promptVersion,
-  promptTemplateDigest: record.input.promptTemplateDigest,
-  authorization: record.input.authorization,
-  eligibilityReasonCode: record.input.eligibilityReasonCode,
-  dependencyOrder: record.input.dependencyOrder,
-  dependencyEvidence: record.input.dependencyEvidence,
-  createdAt: record.createdAt,
-  completedAt: record.completedAt,
-  ...(record.plan === undefined ? {} : { plan: record.plan }),
-  evidence: record.evidence,
-  ...(record.error === undefined ? {} : { errorCode: record.error.code }),
-});

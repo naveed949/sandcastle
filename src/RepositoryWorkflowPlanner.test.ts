@@ -17,6 +17,7 @@ import {
   type RepositoryWorkflowPlanningInput,
 } from "./RepositoryWorkflowPlanner.js";
 import { createWorkerStateStore } from "./WorkerStateStore.js";
+import { projectRepositoryWorkflowPlan } from "./RepositoryWorkflowPlanProjection.js";
 
 const directories: string[] = [];
 
@@ -93,6 +94,7 @@ const input = (): RepositoryWorkflowPlanningInput => ({
   dependencyEvidence: [],
   promptVersion: "planner-v1",
   promptTemplate: [
+    "<plan>",
     "Repository: {{REPOSITORY}}",
     "Task: {{TASK_SNAPSHOT}}",
     "Profile: {{REPOSITORY_PROFILE}}",
@@ -139,7 +141,6 @@ describe("createRepositoryWorkflowPlanner", () => {
               summary: "The claimed task snapshot.",
             },
           ],
-          needsHumanClarification: false,
         })}</plan>`,
         logReference: "record://planner/1",
         sessionId: "session-1",
@@ -240,7 +241,6 @@ describe("createRepositoryWorkflowPlanner", () => {
         verificationStrategy: ["Inspect the retained record."],
         risks: [],
         evidence: [],
-        needsHumanClarification: false,
       })}</plan>`,
     }));
     const planner = createRepositoryWorkflowPlanner({ invoke, planStore });
@@ -380,6 +380,49 @@ describe("createRepositoryWorkflowPlanner", () => {
       error: { code: "invalid_structured_output" },
     });
     expect(record.plan).toBeUndefined();
+  });
+
+  it("projects failed and timed-out planner records without plans", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "repository-planner-failed-projection-"),
+    );
+    directories.push(directory);
+    const planStore = createRepositoryWorkflowPlanStore({
+      store: createRepositoryWorkflowStore({
+        filePath: join(directory, "workflows.json"),
+      }),
+    });
+    const malformedPlanner = createRepositoryWorkflowPlanner({
+      invoke: async () => ({ stdout: '<plan>{"version":1}</plan>' }),
+      planStore,
+      createId: () => "plan-failed",
+    });
+    const timeoutPlanner = createRepositoryWorkflowPlanner({
+      invoke: async () => await new Promise<never>(() => undefined),
+      planStore,
+      timeoutMs: 5,
+      createId: () => "plan-timed-out",
+    });
+
+    const failed = await malformedPlanner.plan(input());
+    const timedOut = await timeoutPlanner.plan(input());
+
+    expect(projectRepositoryWorkflowPlan(failed)).toMatchObject({
+      id: "plan-failed",
+      status: "failed",
+      recovery: "resumable",
+      errorCode: "invalid_structured_output",
+      taskId: "acme/one:issue:23",
+      repository: "acme/one",
+    });
+    expect(projectRepositoryWorkflowPlan(failed).plan).toBeUndefined();
+    expect(projectRepositoryWorkflowPlan(timedOut)).toMatchObject({
+      id: "plan-timed-out",
+      status: "timed_out",
+      recovery: "resumable",
+      errorCode: "planner_timeout",
+    });
+    expect(projectRepositoryWorkflowPlan(timedOut).plan).toBeUndefined();
   });
 
   it("fails prompt expansion before invocation when required task context is missing", async () => {
@@ -664,7 +707,6 @@ describe("createRepositoryWorkflowPlanner", () => {
           verificationStrategy: ["Inspect the scoped plan projection."],
           risks: [],
           evidence: [],
-          needsHumanClarification: false,
         })}</plan>`,
       }),
       planStore,
@@ -723,6 +765,155 @@ describe("createRepositoryWorkflowPlanner", () => {
     ]);
   });
 
+  it("fails prompt expansion before invocation when the prompt template omits the structured output tag", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "repository-planner-tag-"));
+    directories.push(directory);
+    const planStore = createRepositoryWorkflowPlanStore({
+      store: createRepositoryWorkflowStore({
+        filePath: join(directory, "workflows.json"),
+      }),
+    });
+    const invoke = vi.fn(async () => ({ stdout: "" }));
+    const planner = createRepositoryWorkflowPlanner({ invoke, planStore });
+    const base = input();
+    const untagged = {
+      ...base,
+      promptTemplate: base.promptTemplate.replace("<plan>\n", ""),
+    };
+
+    await expect(planner.plan(untagged)).rejects.toMatchObject(
+      new RepositoryWorkflowPlannerContextError(
+        "invalid_context",
+        "Planner prompt template must instruct the <plan> structured output tag.",
+      ),
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    expect(await planStore.list()).toEqual([]);
+  });
+
+  it("plans two different repositories end to end without cross-repository evidence", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "repository-planner-e2e-two-repos-"),
+    );
+    directories.push(directory);
+    const workerStore = createWorkerStateStore({
+      filePath: join(directory, "worker.json"),
+    });
+    const workflowStore = createRepositoryWorkflowStore({
+      filePath: join(directory, "workflows.json"),
+    });
+    const planStore = createRepositoryWorkflowPlanStore({
+      store: workflowStore,
+    });
+    const oneTask = { ...task, number: 41, sourceRevision: "issue:41:rev-1" };
+    const twoTask = {
+      ...task,
+      repository: "acme/two",
+      number: 23,
+      title: "Same number, other repo",
+    };
+    const configuration = {
+      repositories: {
+        "acme/one": {
+          authorized: true,
+          baseBranch: "main",
+          profileId: "node-v1",
+        },
+        "acme/two": {
+          authorized: true,
+          baseBranch: "main",
+          profileId: "node-v1",
+        },
+      },
+      authorizedTasks: [],
+      promptVersion: "worker-v1",
+      promptTemplates: { "worker-v1": "{{TASK_SNAPSHOT}}" },
+      profiles: {
+        "node-v1": {
+          setupCommands: [],
+          verificationCommands: ["npm test"],
+        },
+      },
+    } as const;
+    const readCalls: string[] = [];
+    const source = {
+      discover: vi.fn(async () => [oneTask, twoTask]),
+      read: vi.fn(async ({ task: reference }: { readonly task: unknown }) => {
+        const referenceTask = reference as typeof oneTask;
+        readCalls.push(referenceTask.repository);
+        const found =
+          referenceTask.repository === "acme/one" ? oneTask : twoTask;
+        return { task: found, relatedTasks: [] };
+      }),
+    };
+    let nextId = 0;
+    const planner = createRepositoryWorkflowPlanner({
+      invoke: async () => ({
+        stdout: `<plan>${JSON.stringify({
+          version: 1,
+          taskIntent: "Plan exactly one claimed task.",
+          proposedWork: ["Retain repository-scoped provenance."],
+          verificationStrategy: ["Inspect retained records."],
+          risks: [],
+          evidence: [],
+        })}</plan>`,
+      }),
+      planStore,
+      createId: () => `plan-${++nextId}`,
+    });
+
+    const first = await planOneEligibleTask({
+      repository: "acme/one",
+      repositoryWorkflow: {
+        workflowIdentity: "acme/one:workflow-v1",
+        cycle: 1,
+        revision: 1,
+      },
+      configuration,
+      source,
+      store: workerStore,
+      planner,
+      owner: "planner",
+      leaseDurationMs: 60_000,
+      promptVersion: "planner-v1",
+      promptTemplate: "<plan> Repository {{REPOSITORY}} Task {{TASK_SNAPSHOT}}",
+    });
+    const second = await planOneEligibleTask({
+      repository: "acme/two",
+      repositoryWorkflow: {
+        workflowIdentity: "acme/two:workflow-v1",
+        cycle: 1,
+        revision: 2,
+      },
+      configuration,
+      source,
+      store: workerStore,
+      planner,
+      owner: "planner",
+      leaseDurationMs: 60_000,
+      promptVersion: "planner-v1",
+      promptTemplate: "<plan> Repository {{REPOSITORY}} Task {{TASK_SNAPSHOT}}",
+    });
+
+    expect(first.status).toBe("planned");
+    expect(second.status).toBe("planned");
+    expect(first.record?.input.taskId).toBe("acme/one:issue:41");
+    expect(second.record?.input.taskId).toBe("acme/two:issue:23");
+    expect(first.record?.plan?.repositoryContext.repository).toBe("acme/one");
+    expect(second.record?.plan?.repositoryContext.repository).toBe("acme/two");
+    const records = await planStore.list();
+    expect(records.map((record) => record.id)).toEqual(["plan-1", "plan-2"]);
+    const projection = await createRepositoryWorkflowControl({
+      store: workflowStore,
+      runtime: { runCycle: vi.fn() },
+      workflows: {},
+    }).getProjection!();
+    expect(projection.plans?.map((plan) => plan.repository)).toEqual([
+      "acme/one",
+      "acme/two",
+    ]);
+  });
+
   it("selects and refresh-claims one eligible task before invoking the planner", async () => {
     const directory = await mkdtemp(
       join(tmpdir(), "repository-planner-claim-"),
@@ -768,7 +959,6 @@ describe("createRepositoryWorkflowPlanner", () => {
           verificationStrategy: ["Run npm test."],
           risks: [],
           evidence: [],
-          needsHumanClarification: false,
         })}</plan>`,
       }),
       planStore,
@@ -788,7 +978,7 @@ describe("createRepositoryWorkflowPlanner", () => {
       owner: "planner",
       leaseDurationMs: 60_000,
       promptVersion: "planner-v1",
-      promptTemplate: "Repository {{REPOSITORY}} Task {{TASK_SNAPSHOT}}",
+      promptTemplate: "<plan> Repository {{REPOSITORY}} Task {{TASK_SNAPSHOT}}",
     });
 
     expect(result.status).toBe("planned");
@@ -848,7 +1038,6 @@ describe("createRepositoryWorkflowPlanner", () => {
           verificationStrategy: ["Inspect the retained provenance."],
           risks: [],
           evidence: [],
-          needsHumanClarification: false,
         })}</plan>`,
       }),
       planStore,
@@ -868,7 +1057,7 @@ describe("createRepositoryWorkflowPlanner", () => {
       owner: "planner",
       leaseDurationMs: 60_000,
       promptVersion: "planner-v1",
-      promptTemplate: "Repository {{REPOSITORY}} Task {{TASK_SNAPSHOT}}",
+      promptTemplate: "<plan> Repository {{REPOSITORY}} Task {{TASK_SNAPSHOT}}",
     });
 
     expect(result.decision?.authorization).toBe("task");
@@ -935,7 +1124,6 @@ describe("createRepositoryWorkflowPlanner", () => {
           verificationStrategy: ["Inspect dependency evidence."],
           risks: [],
           evidence: [],
-          needsHumanClarification: false,
         })}</plan>`,
       }),
       planStore,
@@ -955,7 +1143,7 @@ describe("createRepositoryWorkflowPlanner", () => {
       owner: "planner",
       leaseDurationMs: 60_000,
       promptVersion: "planner-v1",
-      promptTemplate: "Repository {{REPOSITORY}} Task {{TASK_SNAPSHOT}}",
+      promptTemplate: "<plan> Repository {{REPOSITORY}} Task {{TASK_SNAPSHOT}}",
     });
 
     expect(result.status).toBe("planned");

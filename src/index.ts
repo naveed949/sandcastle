@@ -91,14 +91,16 @@ export {
   createRepositoryWorkflowPlanner,
   expandRepositoryWorkflowPlannerPrompt,
   planOneEligibleTask,
-  projectRepositoryWorkflowPlan,
   RepositoryWorkflowPlannerContextError,
 } from "./RepositoryWorkflowPlanner.js";
+export { projectRepositoryWorkflowPlan } from "./RepositoryWorkflowPlanProjection.js";
 export type {
   RepositoryWorkflowPlanStatus,
   RepositoryWorkflowPlanRecovery,
   RepositoryWorkflowDependencyEvidence,
   RepositoryWorkflowPlanEvidence,
+  RepositoryWorkflowPlanIdentity,
+  RepositoryWorkflowPlanBaseContext,
   RepositoryWorkflowPlannerOutput,
   RepositoryWorkflowPlan,
   RepositoryWorkflowPlanInput,
