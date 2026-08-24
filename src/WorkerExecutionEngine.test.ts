@@ -58,6 +58,7 @@ const createHarness = async (options?: {
   preservedWorktreePath?: string;
   waitForAbort?: boolean;
   waitForSetupAbort?: boolean;
+  commits?: readonly { readonly sha: string }[];
 }) => {
   const root = await mkdtemp(join(tmpdir(), "sandcastle-worker-engine-"));
   const store = createWorkerStateStore({
@@ -70,6 +71,11 @@ const createHarness = async (options?: {
     claimedAt: "2026-08-23T12:00:00.000Z",
   });
   const commands: string[] = [];
+  let rejectSetup: ((reason?: unknown) => void) | undefined;
+  const sandboxClose = vi.fn(async () => {
+    rejectSetup?.(new Error("sandbox closed"));
+    return {};
+  });
   const close = vi.fn(async () => ({
     preservedWorktreePath: options?.preservedWorktreePath,
   }));
@@ -95,7 +101,7 @@ const createHarness = async (options?: {
         });
       }
       return {
-        commits: [{ sha: "d".repeat(40) }],
+        commits: options?.commits ?? [{ sha: "d".repeat(40) }],
         branch: `sandcastle/worker/acme/app/issue-6/${request.executionIdentity.slice(0, 12)}`,
         stdout: "I completed the task successfully.",
         iterations: [],
@@ -118,39 +124,29 @@ const createHarness = async (options?: {
       worktreePath: join(root, "repositories", "acme", "app", "worktree"),
       repositoryCredentialNames: [],
       run: runAgent as never,
+      createSandbox: vi.fn(
+        async () =>
+          ({
+            run: runAgent,
+            close: sandboxClose,
+            exec: async (command: string) => {
+              commands.push(command);
+              const phase = command === "npm test" ? "verification" : "setup";
+              if (phase === "setup" && options?.waitForSetupAbort) {
+                await new Promise<never>((_resolve, reject) => {
+                  rejectSetup = reject;
+                });
+              }
+              const exitCode =
+                phase === "verification"
+                  ? (options?.verificationExitCode ?? 0)
+                  : (options?.setupExitCode ?? 0);
+              return { exitCode, stdout: "ok", stderr: "" };
+            },
+          }) as never,
+      ),
       close,
     })),
-    runCommand: async ({ command, phase, signal }) => {
-      commands.push(command);
-      if (phase === "setup" && options?.waitForSetupAbort) {
-        if (signal === undefined) {
-          return {
-            command,
-            phase,
-            exitCode: 1,
-            stdout: "",
-            stderr: "missing abort signal",
-          };
-        }
-        if (!signal.aborted) {
-          await new Promise<void>((resolve) => {
-            signal.addEventListener("abort", () => resolve(), { once: true });
-          });
-        }
-        return {
-          command,
-          phase,
-          exitCode: 1,
-          stdout: "",
-          stderr: String(signal.reason),
-        };
-      }
-      const exitCode =
-        phase === "verification"
-          ? (options?.verificationExitCode ?? 0)
-          : (options?.setupExitCode ?? 0);
-      return { command, phase, exitCode, stdout: "ok", stderr: "" };
-    },
   };
   const manager = createWorkerRepositoryManager({
     workspaceRoot: root,
@@ -258,6 +254,18 @@ describe("WorkerExecutionEngine", () => {
     expect(result.failurePhase).toBe("execution");
     expect(harness.commands).toEqual(["npm ci"]);
     expect(harness.close).toHaveBeenCalledOnce();
+  });
+
+  it("does not verify an agent run that retained no commit", async () => {
+    const harness = await createHarness({ commits: [] });
+
+    const result = await harness.engine.execute(harness.attempt);
+
+    expect(result.status).toBe("failed");
+    expect(result.failurePhase).toBe("execution");
+    expect(result.error).toContain("valid resulting commit");
+    expect(harness.commands).toEqual(["npm ci"]);
+    expect(harness.recordGuardedAction).not.toHaveBeenCalled();
   });
 
   it("retains a preserved dirty worktree as cleanup failure evidence", async () => {

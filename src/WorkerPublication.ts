@@ -260,6 +260,7 @@ const assertRetainedEvidence = (
     result.commits.length > 0 &&
     result.commits.every((commit) => /^[0-9a-f]{40}$/i.test(commit.sha));
   const verificationMatches =
+    request.profile.verificationCommands.length > 0 &&
     result.verification.length ===
       request.profile.verificationCommands.length &&
     result.verification.every(
@@ -528,8 +529,25 @@ export const createWorkerPublisher = (
 
       const authorized = runWorkerDryRun({
         configuration: options.configuration,
-        tasks: [attempt.request.task],
-      }).executionRequests[0];
+        tasks: [
+          ...(attempt.claim?.refreshedSnapshots ?? []),
+          ...(attempt.request.context.parentPrd === undefined
+            ? []
+            : [attempt.request.context.parentPrd]),
+          attempt.request.task,
+        ].filter(
+          (task, index, tasks) =>
+            tasks.findIndex(
+              (candidate) =>
+                normalizeRepository(candidate.repository) ===
+                  normalizeRepository(task.repository) &&
+                candidate.kind === task.kind &&
+                candidate.number === task.number,
+            ) === index,
+        ),
+      }).executionRequests.find(
+        (candidate) => candidate.taskId === attempt.request.taskId,
+      );
       if (
         authorized === undefined ||
         authorized.executionIdentity !== attempt.executionIdentity

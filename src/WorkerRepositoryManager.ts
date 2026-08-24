@@ -1,7 +1,4 @@
-import {
-  exec as execCallback,
-  execFile as execFileCallback,
-} from "node:child_process";
+import { execFile as execFileCallback } from "node:child_process";
 import { mkdir, readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -10,7 +7,7 @@ import {
   type WorktreeRunOptions,
   type WorktreeRunResult,
 } from "./createWorktree.js";
-import type { CloseResult } from "./createSandbox.js";
+import type { CloseResult, Sandbox } from "./createSandbox.js";
 import type {
   BindMountSandboxProvider,
   IsolatedSandboxProvider,
@@ -19,6 +16,7 @@ import {
   normalizeRepository,
   runWorkerDryRun,
   type ExecutionRequest,
+  type NormalizedTask,
   type WorkerConfiguration,
 } from "./WorkerCoordinator.js";
 import {
@@ -26,7 +24,6 @@ import {
   repositoryCredentialNamesInEnvironmentFile,
 } from "./WorkerIsolationPolicy.js";
 
-const exec = promisify(execCallback);
 const execFile = promisify(execFileCallback);
 
 export type WorkerCommandPhase = "setup" | "verification";
@@ -97,6 +94,8 @@ export interface PrepareWorkerRepositoryInput {
   readonly configuration: WorkerConfiguration;
   /** Immutable execution request selected and claimed earlier. */
   readonly request: ExecutionRequest;
+  /** Fresh claim-time snapshots needed to authorize PRD and dependency context. */
+  readonly relatedTasks?: readonly NormalizedTask[];
 }
 
 export interface WorkerRepositoryManager {
@@ -110,6 +109,10 @@ interface WorkerWorktreeHandle {
   readonly branch: string;
   readonly worktreePath: string;
   run(options: WorktreeRunOptions): Promise<WorktreeRunResult>;
+  createSandbox(options: {
+    readonly sandbox: BindMountSandboxProvider | IsolatedSandboxProvider;
+    readonly env?: Record<string, string>;
+  }): Promise<Sandbox>;
   close(): Promise<unknown>;
 }
 
@@ -150,13 +153,6 @@ export interface WorkerRepositoryOperations {
     readonly branch: string;
     readonly baseRef: string;
   }): Promise<WorkerWorktreeHandle>;
-  /** Execute one approved command inside the prepared worktree. */
-  runCommand(input: {
-    readonly command: string;
-    readonly cwd: string;
-    readonly phase: WorkerCommandPhase;
-    readonly signal?: AbortSignal;
-  }): Promise<WorkerCommandEvidence>;
 }
 
 export type WorkerRepositoryErrorCode =
@@ -275,27 +271,9 @@ const git = async (
   return stdout.trim();
 };
 
-const defaultCommandEnvironment = (): Record<string, string> => {
-  const allowed = [
-    "PATH",
-    "HOME",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "SHELL",
-    "SystemRoot",
-  ] as const;
-  const environment: Record<string, string> = { CI: "1" };
-  for (const key of allowed) {
-    const value = process.env[key];
-    if (value !== undefined) environment[key] = value;
-  }
-  return environment;
-};
-
 /** Create the local Git and approved-command adapter used by the repository manager. */
 export const createDefaultWorkerRepositoryOperations = (
-  options: {
+  _options: {
     readonly commandEnvironment?: Readonly<Record<string, string>>;
   } = {},
 ): WorkerRepositoryOperations => ({
@@ -350,31 +328,67 @@ export const createDefaultWorkerRepositoryOperations = (
       cwd: repositoryDir,
       branchStrategy: { type: "branch", branch, baseBranch: baseRef },
     }),
-  runCommand: async ({ command, cwd, phase, signal }) => {
-    try {
-      const { stdout, stderr } = await exec(command, {
-        cwd,
-        env: { ...defaultCommandEnvironment(), ...options.commandEnvironment },
-        maxBuffer: 10 * 1024 * 1024,
-        ...(signal === undefined ? {} : { signal }),
-      });
-      return { command, phase, exitCode: 0, stdout, stderr };
-    } catch (error) {
-      const failure = error as Error & {
-        code?: number;
-        stdout?: string;
-        stderr?: string;
-      };
-      return {
-        command,
-        phase,
-        exitCode: typeof failure.code === "number" ? failure.code : 1,
-        stdout: failure.stdout ?? "",
-        stderr: failure.stderr ?? failure.message,
-      };
-    }
-  },
 });
+
+const authorizationTasks = (
+  request: ExecutionRequest,
+  relatedTasks: readonly NormalizedTask[],
+): readonly NormalizedTask[] => {
+  const tasks = new Map<string, NormalizedTask>();
+  for (const task of [
+    ...relatedTasks,
+    ...(request.context.parentPrd === undefined
+      ? []
+      : [request.context.parentPrd]),
+    request.task,
+  ]) {
+    tasks.set(
+      `${normalizeRepository(task.repository)}:${task.kind}:${task.number}`,
+      task,
+    );
+  }
+  return [...tasks.values()];
+};
+
+const runSandboxCommand = async (
+  sandbox: Sandbox,
+  command: string,
+  phase: WorkerCommandPhase,
+  signal?: AbortSignal,
+): Promise<WorkerCommandEvidence> => {
+  signal?.throwIfAborted();
+  const execution = sandbox.exec(command);
+  const result =
+    signal === undefined
+      ? await execution
+      : await new Promise<Awaited<typeof execution>>((resolve, reject) => {
+          let settled = false;
+          const settle = (action: () => void): void => {
+            if (settled) return;
+            settled = true;
+            signal.removeEventListener("abort", onAbort);
+            action();
+          };
+          const onAbort = (): void => {
+            void sandbox
+              .close()
+              .finally(() => settle(() => reject(signal.reason)));
+          };
+          signal.addEventListener("abort", onAbort, { once: true });
+          execution.then(
+            (value) => settle(() => resolve(value)),
+            (error) => settle(() => reject(error)),
+          );
+          if (signal.aborted) onAbort();
+        });
+  return {
+    command,
+    phase,
+    exitCode: result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
+};
 
 /** Create a repository manager that authorizes before performing repository operations. */
 export const createWorkerRepositoryManager = (
@@ -399,10 +413,17 @@ export const createWorkerRepositoryManager = (
     ...Object.keys(agentOptions.agent.env ?? {}),
     ...Object.keys(agentOptions.env ?? {}),
     ...Object.keys(agentOptions.sandbox.env ?? {}),
+    ...Object.keys(options.commandEnvironment ?? {}),
   ].filter(isRepositoryCredentialName);
   if (repositoryCredentialNames.length > 0) {
     throw new WorkerRepositoryError(
       `Worker agent options expose repository credentials: ${repositoryCredentialNames.join(", ")}.`,
+      "repository_operation_failed",
+    );
+  }
+  if (agentOptions.hooks !== undefined) {
+    throw new WorkerRepositoryError(
+      "Worker execution profiles cannot supply lifecycle hooks; use approved setup commands instead.",
       "repository_operation_failed",
     );
   }
@@ -413,11 +434,16 @@ export const createWorkerRepositoryManager = (
     });
 
   return {
-    prepare: async ({ configuration, request }) => {
+    prepare: async ({ configuration, request, relatedTasks = [] }) => {
       // This policy check is deliberately the first action in the method. No filesystem,
       // clone, fetch, worktree, or command operation may precede it.
-      const dryRun = runWorkerDryRun({ configuration, tasks: [request.task] });
-      const authorizedRequest = dryRun.executionRequests[0];
+      const dryRun = runWorkerDryRun({
+        configuration,
+        tasks: authorizationTasks(request, relatedTasks),
+      });
+      const authorizedRequest = dryRun.executionRequests.find(
+        (candidate) => candidate.taskId === request.taskId,
+      );
       if (authorizedRequest === undefined) {
         throw new WorkerRepositoryError(
           `Task ${request.taskId} is not authorized for execution.`,
@@ -491,6 +517,48 @@ export const createWorkerRepositoryManager = (
           baseRef,
         });
 
+        let sandboxPromise: Promise<Sandbox> | undefined;
+        const assertSafeRepositoryEnvironment = async (): Promise<void> => {
+          for (const environmentPath of [
+            join(repositoryDir, ".sandcastle", ".env"),
+            join(worktree.worktreePath, ".sandcastle", ".env"),
+          ]) {
+            try {
+              const environmentFile = await readFile(environmentPath, "utf8");
+              const names =
+                repositoryCredentialNamesInEnvironmentFile(environmentFile);
+              if (names.length > 0) {
+                throw new WorkerRepositoryError(
+                  `Worker repository environment exposes credentials: ${names.join(", ")}.`,
+                  "repository_operation_failed",
+                );
+              }
+            } catch (error) {
+              if (error instanceof WorkerRepositoryError) throw error;
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                throw error;
+              }
+            }
+          }
+        };
+        const getSandbox = async (): Promise<Sandbox> => {
+          if (sandboxPromise === undefined) {
+            sandboxPromise = (async () => {
+              await assertSafeRepositoryEnvironment();
+              return worktree.createSandbox({
+                sandbox: options.agentRunOptions.sandbox,
+                env: {
+                  CI: "1",
+                  ...options.commandEnvironment,
+                  ...agentOptions.env,
+                  ...agentOptions.agent.env,
+                },
+              });
+            })();
+          }
+          return sandboxPromise;
+        };
+
         return {
           repository,
           namespace,
@@ -501,38 +569,17 @@ export const createWorkerRepositoryManager = (
           baseBranch: request.task.baseBranch,
           baseCommit: request.task.baseCommit,
           repositoryCredentialNames,
-          runCommand: (command, phase, commandOptions = {}) =>
-            operations.runCommand({
+          runCommand: async (command, phase, commandOptions = {}) =>
+            runSandboxCommand(
+              await getSandbox(),
               command,
-              cwd: worktree.worktreePath,
               phase,
-              ...(commandOptions.signal === undefined
-                ? {}
-                : { signal: commandOptions.signal }),
-            }),
+              commandOptions.signal,
+            ),
           runAgent: async ({ prompt, signal }) => {
-            for (const environmentPath of [
-              join(repositoryDir, ".sandcastle", ".env"),
-              join(worktree.worktreePath, ".sandcastle", ".env"),
-            ]) {
-              try {
-                const environmentFile = await readFile(environmentPath, "utf8");
-                const names =
-                  repositoryCredentialNamesInEnvironmentFile(environmentFile);
-                if (names.length > 0) {
-                  throw new WorkerRepositoryError(
-                    `Worker repository environment exposes credentials: ${names.join(", ")}.`,
-                    "repository_operation_failed",
-                  );
-                }
-              } catch (error) {
-                if (error instanceof WorkerRepositoryError) throw error;
-                if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-                  throw error;
-                }
-              }
-            }
-            return worktree.run({
+            const result = await (
+              await getSandbox()
+            ).run({
               ...options.agentRunOptions,
               prompt,
               ...(signal === undefined ? {} : { signal }),
@@ -547,8 +594,21 @@ export const createWorkerRepositoryManager = (
                 ),
               },
             });
+            return { ...result, branch: worktree.branch };
           },
-          close: () => worktree.close() as Promise<CloseResult>,
+          close: async () => {
+            let sandboxCloseError: unknown;
+            try {
+              if (sandboxPromise !== undefined) {
+                await (await sandboxPromise).close();
+              }
+            } catch (error) {
+              sandboxCloseError = error;
+            }
+            const result = (await worktree.close()) as CloseResult;
+            if (sandboxCloseError !== undefined) throw sandboxCloseError;
+            return result;
+          },
         } satisfies PreparedWorkerRepository;
       } catch (error) {
         if (error instanceof WorkerRepositoryError) throw error;

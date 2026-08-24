@@ -851,7 +851,10 @@ export const createGitHubTaskSource = (
       );
       const info = await repositoryInfo(repository);
       const policy = isRecord(configuration.repositories)
-        ? configuration.repositories[repository]
+        ? Object.entries(configuration.repositories).find(
+            ([configuredRepository]) =>
+              normalizeRepository(configuredRepository) === repository,
+          )?.[1]
         : undefined;
       const configuredBaseBranch =
         isRecord(policy) && typeof policy.baseBranch === "string"
@@ -868,14 +871,16 @@ export const createGitHubTaskSource = (
         );
       }
       const title = nonEmptyString(payload.title);
+      const body =
+        payload.body === null
+          ? ""
+          : typeof payload.body === "string"
+            ? payload.body
+            : undefined;
       const author = isRecord(payload.user)
         ? nonEmptyString(payload.user.login)
         : undefined;
-      if (
-        title === undefined ||
-        typeof payload.body !== "string" ||
-        author === undefined
-      ) {
+      if (title === undefined || body === undefined || author === undefined) {
         throw new GitHubTaskSourceError(
           "GitHub issue response did not include title, body, and author.",
           { url: issueUrl },
@@ -887,7 +892,7 @@ export const createGitHubTaskSource = (
         kind,
         number,
         title,
-        body: payload.body,
+        body,
         author,
         labels,
         sourceRevision,

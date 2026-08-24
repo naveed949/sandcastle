@@ -330,6 +330,31 @@ describe("runWorkerDryRun", () => {
         tasks: [task],
       }),
     ).toThrowError(WorkerConfigurationError);
+    expect(() =>
+      runWorkerDryRun({
+        configuration: {
+          ...configuration,
+          profiles: {
+            node: { setupCommands: [], verificationCommands: [] },
+          },
+        },
+        tasks: [task],
+      }),
+    ).toThrowError(/verificationCommands must contain at least one/);
+    expect(() =>
+      runWorkerDryRun({
+        configuration: {
+          ...configuration,
+          profiles: {
+            node: {
+              setupCommands: ["   "],
+              verificationCommands: ["npm test"],
+            },
+          },
+        },
+        tasks: [task],
+      }),
+    ).toThrowError(/setupCommands must contain only non-empty/);
   });
 
   it("reports dry run as read-only with no runtime mutations", () => {

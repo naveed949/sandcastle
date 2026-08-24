@@ -307,14 +307,17 @@ console.log(result.status, result.commits, result.verification);
 ```
 
 The execution engine runs only centrally approved setup and verification
-commands. It invokes the existing Sandcastle worktree/provider runtime with a
-prompt derived from the immutable task snapshot, retains a structured local
-record, and transitions the durable attempt to `verified` only when every
-required verification command succeeds. It does not push, create a pull
-request, accept a no-sandbox provider, or pass orchestration environment
-variables through the agent API. Run logs are forced into the qualified
-repository cache, and a dirty preserved worktree is retained as cleanup
-failure evidence instead of being reported as verified.
+commands. Setup, agent execution, and verification share one repository-scoped
+sandbox, including for isolated providers; repository commands never run in a
+host shell. Every profile must declare at least one non-empty verification
+command, and an attempt becomes `verified` only when those commands pass and
+the agent retained at least one valid commit. The engine invokes the existing
+Sandcastle runtime with a prompt derived from the immutable task snapshot and
+retains a structured local record. It does not push, create a pull request,
+accept a no-sandbox provider or lifecycle hooks, or pass repository credentials
+through the agent API. Run logs are forced into the qualified repository cache,
+and a dirty preserved worktree is retained as cleanup failure evidence instead
+of being reported as verified.
 
 ### Verification-gated draft pull requests
 
@@ -510,6 +513,13 @@ Run the opt-in deployed-worker fixture with:
 SANDCASTLE_POC_GATE_FIXTURE=$PWD/scripts/poc-gate.fixture.mts \
 SANDCASTLE_POC_GATE_SCENARIO=/absolute/path/to/poc-gate-scenario.json \
   npm run test:acceptance:poc-gate
+```
+
+To execute the complete release gate without allowing missing fixtures to be
+reported as skipped tests, configure all four live fixture variables and run:
+
+```bash
+npm run test:acceptance:all
 ```
 
 See [Final POC gate](docs/poc-gate.md) for artifact requirements, audit
@@ -851,6 +861,7 @@ import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 
 await using sandbox = await wt.createSandbox({
   sandbox: docker(),
+  env: { CI: "1" },
   hooks: { sandbox: { onSandboxReady: [{ command: "npm install" }] } },
 });
 
@@ -859,6 +870,9 @@ await sandbox.close();
 
 // wt.close() cleans up the worktree
 ```
+
+The optional `env` is injected when the reusable sandbox is created, so both
+`sandbox.exec()` commands and later agent runs share it.
 
 `wt.close()` checks for uncommitted changes: if the worktree is dirty, it's preserved on disk; if clean, it's removed. `await using` calls `close()` automatically. The worktree persists after `run()`, `interactive()`, and `createSandbox()` complete, so you can hand it to another agent or inspect it.
 

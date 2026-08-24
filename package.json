@@ -42,6 +42,7 @@
     "test:acceptance:dependency-chain": "vitest run src/WorkerDependencyProof.live.test.ts",
     "test:acceptance:restart": "vitest run src/WorkerRestartAcceptanceProof.live.test.ts",
     "test:acceptance:poc-gate": "vitest run src/WorkerPocGate.live.test.ts",
+    "test:acceptance:all": "node scripts/run-worker-acceptance-gate.mjs",
     "test:watch": "vitest",
     "typecheck": "tsgo --noEmit",
     "format": "prettier --write .",

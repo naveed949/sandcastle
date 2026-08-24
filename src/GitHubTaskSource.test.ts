@@ -433,6 +433,36 @@ describe("GitHubTaskSource", () => {
     expect(issueReads).toBe(2);
   });
 
+  it("normalizes null issue bodies and matches repository policy case-insensitively", async () => {
+    const payloads = responses();
+    payloads["/repos/acme/app/issues/7"] = issue({ body: null });
+    payloads["/repos/acme/app/commits/release"] = commit("release-base");
+    const fake = fakeGitHub(payloads);
+    const source = createGitHubTaskSource({ fetch: fake.fetch });
+    const configured = {
+      ...configuration,
+      repositories: {
+        "Acme/App": {
+          authorized: true,
+          baseBranch: "release",
+          profileId: "node",
+        },
+      },
+    } satisfies WorkerConfiguration;
+
+    const fresh = await source.read({
+      configuration: configured,
+      task: { repository: "ACME/APP", kind: "issue", number: 7 },
+    });
+
+    expect(fresh?.task).toMatchObject({
+      repository: "acme/app",
+      body: "",
+      baseBranch: "release",
+      baseCommit: "release-base",
+    });
+  });
+
   it("uses only GitHub relationships and explicit central dependency edges", async () => {
     const payloads = responses();
     payloads["/repos/acme/app/issues/3"] = issue({

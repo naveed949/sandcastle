@@ -98,6 +98,11 @@ SANDCASTLE_POC_GATE_SCENARIO=/srv/sandcastle-worker/acceptance/scenario.json \
 The command passes only after all seven consolidated checks succeed. The JSON
 is the automation artifact; the Markdown report is the operator-facing summary.
 
+For a release decision, use `npm run test:acceptance:all`. It fails before
+Vitest starts when any cross-repository, dependency-chain, restart, or
+consolidated-gate fixture is absent, preventing opt-in test skips from being
+mistaken for deployed POC evidence.
+
 ## POC limits and expansion gates
 
 The report always identifies the current limits: one dispatcher and active

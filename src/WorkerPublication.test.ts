@@ -289,6 +289,76 @@ describe("WorkerPublisher", () => {
     }
   });
 
+  it("re-authorizes publication with retained dependency snapshots", async () => {
+    const blocker = {
+      ...task,
+      number: 2,
+      state: "completed",
+    } satisfies NormalizedTask;
+    const dependent = {
+      ...task,
+      dependencies: [
+        { repository: "acme/app", kind: "issue", number: blocker.number },
+      ],
+    } satisfies NormalizedTask;
+    const dependentRequest = runWorkerDryRun({
+      configuration,
+      tasks: [dependent, blocker],
+    }).executionRequests[0]!;
+    const dependentResult: WorkerExecutionResult = {
+      ...executionResult,
+      attemptId: `attempt:${dependentRequest.executionIdentity}`,
+      taskId: dependentRequest.taskId,
+      executionIdentity: dependentRequest.executionIdentity,
+      profileDigest: dependentRequest.profileDigest,
+      promptTemplateDigest: dependentRequest.promptTemplateDigest,
+      branch: workerBranchFor(dependentRequest),
+      recordPath: "/records/acme/app/dependent.json",
+    };
+    const dependentAttempt: ExecutionAttempt = {
+      attemptId: dependentResult.attemptId,
+      executionIdentity: dependentRequest.executionIdentity,
+      request: dependentRequest,
+      status: "verified",
+      createdAt: "2026-08-23T00:00:00.000Z",
+      updatedAt: "2026-08-23T00:01:00.000Z",
+      outcomes: [
+        {
+          status: "verified",
+          timestamp: "2026-08-23T00:01:00.000Z",
+          evidence: [dependentResult.recordPath],
+        },
+      ],
+      claim: {
+        taskId: dependentRequest.taskId,
+        sourceRevision: dependent.sourceRevision,
+        owner: "worker-1",
+        acquiredAt: "2026-08-23T00:00:00.000Z",
+        leaseExpiresAt: "2026-08-23T01:00:00.000Z",
+        refreshedSnapshots: [dependent, blocker],
+        phase: "started",
+      },
+    };
+    const storeHarness = createStore(dependentAttempt);
+    const operations = createOperations();
+    vi.mocked(operations.resolveLocalBranch).mockResolvedValue(headSha);
+    vi.mocked(operations.createDraftPullRequest).mockResolvedValue({
+      ...draftPullRequest,
+      head: workerBranchFor(dependentRequest),
+    });
+    const guardedPublisher = createWorkerPublisher({
+      configuration,
+      workspaceRoot: "/worker",
+      store: storeHarness.store,
+      operations,
+      loadExecutionResult: vi.fn(async () => dependentResult),
+    });
+
+    await expect(
+      guardedPublisher.publish(dependentResult.attemptId),
+    ).resolves.toMatchObject({ repository: "acme/app" });
+  });
+
   it("fails closed when the local remote or GitHub destination was retargeted", async () => {
     const operations = createOperations();
     vi.mocked(operations.inspectDestination).mockResolvedValue({

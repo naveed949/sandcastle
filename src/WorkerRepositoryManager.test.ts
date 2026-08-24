@@ -35,7 +35,7 @@ const configuration = (authorized: boolean): WorkerConfiguration => ({
   authorizedTasks: [],
   promptVersion: "worker-v1",
   promptTemplates: { "worker-v1": "Implement:\n{{TASK_SNAPSHOT}}" },
-  profiles: { node: { setupCommands: [], verificationCommands: [] } },
+  profiles: { node: { setupCommands: [], verificationCommands: ["npm test"] } },
 });
 
 const request = runWorkerDryRun({
@@ -52,6 +52,12 @@ const agentRunOptions = {
 const createOperations = () => {
   const close = vi.fn(async () => undefined);
   const run = vi.fn();
+  const sandboxClose = vi.fn(async () => ({}));
+  const exec = vi.fn(async (command: string) => ({
+    exitCode: 0,
+    stdout: command,
+    stderr: "",
+  }));
   const operations: WorkerRepositoryOperations = {
     repositoryExists: vi.fn(async () => false),
     clone: vi.fn(async () => undefined),
@@ -66,17 +72,13 @@ const createOperations = () => {
       branch: input.branch,
       worktreePath: "/worker/repositories/acme/app/worktrees/attempt",
       run,
+      createSandbox: vi.fn(
+        async () => ({ run, exec, close: sandboxClose }) as never,
+      ),
       close,
     })),
-    runCommand: vi.fn(async ({ command, phase }) => ({
-      command,
-      phase,
-      exitCode: 0,
-      stdout: "",
-      stderr: "",
-    })),
   };
-  return { operations, close, run };
+  return { operations, close, run, exec, sandboxClose };
 };
 
 describe("WorkerRepositoryManager", () => {
@@ -179,7 +181,7 @@ describe("WorkerRepositoryManager", () => {
   });
 
   it("verifies remote and frozen base before creating a repository-qualified worktree", async () => {
-    const { operations, run } = createOperations();
+    const { operations, run, exec } = createOperations();
     const manager = createWorkerRepositoryManager({
       workspaceRoot: "/worker",
       operations,
@@ -220,6 +222,52 @@ describe("WorkerRepositoryManager", () => {
         },
       }),
     );
+    await prepared.runCommand("npm test", "verification");
+    expect(exec).toHaveBeenCalledWith("npm test");
+    expect(operations.createWorktree).toHaveBeenCalledOnce();
+  });
+
+  it("preserves refreshed PRD context through repository authorization", async () => {
+    const parentPrd = {
+      ...task,
+      kind: "prd",
+      number: 1,
+      title: "PRD: worker",
+    } satisfies NormalizedTask;
+    const child = {
+      ...task,
+      parentPrd: { repository: "acme/app", kind: "prd", number: 1 },
+      dependencies: [{ repository: "acme/app", kind: "issue", number: 2 }],
+    } satisfies NormalizedTask;
+    const blocker = {
+      ...task,
+      number: 2,
+      state: "completed",
+    } satisfies NormalizedTask;
+    const childRequest = runWorkerDryRun({
+      configuration: configuration(true),
+      tasks: [child, parentPrd, blocker],
+    }).executionRequests[0]!;
+    const { operations } = createOperations();
+    const manager = createWorkerRepositoryManager({
+      workspaceRoot: "/worker",
+      operations,
+      agentRunOptions,
+    });
+
+    await expect(
+      manager.prepare({
+        configuration: configuration(true),
+        request: childRequest,
+      }),
+    ).rejects.toMatchObject({ code: "unauthorized" });
+    await expect(
+      manager.prepare({
+        configuration: configuration(true),
+        request: childRequest,
+        relatedTasks: [parentPrd, blocker],
+      }),
+    ).resolves.toMatchObject({ repository: "acme/app" });
   });
 
   it("fails closed when the canonical remote or current base revision differs", async () => {

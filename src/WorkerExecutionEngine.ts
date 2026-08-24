@@ -221,6 +221,7 @@ export const createWorkerExecutionEngine = (
           prepared = await options.repositoryManager.prepare({
             configuration: options.configuration,
             request,
+            relatedTasks: startedAttempt.claim?.refreshedSnapshots,
           });
         } catch (cause) {
           failurePhase = "preparation";
@@ -273,6 +274,17 @@ export const createWorkerExecutionEngine = (
               failurePhase = "execution";
               error = errorMessage(cause);
             }
+          }
+        }
+
+        if (prepared !== undefined && failurePhase === undefined) {
+          if (
+            agent === undefined ||
+            agent.commits.length === 0 ||
+            !agent.commits.every((commit) => /^[0-9a-f]{40}$/i.test(commit.sha))
+          ) {
+            failurePhase = "execution";
+            error = "Agent execution did not retain a valid resulting commit.";
           }
         }
 

@@ -174,6 +174,8 @@ export interface WorktreeRunResult {
 export interface WorktreeCreateSandboxOptions {
   /** Sandbox provider (e.g. docker({ imageName: "sandcastle:myrepo" })). */
   readonly sandbox: SandboxProvider;
+  /** Environment variables to inject when the sandbox is created. */
+  readonly env?: Record<string, string>;
   /** Lifecycle hooks grouped by execution location (host or sandbox). */
   readonly hooks?: SandboxHooks;
   /** Paths relative to the host repo root to copy into the worktree at creation time. */
@@ -742,6 +744,7 @@ export const createWorktree = async (
       worktreePath: worktreeInfo.path,
       hostRepoDir,
       sandbox: opts.sandbox,
+      env: opts.env,
       hooks: opts.hooks,
       copyToWorktree: opts.copyToWorktree,
       timeouts: opts.timeouts,

@@ -532,30 +532,36 @@ const validateConfiguration = (
       if (
         !Array.isArray(rawProfile.setupCommands) ||
         !rawProfile.setupCommands.every(
-          (command) => typeof command === "string",
+          (command) => typeof command === "string" && command.trim().length > 0,
         )
       ) {
         issues.push(
-          `profile ${normalizedProfileId} setupCommands must be string[]`,
+          `profile ${normalizedProfileId} setupCommands must contain only non-empty strings`,
         );
       }
       if (
         !Array.isArray(rawProfile.verificationCommands) ||
+        rawProfile.verificationCommands.length === 0 ||
         !rawProfile.verificationCommands.every(
-          (command) => typeof command === "string",
+          (command) => typeof command === "string" && command.trim().length > 0,
         )
       ) {
         issues.push(
-          `profile ${normalizedProfileId} verificationCommands must be string[]`,
+          `profile ${normalizedProfileId} verificationCommands must contain at least one non-empty string`,
         );
       }
       const setupCommands = rawProfile.setupCommands;
       const verificationCommands = rawProfile.verificationCommands;
       if (
         Array.isArray(setupCommands) &&
-        setupCommands.every((command) => typeof command === "string") &&
+        setupCommands.every(
+          (command) => typeof command === "string" && command.trim().length > 0,
+        ) &&
         Array.isArray(verificationCommands) &&
-        verificationCommands.every((command) => typeof command === "string")
+        verificationCommands.length > 0 &&
+        verificationCommands.every(
+          (command) => typeof command === "string" && command.trim().length > 0,
+        )
       ) {
         profiles[normalizedProfileId] = {
           setupCommands: [...setupCommands],
