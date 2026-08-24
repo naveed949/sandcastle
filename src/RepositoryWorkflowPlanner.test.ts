@@ -873,4 +873,104 @@ describe("createRepositoryWorkflowPlanner", () => {
 
     expect(result.record?.input.authorization).toBe("task");
   });
+
+  it("retains centrally configured dependency provenance during planning", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "repository-planner-configured-dependency-"),
+    );
+    directories.push(directory);
+    const workerStore = createWorkerStateStore({
+      filePath: join(directory, "worker.json"),
+    });
+    const workflowStore = createRepositoryWorkflowStore({
+      filePath: join(directory, "workflows.json"),
+    });
+    const planStore = createRepositoryWorkflowPlanStore({
+      store: workflowStore,
+    });
+    const blocker = {
+      ...task,
+      number: 7,
+      title: "Completed dependency",
+      sourceRevision: "issue:7:rev-1",
+      state: "completed" as const,
+    };
+    const configuration = {
+      repositories: {
+        "acme/one": {
+          authorized: true,
+          baseBranch: "main",
+          profileId: "node-v1",
+        },
+      },
+      authorizedTasks: [],
+      taskDependencies: [
+        {
+          task: { repository: "acme/one", kind: "issue" as const, number: 23 },
+          blockedBy: [
+            { repository: "acme/one", kind: "issue" as const, number: 7 },
+          ],
+        },
+      ],
+      promptVersion: "worker-v1",
+      promptTemplates: { "worker-v1": "{{TASK_SNAPSHOT}}" },
+      profiles: {
+        "node-v1": {
+          setupCommands: [],
+          verificationCommands: ["npm test"],
+        },
+      },
+    };
+    const source = {
+      discover: vi.fn(async () => [task, blocker]),
+      read: vi.fn(async () => ({ task, relatedTasks: [blocker] })),
+    };
+    const planner = createRepositoryWorkflowPlanner({
+      invoke: async () => ({
+        stdout: `<plan>${JSON.stringify({
+          version: 1,
+          taskIntent: "Plan a task with a centrally configured dependency.",
+          proposedWork: ["Retain the authoritative blocker."],
+          verificationStrategy: ["Inspect dependency evidence."],
+          risks: [],
+          evidence: [],
+          needsHumanClarification: false,
+        })}</plan>`,
+      }),
+      planStore,
+    });
+
+    const result = await planOneEligibleTask({
+      repository: "acme/one",
+      repositoryWorkflow: {
+        workflowIdentity: "acme/one:workflow-v1",
+        cycle: 1,
+        revision: 1,
+      },
+      configuration,
+      source,
+      store: workerStore,
+      planner,
+      owner: "planner",
+      leaseDurationMs: 60_000,
+      promptVersion: "planner-v1",
+      promptTemplate: "Repository {{REPOSITORY}} Task {{TASK_SNAPSHOT}}",
+    });
+
+    expect(result.status).toBe("planned");
+    expect(result.record?.input.dependencyEvidence).toEqual([
+      {
+        taskId: "acme/one:issue:7",
+        repository: "acme/one",
+        kind: "issue",
+        number: 7,
+        sourceRevision: "issue:7:rev-1",
+        state: "completed",
+        satisfied: true,
+      },
+    ]);
+    expect(
+      result.attempt?.claim?.refreshedSnapshots?.[0]?.dependencies,
+    ).toEqual([{ repository: "acme/one", kind: "issue", number: 7 }]);
+  });
 });

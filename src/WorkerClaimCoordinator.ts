@@ -1,5 +1,6 @@
 import {
   runWorkerDryRun,
+  workerTaskId,
   type ExecutionRequest,
   type NormalizedTask,
   type TaskReference,
@@ -117,10 +118,29 @@ export const claimWorkerTask = async ({
     );
   }
 
+  // Retain the same policy-normalized snapshots that produced the claim
+  // request. This preserves centrally configured dependency edges in the
+  // claim evidence instead of retaining only the source adapter's raw task.
+  const refreshedById = new Map(
+    refreshed.decisions.map((candidate) => [candidate.taskId, candidate.task]),
+  );
+  const refreshedSnapshots = [freshTask, ...freshRead.relatedTasks].map(
+    (snapshot) => {
+      const normalized = refreshedById.get(workerTaskId(snapshot));
+      if (normalized === undefined) {
+        throw new WorkerClaimError(
+          `Task ${workerTaskId(snapshot)} disappeared during claim refresh.`,
+          "task_unavailable",
+        );
+      }
+      return normalized;
+    },
+  );
+
   const attempt = await store.claimAttempt(freshRequest, {
     owner,
     leaseDurationMs,
-    refreshedSnapshots: [freshTask, ...freshRead.relatedTasks],
+    refreshedSnapshots,
     ...(claimedAt === undefined ? {} : { claimedAt }),
     ...(attemptId === undefined ? {} : { attemptId }),
   });
