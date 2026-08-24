@@ -86,6 +86,17 @@ outcomes, retained execution records, verification summaries, commits, and
 draft pull-request evidence. The queue order is copied from worker diagnostics;
 the browser never computes a competing priority.
 
+The repository workflow scheduler exposes its authoritative durable projection
+at `GET /api/v1/workflows` (with
+`GET /api/v1/repository-workflows` as an alias). Workflow state is updated with
+cross-process compare-and-set revisions. A claim is written before dispatch
+and retains its repository-qualified workflow identity, owner, lease, cycle,
+and phase. The ready queue is globally serialized, fair, and deterministic:
+least-recently scheduled repository first, then repository, cycle, and
+workflow identity. Expired pre-dispatch claims are retryable; claims that may
+have dispatched side effects require manual intervention. Transient failures
+use bounded backoff, and idle polls do not spend a finite cycle budget.
+
 `GET /api/v1/events` is a Server-Sent Events stream. Events have monotonically
 ordered numeric IDs and reconnect using `Last-Event-ID`, so acknowledged events
 are not duplicated. Evidence is returned only through opaque identifiers from

@@ -1,5 +1,6 @@
 import type {
   RepositoryWorkflowControl,
+  RepositoryWorkflowProjection,
   RepositoryWorkflowRunRecord,
 } from "./RepositoryWorkflowControl.js";
 
@@ -20,6 +21,12 @@ export interface RepositoryWorkflowCoordinatorStatus {
   readonly lastCycleAt?: string;
   /** Most recent coordinator error. */
   readonly lastError?: string;
+  /** Earliest time at which the next bounded polling attempt is scheduled. */
+  readonly nextPollAt?: string;
+  /** Number of ready workflows in the authoritative queue. */
+  readonly queueLength?: number;
+  /** Stable reason code for the most recent classified failure. */
+  readonly lastFailureReason?: string;
 }
 
 /** Host-owned scheduler for globally serialized repository workflows. */
@@ -42,6 +49,10 @@ export interface RepositoryWorkflowCoordinatorOptions {
   readonly control: RepositoryWorkflowControl;
   /** Delay between completed polling cycles. */
   readonly pollIntervalMs?: number;
+  /** Initial delay after a failed dispatch. */
+  readonly failureBackoffBaseMs?: number;
+  /** Maximum delay after repeated failed dispatches. */
+  readonly failureBackoffMaxMs?: number;
   /** Maximum time to wait for a cancelled workflow to persist its outcome. */
   readonly shutdownTimeoutMs?: number;
   /** Clock used for operator-visible cycle timestamps. */
@@ -99,6 +110,22 @@ export const createRepositoryWorkflowCoordinator = (
   let activeRepository: string | undefined;
   let lastCycleAt: string | undefined;
   let lastError: string | undefined;
+  let nextPollAt: string | undefined;
+  let queueLength: number | undefined;
+  let lastFailureReason: string | undefined;
+  let failureCount = 0;
+  const failureBackoffBaseMs = options.failureBackoffBaseMs ?? 1_000;
+  const failureBackoffMaxMs = options.failureBackoffMaxMs ?? 60_000;
+  if (
+    !Number.isFinite(failureBackoffBaseMs) ||
+    failureBackoffBaseMs <= 0 ||
+    !Number.isFinite(failureBackoffMaxMs) ||
+    failureBackoffMaxMs < failureBackoffBaseMs
+  ) {
+    throw new Error(
+      "failure backoff bounds must be finite and failureBackoffMaxMs must be at least failureBackoffBaseMs.",
+    );
+  }
 
   function clearTimer(): void {
     if (timer !== undefined) clearTimeout(timer);
@@ -107,12 +134,21 @@ export const createRepositoryWorkflowCoordinator = (
 
   function schedule(milliseconds: number): void {
     if (mode !== "running" || timer !== undefined) return;
+    const delay = Math.max(0, Math.min(milliseconds, failureBackoffMaxMs));
+    nextPollAt = new Date(Date.parse(now()) + delay).toISOString();
     timer = setTimeout(() => {
       timer = undefined;
       void runCycle().catch(() => undefined);
-    }, milliseconds);
+    }, delay);
     timer.unref();
   }
+
+  const projection = async (): Promise<
+    RepositoryWorkflowProjection | undefined
+  > =>
+    options.control.getProjection === undefined
+      ? undefined
+      : options.control.getProjection();
 
   function runCycle(): Promise<void> {
     if (cycleInFlight !== undefined) return cycleInFlight;
@@ -125,9 +161,26 @@ export const createRepositoryWorkflowCoordinator = (
     const controller = new AbortController();
     activeController = controller;
     const cycle = (async () => {
-      const repositories = (await options.control.list())
-        .filter((repository) => repository.mode === "active")
-        .sort((left, right) => left.repository.localeCompare(right.repository));
+      const authoritativeProjection = await projection();
+      const repositories =
+        authoritativeProjection === undefined
+          ? (await options.control.list())
+              .filter(
+                (repository) =>
+                  repository.mode === "active" &&
+                  repository.activeRunId === undefined &&
+                  (repository.nextEligibleAt === undefined ||
+                    Date.parse(repository.nextEligibleAt) <= Date.parse(now())),
+              )
+              .sort(
+                (left, right) =>
+                  (left.lastScheduledSequence ?? 0) -
+                    (right.lastScheduledSequence ?? 0) ||
+                  left.repository.localeCompare(right.repository) ||
+                  left.nextCycle - right.nextCycle,
+              )
+          : authoritativeProjection.queue;
+      queueLength = repositories.length;
       if (controller.signal.aborted) return;
       const target = repositories[0];
       if (target === undefined) return;
@@ -135,8 +188,17 @@ export const createRepositoryWorkflowCoordinator = (
       activeRepository = target.repository;
       try {
         await options.control.runNow(target.repository, controller.signal);
+        failureCount = 0;
+        lastFailureReason = undefined;
       } catch (error) {
         if (!controller.signal.aborted) {
+          failureCount += 1;
+          lastFailureReason =
+            error instanceof Error &&
+            "code" in error &&
+            typeof error.code === "string"
+              ? error.code
+              : "dispatch_failed";
           lastError = errorMessage(error);
           options.onError?.(target.repository, error);
         }
@@ -151,7 +213,14 @@ export const createRepositoryWorkflowCoordinator = (
       .finally(() => {
         lastCycleAt = now();
         cycleInFlight = undefined;
-        schedule(pollIntervalMs);
+        const failureDelay =
+          failureCount === 0
+            ? pollIntervalMs
+            : Math.min(
+                failureBackoffMaxMs,
+                failureBackoffBaseMs * 2 ** Math.max(0, failureCount - 1),
+              );
+        schedule(failureDelay);
       })
       .catch((error) => {
         lastError = errorMessage(error);
@@ -171,6 +240,12 @@ export const createRepositoryWorkflowCoordinator = (
     mode = "starting";
     lastError = undefined;
     startInFlight = Promise.resolve()
+      .then(() => {
+        if (options.control.recover !== undefined) {
+          return options.control.recover();
+        }
+        return undefined;
+      })
       .then(() => {
         if (mode !== "starting") return;
         mode = "running";
@@ -227,6 +302,9 @@ export const createRepositoryWorkflowCoordinator = (
     ...(activeRepository === undefined ? {} : { activeRepository }),
     ...(lastCycleAt === undefined ? {} : { lastCycleAt }),
     ...(lastError === undefined ? {} : { lastError }),
+    ...(nextPollAt === undefined ? {} : { nextPollAt }),
+    ...(queueLength === undefined ? {} : { queueLength }),
+    ...(lastFailureReason === undefined ? {} : { lastFailureReason }),
   });
 
   const requireRunning = (): void => {
@@ -245,12 +323,19 @@ export const createRepositoryWorkflowCoordinator = (
     runNow: async (
       repository,
       signal,
+      runOptions,
     ): Promise<RepositoryWorkflowRunRecord> => {
       requireRunning();
-      return options.control.runNow(repository, signal);
+      return options.control.runNow(repository, signal, runOptions);
     },
     pause: options.control.pause,
     resume: options.control.resume,
+    ...(options.control.recover === undefined
+      ? {}
+      : { recover: options.control.recover }),
+    ...(options.control.getProjection === undefined
+      ? {}
+      : { getProjection: options.control.getProjection }),
   };
 
   return { control, runCycle, start, stop, status };

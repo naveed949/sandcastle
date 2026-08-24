@@ -49,6 +49,34 @@ const startAndWaitForDispatch = async (
 };
 
 describe("createRepositoryWorkflowCoordinator", () => {
+  it("reconciles durable claims before dispatch and applies bounded failure backoff", async () => {
+    const recover = vi.fn(async () => []);
+    const runNow = vi.fn(async () => {
+      throw new Error("temporary discovery failure");
+    });
+    const raw = controlFor({ recover, runNow });
+    const coordinator = createRepositoryWorkflowCoordinator({
+      control: raw,
+      pollIntervalMs: 10,
+      failureBackoffBaseMs: 25,
+      failureBackoffMaxMs: 100,
+      now: () => "2026-08-24T00:00:00.000Z",
+    });
+
+    await coordinator.start();
+    await vi.waitFor(() => expect(runNow).toHaveBeenCalled());
+    await coordinator.stop();
+    expect(recover).toHaveBeenCalledOnce();
+    const status = coordinator.status();
+    expect(status.lastFailureReason).toBe("dispatch_failed");
+    expect(Date.parse(status.nextPollAt!)).toBeGreaterThanOrEqual(
+      Date.parse("2026-08-24T00:00:00.025Z"),
+    );
+    expect(Date.parse(status.nextPollAt!)).toBeLessThanOrEqual(
+      Date.parse("2026-08-24T00:00:00.100Z"),
+    );
+  });
+
   it("gates dispatch on lifecycle authority and serializes one repository globally", async () => {
     let finish!: () => void;
     let rejectOnAbort!: (error: unknown) => void;

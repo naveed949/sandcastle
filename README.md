@@ -570,6 +570,23 @@ does not pause the others. The operator API provides:
 - `POST /api/v1/repositories/:owner/:name/pause`, `/resume`, or `/run` for
   independent workflow control.
 
+Workflow authorization and dispatch are persisted through one transactional
+JSON state boundary. Each mutation advances a monotonic revision and accepts
+an optional `expectedRevision` compare-and-set guard; claims persist the
+repository-qualified workflow identity, owner, lease, cycle, and claim phase
+before runtime dispatch. Expired claims are classified as retryable before
+dispatch or manual intervention after dispatch, while transient failures use
+bounded backoff. The global ready queue is fair and deterministic: the least
+recently scheduled workflow wins, then normalized repository, cycle, and
+repository-qualified workflow identity break ties. Idle polls do not consume a
+workflow cycle budget.
+
+`GET /api/v1/workflows` (also available as
+`GET /api/v1/repository-workflows`) returns the scheduler's revision-bound
+projection, including repository, task stage, owner, timestamps, queue
+position, recovery state, and safe blocking reasons. Mission Control embeds the
+same projection in its overview; it does not calculate a competing queue.
+
 Override the defaults with `SANDCASTLE_FEATURE_BRANCH`,
 `SANDCASTLE_CODEX_AUTH_PATH`, `SANDCASTLE_BASE_BRANCH`,
 `SANDCASTLE_MISSION_CONTROL_ROOT`, `SANDCASTLE_WORKER_OWNER`,

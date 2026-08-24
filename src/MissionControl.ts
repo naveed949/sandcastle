@@ -68,7 +68,10 @@ import {
   type MissionControlTaskView,
 } from "./MissionControlReadModel.js";
 import { containsProtectedWorkerMaterial } from "./WorkerIsolationPolicy.js";
-import type { RepositoryWorkflowControl } from "./RepositoryWorkflowControl.js";
+import type {
+  RepositoryWorkflowControl,
+  RepositoryWorkflowProjection,
+} from "./RepositoryWorkflowControl.js";
 export { createMissionControlReadModel } from "./MissionControlReadModel.js";
 import {
   createMissionControlPolicyAdministration,
@@ -214,6 +217,8 @@ export interface MissionControlOverview {
   readonly recoveryWarnings: readonly MissionControlRecoveryWarning[];
   readonly operationalStateCounts: MissionControlOperationalStateCounts;
   readonly orchestration: MissionControlOrchestrationHealth;
+  /** Optional repository-workflow projection from the authoritative scheduler. */
+  readonly repositoryWorkflows?: RepositoryWorkflowProjection;
 }
 
 export type {
@@ -278,6 +283,7 @@ export interface MissionControlHost {
   stop(): Promise<void>;
   /** Rebuild and return the disposable overview read model. */
   getOverview(): Promise<MissionControlOverview>;
+  getWorkflowProjection(): Promise<RepositoryWorkflowProjection | undefined>;
   getTaskInbox(): Promise<MissionControlTaskInbox>;
   getTask(taskId: string): Promise<MissionControlTaskView | undefined>;
   getQueue(): Promise<MissionControlQueue>;
@@ -918,6 +924,35 @@ const readJsonBody = (
     request.on("error", reject);
   });
 
+const readOptionalJsonBody = async (
+  request: import("node:http").IncomingMessage,
+): Promise<Record<string, unknown>> => {
+  const contentLength = request.headers["content-length"];
+  if (contentLength === "0") return {};
+  let value: unknown;
+  try {
+    value = await readJsonBody(request);
+  } catch (error) {
+    if (
+      contentLength === undefined &&
+      error instanceof Error &&
+      error.message === "invalid_json"
+    ) {
+      return {};
+    }
+    throw error;
+  }
+  return isRecord(value) ? value : {};
+};
+
+const expectedRevisionFrom = (value: unknown): number | undefined => {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new Error("expectedRevision must be a non-negative integer.");
+  }
+  return value;
+};
+
 const parseControlRequest = (
   value: unknown,
 ): WorkerControlRequest | undefined => {
@@ -1323,9 +1358,31 @@ export const createMissionControlHost = (
   const serverOptions = configuration.server ?? {};
   const bindAddress = serverOptions.bindAddress ?? "127.0.0.1";
   const port = serverOptions.port ?? 3000;
+  const getWorkflowProjection = async (): Promise<
+    RepositoryWorkflowProjection | undefined
+  > =>
+    repositoryWorkflows?.getProjection === undefined
+      ? undefined
+      : repositoryWorkflows.getProjection();
   const server = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? "/", "http://mission-control.invalid");
+      if (
+        request.method === "GET" &&
+        (url.pathname === "/api/v1/workflows" ||
+          url.pathname === "/api/v1/repository-workflows")
+      ) {
+        const projection = await getWorkflowProjection();
+        if (projection === undefined) {
+          writeJson(response, 404, {
+            version: 1,
+            error: "repository_workflows_not_configured",
+          });
+        } else {
+          writeJson(response, 200, projection);
+        }
+        return;
+      }
       if (url.pathname === "/api/v1/repositories") {
         if (!repositoryWorkflows) {
           writeJson(response, 404, {
@@ -1335,9 +1392,14 @@ export const createMissionControlHost = (
           return;
         }
         if (request.method === "GET") {
+          const projection = await getWorkflowProjection();
           writeJson(response, 200, {
             version: 1,
+            ...(projection === undefined
+              ? {}
+              : { revision: projection.revision }),
             repositories: await repositoryWorkflows.list(),
+            ...(projection === undefined ? {} : { workflow: projection }),
           });
           return;
         }
@@ -1347,6 +1409,9 @@ export const createMissionControlHost = (
               string,
               unknown
             >;
+            const expectedRevision = expectedRevisionFrom(
+              body.expectedRevision,
+            );
             if (
               !isNonEmptyString(body.repository) ||
               !isNonEmptyString(body.featureBranch) ||
@@ -1362,6 +1427,7 @@ export const createMissionControlHost = (
               repository: body.repository,
               featureBranch: body.featureBranch,
               workflowId: body.workflowId,
+              expectedRevision,
             });
             writeJson(
               response,
@@ -1404,16 +1470,33 @@ export const createMissionControlHost = (
             return;
           }
           if (request.method === "DELETE" && !action) {
-            await repositoryWorkflows.remove(repository);
+            await repositoryWorkflows.remove(repository, {
+              expectedRevision: expectedRevisionFrom(
+                url.searchParams.get("expectedRevision") === null
+                  ? undefined
+                  : Number(url.searchParams.get("expectedRevision")),
+              ),
+            });
             response.statusCode = 204;
             response.end();
             return;
           }
           if (request.method === "POST" && action) {
-            if (action === "pause") await repositoryWorkflows.pause(repository);
-            else if (action === "resume")
-              await repositoryWorkflows.resume(repository);
-            else await repositoryWorkflows.runNow(repository);
+            const body = await readOptionalJsonBody(request);
+            const expectedRevision = expectedRevisionFrom(
+              body.expectedRevision,
+            );
+            if (action === "pause") {
+              await repositoryWorkflows.pause(repository, { expectedRevision });
+            } else if (action === "resume") {
+              await repositoryWorkflows.resume(repository, {
+                expectedRevision,
+              });
+            } else {
+              await repositoryWorkflows.runNow(repository, undefined, {
+                expectedRevision,
+              });
+            }
             writeJson(
               response,
               200,
@@ -1808,9 +1891,10 @@ export const createMissionControlHost = (
   let stopRequested = false;
 
   const getOverview = async (): Promise<MissionControlOverview> => {
-    const [state, eventRecords] = await Promise.all([
+    const [state, eventRecords, workflowProjection] = await Promise.all([
       store.read(),
       getEvents(),
+      getWorkflowProjection(),
     ]);
     const diagnosticsFromDisk = eventRecords.map((record) => record.event);
     const serviceStatus = service.status();
@@ -1831,6 +1915,9 @@ export const createMissionControlHost = (
         diagnosticsFromDisk,
       ),
       orchestration: orchestrationHealth(server.listening),
+      ...(workflowProjection === undefined
+        ? {}
+        : { repositoryWorkflows: workflowProjection }),
     };
   };
 
@@ -1968,6 +2055,7 @@ export const createMissionControlHost = (
     start,
     stop,
     getOverview,
+    getWorkflowProjection,
     getTaskInbox: readModel.getTaskInbox,
     getTask: readModel.getTask,
     getQueue: readModel.getQueue,

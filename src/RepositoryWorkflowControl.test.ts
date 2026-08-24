@@ -28,6 +28,167 @@ afterEach(async () => {
 });
 
 describe("createRepositoryWorkflowControl", () => {
+  it("uses compare-and-set revisions across store instances and qualifies workflow identity by repository", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "repository-workflow-cas-"));
+    directories.push(directory);
+    const filePath = join(directory, "workflows.json");
+    const firstStore = createRepositoryWorkflowStore({ filePath });
+    const secondStore = createRepositoryWorkflowStore({ filePath });
+
+    await firstStore.update((state) => state, { expectedRevision: 0 });
+    await expect(
+      secondStore.update((state) => state, { expectedRevision: 0 }),
+    ).rejects.toMatchObject({
+      code: "stale_revision",
+      expectedRevision: 0,
+      actualRevision: 1,
+    });
+
+    const control = createRepositoryWorkflowControl({
+      store: firstStore,
+      runtime: { runCycle: vi.fn() },
+      workflows: { "repo-work-v1": workflow },
+    });
+    await control.authorize({
+      repository: "acme/one",
+      featureBranch: "feat/one",
+      workflowId: "repo-work-v1",
+    });
+    await control.authorize({
+      repository: "acme/two",
+      featureBranch: "feat/two",
+      workflowId: "repo-work-v1",
+    });
+
+    const projection = await control.getProjection!();
+    expect(projection.revision).toBeGreaterThan(1);
+    expect(
+      projection.repositories.map((item) => item.workflowIdentity),
+    ).toEqual(["acme/one:repo-work-v1", "acme/two:repo-work-v1"]);
+    expect(projection.repositories[0]?.workflowIdentity).not.toBe(
+      projection.repositories[1]?.workflowIdentity,
+    );
+  });
+
+  it("recovers an expired unstarted claim as retryable after a restart", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "repository-workflow-recovery-"),
+    );
+    directories.push(directory);
+    const filePath = join(directory, "workflows.json");
+    const store = createRepositoryWorkflowStore({ filePath });
+    await store.update(
+      (state) => ({
+        ...state,
+        repositories: [
+          {
+            repository: "acme/app",
+            featureBranch: "feat/batch",
+            workflowId: workflow.id,
+            workflowIdentity: "acme/app:repo-work-v1",
+            mode: "active" as const,
+            nextCycle: 1,
+            activeRunId: "run-crashed",
+          },
+        ],
+        runs: [
+          {
+            id: "run-crashed",
+            repository: "acme/app",
+            workflowId: workflow.id,
+            workflowIdentity: "acme/app:repo-work-v1",
+            cycle: 1,
+            startedAt: "2026-08-24T00:00:00.000Z",
+            status: "running" as const,
+            cycles: [],
+            owner: "old-process",
+            claim: {
+              owner: "old-process",
+              acquiredAt: "2026-08-24T00:00:00.000Z",
+              leaseExpiresAt: "2026-08-24T00:00:01.000Z",
+              phase: "claimed" as const,
+            },
+          },
+        ],
+      }),
+      { expectedRevision: 0 },
+    );
+
+    const control = createRepositoryWorkflowControl({
+      store: createRepositoryWorkflowStore({ filePath }),
+      runtime: { runCycle: vi.fn() },
+      workflows: { [workflow.id]: workflow },
+      now: () => "2026-08-24T00:01:00.000Z",
+      owner: "new-process",
+      leaseDurationMs: 60_000,
+    });
+
+    await expect(control.recover!()).resolves.toEqual([
+      expect.objectContaining({
+        repository: "acme/app",
+        runId: "run-crashed",
+        disposition: "retryable",
+      }),
+    ]);
+    const inspection = await control.inspect("acme/app");
+    expect(inspection?.activeRunId).toBeUndefined();
+    expect(inspection?.blockingReason).toBeUndefined();
+    expect(inspection?.runs[0]).toMatchObject({
+      status: "interrupted",
+      recovery: "retryable",
+    });
+  });
+
+  it("does not consume a cycle budget for an idle poll and exposes a stable ready queue", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "repository-workflow-queue-"),
+    );
+    directories.push(directory);
+    const runCycle = vi.fn(async ({ repository, cycle }) => ({
+      repository,
+      cycle,
+      status: "idle" as const,
+      tasks: [],
+    }));
+    const control = createRepositoryWorkflowControl({
+      store: createRepositoryWorkflowStore({
+        filePath: join(directory, "workflows.json"),
+      }),
+      runtime: { runCycle },
+      workflows: { [workflow.id]: workflow },
+      now: () => "2026-08-24T00:00:00.000Z",
+      owner: "scheduler",
+      leaseDurationMs: 60_000,
+      createId: (() => {
+        let next = 0;
+        return () => `run-${++next}`;
+      })(),
+    });
+    await control.authorize({
+      repository: "Acme/Two",
+      featureBranch: "feat/two",
+      workflowId: workflow.id,
+    });
+    await control.authorize({
+      repository: "acme/one",
+      featureBranch: "feat/one",
+      workflowId: workflow.id,
+    });
+
+    const before = await control.getProjection!();
+    expect(before.queue.map((item) => item.repository)).toEqual([
+      "acme/one",
+      "acme/two",
+    ]);
+    await control.runNow("acme/one");
+    expect((await control.inspect("acme/one"))?.nextCycle).toBe(1);
+    const after = await control.getProjection!();
+    expect(after.queue.map((item) => item.repository)).toEqual([
+      "acme/two",
+      "acme/one",
+    ]);
+  });
+
   it("manages authorized repositories and exposes per-repository workflow details", async () => {
     const directory = await mkdtemp(
       join(tmpdir(), "repository-workflow-control-"),

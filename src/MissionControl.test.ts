@@ -23,7 +23,10 @@ import type {
   RepositoryWorkflowCoordinator,
   RepositoryWorkflowCoordinatorMode,
 } from "./RepositoryWorkflowCoordinator.js";
-import type { RepositoryWorkflowControl } from "./RepositoryWorkflowControl.js";
+import type {
+  RepositoryWorkflowControl,
+  RepositoryWorkflowProjection,
+} from "./RepositoryWorkflowControl.js";
 import { WorkerServiceLockError } from "./WorkerService.js";
 
 const task: NormalizedTask = {
@@ -676,6 +679,77 @@ describe("Mission Control host", () => {
     await running;
     expect(coordinator.stop).toHaveBeenCalledOnce();
     expect(host.service.status().mode).toBe("stopped");
+  });
+
+  it("serves the authoritative repository workflow projection and embeds it in overview", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "sandcastle-mission-control-workflows-"),
+    );
+    temporaryDirectories.push(directory);
+    const projection = {
+      version: 1,
+      revision: 7,
+      generatedAt: "2026-08-24T12:00:00.000Z",
+      repositories: [
+        {
+          repository: "acme/app",
+          workflowId: "repo-work-v1",
+          workflowIdentity: "acme/app:repo-work-v1",
+          revision: 7,
+          stage: "running" as const,
+          runId: "run-22",
+          task: {
+            taskId: "acme/app:issue:22",
+            repository: "acme/app",
+            kind: "issue" as const,
+            number: 22,
+            title: "Schedule repository workflows transactionally",
+            stage: "implementing",
+          },
+          owner: "scheduler",
+          claimedAt: "2026-08-24T11:59:00.000Z",
+          startedAt: "2026-08-24T11:59:01.000Z",
+          updatedAt: "2026-08-24T11:59:02.000Z",
+        },
+      ],
+      queue: [],
+      entries: [],
+    } satisfies RepositoryWorkflowProjection;
+    const control = {
+      authorize: vi.fn(async () => undefined),
+      remove: vi.fn(async () => undefined),
+      list: vi.fn(async () => []),
+      inspect: vi.fn(async () => undefined),
+      runNow: vi.fn(async () => {
+        throw new Error("not expected");
+      }),
+      pause: vi.fn(async () => undefined),
+      resume: vi.fn(async () => undefined),
+      getProjection: vi.fn(async () => projection),
+    } satisfies RepositoryWorkflowControl;
+    const host = createMissionControlHost({
+      configuration: createConfiguration(directory),
+      boundaries: {
+        repositoryWorkflows: control,
+        source: { discover: vi.fn(async () => []), read: vi.fn() },
+        repositoryManager: { prepare: vi.fn() },
+        execution: { execute: vi.fn() },
+        publisher: { publish: vi.fn() },
+      },
+    });
+    try {
+      expect((await host.getOverview()).repositoryWorkflows).toEqual(
+        projection,
+      );
+      const address = await host.listen();
+      const response = await fetch(
+        `http://${address.host}:${address.port}/api/v1/workflows`,
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(projection);
+    } finally {
+      await host.stop();
+    }
   });
 
   it("allows only one host-owned dispatcher through restart", async () => {
