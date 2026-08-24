@@ -71,6 +71,26 @@ operational states. It rebuilds counts from the durable worker state and
 append-only diagnostics, so it is disposable and cannot become a second source
 of scheduling authority.
 
+Mission Control also exposes the disposable inspection projection through
+`GET /api/v1/tasks`, `GET /api/v1/queue`, `GET /api/v1/attempts`, and
+`GET /api/v1/attempts/:attemptId`. Task views retain repository-qualified
+identity, source and base revisions, authorization and eligibility decisions,
+dependencies, parent PRD references, execution identity, and profile/prompt
+digests. Attempt views correlate claims and leases with diagnostics, lifecycle
+outcomes, retained execution records, verification summaries, commits, and
+draft pull-request evidence. The queue order is copied from worker diagnostics;
+the browser never computes a competing priority.
+
+`GET /api/v1/events` is a Server-Sent Events stream. Events have monotonically
+ordered numeric IDs and reconnect using `Last-Event-ID`, so acknowledged events
+are not duplicated. Evidence is returned only through opaque identifiers from
+an attempt view or the scoped route
+`/api/v1/tasks/:taskId/attempts/:attemptId/evidence/:evidenceId`. The host
+checks configured durable roots and real paths before reading a record or log;
+absolute paths, traversal, missing files, symbolic-link escapes, task bodies,
+prompt templates, credentials, and arbitrary repository browsing are not
+available through the operator API.
+
 The guarded command endpoint is `POST /api/v1/commands` (the compatibility path
 `/api/v1/control` has the same fixed allowlist). Its JSON body must contain
 `commandId`, `expectedRevision`, `command` (`run-now`, `pause`, `resume`, or

@@ -267,6 +267,7 @@ export type {
 } from "./WorkerService.js";
 export {
   createMissionControlHost,
+  createMissionControlReadModel,
   validateMissionControlConfiguration,
   MissionControlConfigurationError,
 } from "./MissionControl.js";
@@ -281,6 +282,23 @@ export type {
   MissionControlOverview,
   MissionControlListeningAddress,
   MissionControlHost,
+  MissionControlAttemptSummary,
+  MissionControlAttemptTimelineEntry,
+  MissionControlAttemptView,
+  MissionControlClaimView,
+  MissionControlCommandEvidence,
+  MissionControlEligibility,
+  MissionControlEventRecord,
+  MissionControlEvidenceContent,
+  MissionControlEvidenceReference,
+  MissionControlExecutionInspection,
+  MissionControlQueue,
+  MissionControlQueueEntry,
+  MissionControlReadModel,
+  MissionControlReadModelOptions,
+  MissionControlTaskInbox,
+  MissionControlTaskReference,
+  MissionControlTaskView,
 } from "./MissionControl.js";
 export { runWorkerPocGate, WorkerPocGateError } from "./WorkerPocGate.js";
 export { createWorkerPocBoundaryAuditRecorder } from "./WorkerPocGateAudit.js";

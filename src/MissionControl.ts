@@ -48,6 +48,21 @@ import {
   createWorkerExecutionEngine,
   type WorkerExecutionEngine,
 } from "./WorkerExecutionEngine.js";
+import {
+  createMissionControlReadModel,
+  type MissionControlAttemptSummary,
+  type MissionControlAttemptView,
+  type MissionControlEventRecord,
+  type MissionControlEvidenceContent,
+  type MissionControlQueue,
+  type MissionControlReadModel,
+  type MissionControlReadModelOptions,
+  type MissionControlTaskInbox,
+  type MissionControlTaskView,
+} from "./MissionControlReadModel.js";
+import { containsProtectedWorkerMaterial } from "./WorkerIsolationPolicy.js";
+
+export { createMissionControlReadModel } from "./MissionControlReadModel.js";
 
 /** HTTP bind and listen settings for the Mission Control operator surface. */
 export interface MissionControlServerOptions {
@@ -143,6 +158,26 @@ export interface MissionControlOverview {
   readonly operationalStateCounts: MissionControlOperationalStateCounts;
 }
 
+export type {
+  MissionControlAttemptSummary,
+  MissionControlAttemptTimelineEntry,
+  MissionControlAttemptView,
+  MissionControlClaimView,
+  MissionControlCommandEvidence,
+  MissionControlEligibility,
+  MissionControlEventRecord,
+  MissionControlEvidenceContent,
+  MissionControlEvidenceReference,
+  MissionControlExecutionInspection,
+  MissionControlQueue,
+  MissionControlQueueEntry,
+  MissionControlReadModel,
+  MissionControlReadModelOptions,
+  MissionControlTaskInbox,
+  MissionControlTaskReference,
+  MissionControlTaskView,
+} from "./MissionControlReadModel.js";
+
 /** Address returned after the HTTP server is ready. */
 export interface MissionControlListeningAddress {
   readonly host: string;
@@ -171,6 +206,7 @@ export interface MissionControlHost {
   readonly diagnostics: WorkerDiagnostics;
   readonly service: WorkerService;
   readonly control: WorkerServiceControl;
+  readonly readModel: MissionControlReadModel;
   readonly server: Server;
   listen(): Promise<MissionControlListeningAddress>;
   /** Listen and run the continuous worker until it is stopped. */
@@ -179,6 +215,14 @@ export interface MissionControlHost {
   stop(): Promise<void>;
   /** Rebuild and return the disposable overview read model. */
   getOverview(): Promise<MissionControlOverview>;
+  getTaskInbox(): Promise<MissionControlTaskInbox>;
+  getTask(taskId: string): Promise<MissionControlTaskView | undefined>;
+  getQueue(): Promise<MissionControlQueue>;
+  getAttempts(): Promise<readonly MissionControlAttemptSummary[]>;
+  getAttempt(attemptId: string): Promise<MissionControlAttemptView | undefined>;
+  getEvidence(
+    evidenceId: string,
+  ): Promise<MissionControlEvidenceContent | undefined>;
 }
 
 const OPERATIONAL_STATES: readonly WorkerOperationalState[] = [
@@ -209,6 +253,22 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isOperationalState = (value: unknown): value is WorkerOperationalState =>
   typeof value === "string" &&
   (OPERATIONAL_STATES as readonly string[]).includes(value);
+
+const isAuthorizationSource = (
+  value: unknown,
+): value is "repository" | "task" | "none" =>
+  value === "repository" || value === "task" || value === "none";
+
+const redactDurablePaths = (
+  value: string,
+  roots: readonly string[],
+): string => {
+  let result = value;
+  for (const root of roots) {
+    if (root !== "") result = result.replaceAll(root, "[durable-root]");
+  }
+  return result;
+};
 
 const isNonEmptyString = (value: unknown): value is string =>
   typeof value === "string" && value.trim() !== "";
@@ -270,9 +330,50 @@ export const validateMissionControlConfiguration = (
   if (issues.length > 0) throw new MissionControlConfigurationError(issues);
 };
 
-const readDiagnostics = async (
+const parseDiagnostic = (
+  value: unknown,
+  durableRoots: readonly string[] = [],
+): WorkerDiagnostic | undefined => {
+  if (
+    !isRecord(value) ||
+    typeof value.timestamp !== "string" ||
+    !isOperationalState(value.state) ||
+    typeof value.message !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    timestamp: value.timestamp,
+    state: value.state,
+    ...(typeof value.taskId === "string" ? { taskId: value.taskId } : {}),
+    ...(typeof value.attemptId === "string"
+      ? { attemptId: value.attemptId }
+      : {}),
+    ...(typeof value.executionIdentity === "string"
+      ? { executionIdentity: value.executionIdentity }
+      : {}),
+    ...(isAuthorizationSource(value.authorizationSource)
+      ? { authorizationSource: value.authorizationSource }
+      : {}),
+    ...(typeof value.eligible === "boolean"
+      ? { eligible: value.eligible }
+      : {}),
+    ...(typeof value.sourceRevision === "string"
+      ? { sourceRevision: value.sourceRevision }
+      : {}),
+    ...(typeof value.reasonCode === "string"
+      ? { reasonCode: value.reasonCode }
+      : {}),
+    message: containsProtectedWorkerMaterial(value.message)
+      ? "Protected worker material redacted."
+      : redactDurablePaths(value.message, durableRoots),
+  };
+};
+
+const readDiagnosticEvents = async (
   filePath: string,
-): Promise<readonly WorkerDiagnostic[]> => {
+  durableRoots: readonly string[] = [],
+): Promise<readonly MissionControlEventRecord[]> => {
   let content: string;
   try {
     content = await readFile(filePath, "utf8");
@@ -281,20 +382,14 @@ const readDiagnostics = async (
     throw error;
   }
 
-  const events: WorkerDiagnostic[] = [];
+  const events: MissionControlEventRecord[] = [];
   for (const line of content.split(/\r?\n/)) {
     if (line.trim() === "") continue;
     try {
-      const value: unknown = JSON.parse(line);
-      if (
-        !isRecord(value) ||
-        typeof value.timestamp !== "string" ||
-        !isOperationalState(value.state) ||
-        typeof value.message !== "string"
-      ) {
-        continue;
+      const event = parseDiagnostic(JSON.parse(line), durableRoots);
+      if (event !== undefined) {
+        events.push({ id: events.length + 1, event });
       }
-      events.push(value as unknown as WorkerDiagnostic);
     } catch {
       // A partial final JSONL line must not make the read-only overview unavailable.
     }
@@ -305,9 +400,8 @@ const readDiagnostics = async (
 const stateForAttempt = (attempt: ExecutionAttempt): WorkerOperationalState => {
   if (attempt.status === "published") return "published";
   if (attempt.status === "verified") return "verified";
-  if (attempt.status === "failed" || attempt.status === "interrupted") {
-    return "blocked";
-  }
+  if (attempt.status === "failed") return "failed";
+  if (attempt.status === "interrupted") return "blocked";
   return attempt.claim?.phase === "started" ? "running" : "claimed";
 };
 
@@ -436,6 +530,12 @@ const overviewHtml = `<!doctype html>
       .controls button { padding: 0.55rem 0.8rem; border: 1px solid #60a5fa; border-radius: 0.45rem; background: #1d4ed8; color: #eff6ff; cursor: pointer; }
       .controls button:disabled { cursor: not-allowed; opacity: 0.45; }
       code { color: #bfdbfe; overflow-wrap: anywhere; }
+      .list { display: grid; gap: 0.65rem; }
+      .list-item { border: 1px solid #374151; border-radius: 0.55rem; padding: 0.75rem; line-height: 1.45; overflow-wrap: anywhere; }
+      .list-item strong { color: #f8fafc; }
+      .list-item a { color: #93c5fd; }
+      .state { color: #fcd34d; text-transform: uppercase; letter-spacing: 0.05em; font-size: 0.8rem; }
+      .event-stream { max-height: 16rem; overflow: auto; }
       @media (max-width: 720px) {
         main { padding: 1rem; }
         header { display: block; }
@@ -474,6 +574,10 @@ const overviewHtml = `<!doctype html>
           <p class="muted" id="control-status" aria-live="polite"></p>
         </section>
         <section class="panel"><h2>Operational state counts</h2><div id="counts" class="grid"></div></section>
+        <section class="panel"><h2>Task inbox</h2><p class="muted">Repository-qualified snapshots and worker eligibility decisions.</p><div id="tasks" class="list"></div></section>
+        <section class="panel"><h2>Deterministic ready queue</h2><p class="muted">Order is emitted by the worker and is not recalculated by this page.</p><div id="queue" class="list"></div></section>
+        <section class="panel"><h2>Attempts</h2><p class="muted">Claim, lease, lifecycle, evidence, and publication inspection is available through the versioned API.</p><div id="attempts" class="list"></div></section>
+        <section class="panel"><h2>Live operational events</h2><div id="events" class="list event-stream"></div></section>
       </div>
     </main>
     <script>
@@ -482,6 +586,38 @@ const overviewHtml = `<!doctype html>
       const formatTime = (value) => value ? new Date(value).toLocaleString() : "—";
       let latestRevision = 0;
       let activeAttemptId = null;
+      const appendLine = (parent, value, className) => { const item = document.createElement("div"); item.className = className || "list-item"; item.textContent = value; parent.append(item); return item; };
+      const renderInspection = async () => {
+        try {
+          const [tasksResponse, queueResponse, attemptsResponse] = await Promise.all([
+            fetch("/api/v1/tasks", { cache: "no-store" }),
+            fetch("/api/v1/queue", { cache: "no-store" }),
+            fetch("/api/v1/attempts", { cache: "no-store" })
+          ]);
+          if (!tasksResponse.ok || !queueResponse.ok || !attemptsResponse.ok) throw new Error("inspection unavailable");
+          const tasks = await tasksResponse.json();
+          const queue = await queueResponse.json();
+          const attempts = await attemptsResponse.json();
+          const taskList = document.getElementById("tasks"); taskList.replaceChildren();
+          tasks.tasks.forEach((task) => {
+            const item = appendLine(taskList, "");
+            const heading = document.createElement("strong"); heading.textContent = task.taskId + " — " + task.title; item.replaceChildren(heading);
+            const details = document.createElement("div"); details.className = "muted";
+            details.textContent = [task.state, "authorization=" + task.authorizationSource, "reason=" + task.eligibilityReasonCode, "source=" + task.sourceRevision, "base=" + task.baseBranch + "@" + task.baseCommit, "profile=" + (task.profileId || "—"), "prompt=" + (task.promptVersion || "—"), "dependencies=" + task.dependencies.length, "parent=" + (task.parentPrd ? task.parentPrd.taskId : "—"), "execution=" + (task.executionIdentity || "—")].join(" • "); item.append(details);
+          });
+          if (tasks.tasks.length === 0) appendLine(taskList, "No retained task snapshots.", "muted");
+          const queueList = document.getElementById("queue"); queueList.replaceChildren();
+          queue.queue.forEach((entry) => appendLine(queueList, entry.position + ". " + entry.taskId + " — " + entry.title + " • execution=" + entry.executionIdentity));
+          if (queue.queue.length === 0) appendLine(queueList, "The worker has no ready tasks.", "muted");
+          const attemptList = document.getElementById("attempts"); attemptList.replaceChildren();
+          attempts.attempts.forEach((attempt) => {
+            const item = document.createElement("div"); item.className = "list-item";
+            const link = document.createElement("a"); link.href = "/api/v1/attempts/" + encodeURIComponent(attempt.attemptId); link.textContent = attempt.attemptId;
+            item.append(link, document.createTextNode(" • " + attempt.status + " • " + attempt.taskId + " • execution=" + attempt.executionIdentity)); attemptList.append(item);
+          });
+          if (attempts.attempts.length === 0) appendLine(attemptList, "No retained attempts.", "muted");
+        } catch { /* The overview remains useful while inspection is unavailable. */ }
+      };
       async function refresh() {
         try {
           const response = await fetch("/api/v1/overview", { cache: "no-store" });
@@ -504,6 +640,7 @@ const overviewHtml = `<!doctype html>
             const value = document.createElement("strong"); value.textContent = String(count);
             item.append(label, value); return item;
           }));
+          void renderInspection();
         } catch { text("updated", "Overview unavailable"); }
       }
       async function sendCommand(command) {
@@ -522,6 +659,17 @@ const overviewHtml = `<!doctype html>
         } catch { text("control-status", "Command unavailable."); }
       }
       document.querySelectorAll("[data-command]").forEach((button) => button.addEventListener("click", () => void sendCommand(button.dataset.command)));
+      const eventSource = new EventSource("/api/v1/events");
+      eventSource.addEventListener("worker", (message) => {
+        try {
+          const payload = JSON.parse(message.data);
+          const eventList = document.getElementById("events");
+          const item = document.createElement("div"); item.className = "list-item";
+          item.textContent = "#" + payload.id + " • " + payload.event.state + " • " + (payload.event.taskId || "worker") + " • " + payload.event.message;
+          eventList.prepend(item);
+          while (eventList.children.length > 50) eventList.lastElementChild.remove();
+        } catch { /* Ignore malformed browser events; the API remains authoritative. */ }
+      });
       void refresh();
       setInterval(() => void refresh(), 5000);
     </script>
@@ -552,6 +700,34 @@ const writeHtml = (
   response.setHeader("Content-Length", Buffer.byteLength(value));
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.end(value);
+};
+
+const writeSseEvent = (
+  response: import("node:http").ServerResponse,
+  record: MissionControlEventRecord,
+): void => {
+  response.write(
+    `id: ${record.id}\nevent: worker\ndata: ${JSON.stringify({
+      version: 1,
+      id: record.id,
+      event: record.event,
+    })}\n\n`,
+  );
+};
+
+const parseLastEventId = (value: string | undefined): number => {
+  if (value === undefined || !/^\d+$/u.test(value.trim())) return 0;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+};
+
+const decodePathValue = (value: string): string | undefined => {
+  try {
+    const decoded = decodeURIComponent(value);
+    return decoded === "" ? undefined : decoded;
+  } catch {
+    return undefined;
+  }
 };
 
 const readJsonBody = (
@@ -707,12 +883,63 @@ export const createMissionControlHost = (
   const durableDiagnostics = createJsonlWorkerDiagnostics(
     paths.diagnosticsFilePath,
   );
-  const diagnostics: WorkerDiagnostics = {
-    emit: async (event) => {
-      await durableDiagnostics.emit(event);
-      await boundaries.diagnostics?.emit(event);
-    },
+  const durableRoots = [
+    paths.workspaceRoot,
+    paths.recordsRoot,
+    paths.repositoriesRoot,
+  ];
+  let eventJournal: MissionControlEventRecord[] | undefined;
+  let eventJournalLoad: Promise<MissionControlEventRecord[]> | undefined;
+  let eventAppendInFlight = Promise.resolve();
+  const eventSubscribers = new Set<{
+    readonly response: import("node:http").ServerResponse;
+    lastSentId: number;
+  }>();
+  const ensureEventJournal = async (): Promise<MissionControlEventRecord[]> => {
+    if (eventJournal !== undefined) return eventJournal;
+    eventJournalLoad ??= readDiagnosticEvents(
+      paths.diagnosticsFilePath,
+      durableRoots,
+    ).then((records) => {
+      eventJournal = [...records];
+      return eventJournal;
+    });
+    return eventJournalLoad;
   };
+  const emitDiagnostic = async (event: WorkerDiagnostic): Promise<void> => {
+    const safeEvent: WorkerDiagnostic = {
+      ...event,
+      message: containsProtectedWorkerMaterial(event.message)
+        ? "Protected worker material redacted."
+        : redactDurablePaths(event.message, durableRoots),
+    };
+    const write = eventAppendInFlight.then(async () => {
+      const journal = await ensureEventJournal();
+      await durableDiagnostics.emit(safeEvent);
+      await boundaries.diagnostics?.emit(safeEvent);
+      const record: MissionControlEventRecord = {
+        id: journal.length + 1,
+        event: safeEvent,
+      };
+      journal.push(record);
+      for (const subscriber of eventSubscribers) {
+        if (record.id <= subscriber.lastSentId) continue;
+        try {
+          writeSseEvent(subscriber.response, record);
+          subscriber.lastSentId = record.id;
+        } catch {
+          eventSubscribers.delete(subscriber);
+        }
+      }
+    });
+    eventAppendInFlight = write.catch(() => undefined);
+    await write;
+  };
+  const getEvents = async (): Promise<readonly MissionControlEventRecord[]> => {
+    await eventAppendInFlight;
+    return ensureEventJournal();
+  };
+  const diagnostics: WorkerDiagnostics = { emit: emitDiagnostic };
   const service = createWorkerService({
     configuration: configuration.worker,
     source,
@@ -727,6 +954,13 @@ export const createMissionControlHost = (
     discovery: configuration.discovery,
     diagnostics,
     operatorAuditFilePath: paths.operatorAuditFilePath,
+  });
+  const readModel = createMissionControlReadModel({
+    configuration: configuration.worker,
+    paths,
+    store,
+    status: service.status,
+    getEvents,
   });
 
   const serverOptions = configuration.server ?? {};
@@ -748,6 +982,234 @@ export const createMissionControlHost = (
       }
       if (request.method === "GET" && url.pathname === "/api/v1/status") {
         writeJson(response, 200, { version: 1, ...service.status() });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/v1/tasks") {
+        try {
+          writeJson(response, 200, await readModel.getTaskInbox());
+        } catch {
+          writeJson(response, 503, {
+            version: 1,
+            error: "task_inbox_unavailable",
+          });
+        }
+        return;
+      }
+      const scopedEvidenceMatch = url.pathname.match(
+        /^\/api\/v1\/tasks\/([^/]+)\/attempts\/([^/]+)\/evidence\/([^/]+)$/u,
+      );
+      if (request.method === "GET" && scopedEvidenceMatch !== null) {
+        const taskId = decodePathValue(scopedEvidenceMatch[1]!);
+        const attemptId = decodePathValue(scopedEvidenceMatch[2]!);
+        const evidenceId = decodePathValue(scopedEvidenceMatch[3]!);
+        if (
+          taskId === undefined ||
+          attemptId === undefined ||
+          evidenceId === undefined
+        ) {
+          writeJson(response, 400, {
+            version: 1,
+            code: "invalid_evidence_scope",
+            message: "Task, attempt, and evidence identifiers are required.",
+          });
+          return;
+        }
+        const attempt = await readModel.getAttempt(attemptId);
+        if (
+          attempt === undefined ||
+          attempt.taskId !== taskId ||
+          !attempt.evidence.some((evidence) => evidence.id === evidenceId)
+        ) {
+          writeJson(response, 404, { version: 1, error: "evidence_not_found" });
+          return;
+        }
+        const evidence = await readModel.getEvidence(evidenceId);
+        if (evidence === undefined) {
+          writeJson(response, 404, {
+            version: 1,
+            error: "evidence_not_retained",
+          });
+        } else {
+          writeJson(response, 200, evidence);
+        }
+        return;
+      }
+      const expandedTaskMatch = url.pathname.match(
+        /^\/api\/v1\/tasks\/([^/]+)\/([^/]+)\/(issue|prd)\/([1-9][0-9]*)$/u,
+      );
+      if (request.method === "GET" && expandedTaskMatch !== null) {
+        const repositoryOwner = decodePathValue(expandedTaskMatch[1]!);
+        const repositoryName = decodePathValue(expandedTaskMatch[2]!);
+        const kind = expandedTaskMatch[3];
+        const number = Number(expandedTaskMatch[4]);
+        if (
+          repositoryOwner === undefined ||
+          repositoryName === undefined ||
+          (kind !== "issue" && kind !== "prd") ||
+          !Number.isSafeInteger(number)
+        ) {
+          writeJson(response, 400, {
+            version: 1,
+            code: "invalid_task_id",
+            message: "A repository-qualified task ID is required.",
+          });
+          return;
+        }
+        const task = await readModel.getTask(
+          `${repositoryOwner}/${repositoryName}:${kind}:${number}`.toLowerCase(),
+        );
+        if (task === undefined) {
+          writeJson(response, 404, { version: 1, error: "task_not_found" });
+        } else {
+          writeJson(response, 200, task);
+        }
+        return;
+      }
+      if (
+        request.method === "GET" &&
+        url.pathname.startsWith("/api/v1/tasks/")
+      ) {
+        const taskId = decodePathValue(
+          url.pathname.slice("/api/v1/tasks/".length),
+        );
+        if (taskId === undefined) {
+          writeJson(response, 400, {
+            version: 1,
+            code: "invalid_task_id",
+            message: "A repository-qualified task ID is required.",
+          });
+          return;
+        }
+        const task = await readModel.getTask(taskId);
+        if (task === undefined) {
+          writeJson(response, 404, { version: 1, error: "task_not_found" });
+        } else {
+          writeJson(response, 200, task);
+        }
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/v1/queue") {
+        try {
+          writeJson(response, 200, await readModel.getQueue());
+        } catch {
+          writeJson(response, 503, {
+            version: 1,
+            error: "queue_unavailable",
+          });
+        }
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/v1/attempts") {
+        try {
+          writeJson(response, 200, {
+            version: 1,
+            revision: service.status().revision,
+            attempts: await readModel.getAttempts(),
+          });
+        } catch {
+          writeJson(response, 503, {
+            version: 1,
+            error: "attempts_unavailable",
+          });
+        }
+        return;
+      }
+      if (
+        request.method === "GET" &&
+        url.pathname.startsWith("/api/v1/attempts/")
+      ) {
+        const attemptId = decodePathValue(
+          url.pathname.slice("/api/v1/attempts/".length),
+        );
+        if (attemptId === undefined) {
+          writeJson(response, 400, {
+            version: 1,
+            code: "invalid_attempt_id",
+            message: "An attempt ID is required.",
+          });
+          return;
+        }
+        const attempt = await readModel.getAttempt(attemptId);
+        if (attempt === undefined) {
+          writeJson(response, 404, { version: 1, error: "attempt_not_found" });
+        } else {
+          writeJson(response, 200, attempt);
+        }
+        return;
+      }
+      if (
+        request.method === "GET" &&
+        (url.pathname === "/api/v1/events" ||
+          url.pathname === "/api/v1/events/stream")
+      ) {
+        try {
+          const records = await getEvents();
+          const lastEventHeader = request.headers["last-event-id"];
+          const subscriber = {
+            response,
+            lastSentId: parseLastEventId(
+              Array.isArray(lastEventHeader)
+                ? lastEventHeader[0]
+                : lastEventHeader,
+            ),
+          };
+          response.statusCode = 200;
+          response.setHeader("Cache-Control", "no-cache, no-store");
+          response.setHeader("Connection", "keep-alive");
+          response.setHeader(
+            "Content-Type",
+            "text/event-stream; charset=utf-8",
+          );
+          response.setHeader("X-Content-Type-Options", "nosniff");
+          response.flushHeaders();
+          eventSubscribers.add(subscriber);
+          for (const record of records) {
+            if (record.id <= subscriber.lastSentId) continue;
+            writeSseEvent(response, record);
+            subscriber.lastSentId = record.id;
+          }
+          request.on("close", () => eventSubscribers.delete(subscriber));
+        } catch {
+          if (!response.headersSent) {
+            writeJson(response, 503, {
+              version: 1,
+              error: "events_unavailable",
+            });
+          }
+        }
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/v1/evidence") {
+        // No route accepts a filesystem path. Evidence is only addressable by
+        // an opaque identifier returned from an inspected retained attempt.
+        writeJson(response, 400, {
+          version: 1,
+          code: "evidence_path_not_allowed",
+          message: "Evidence must be addressed by a retained evidence ID.",
+        });
+        return;
+      }
+      if (
+        request.method === "GET" &&
+        url.pathname.startsWith("/api/v1/evidence/")
+      ) {
+        const evidenceId = decodePathValue(
+          url.pathname.slice("/api/v1/evidence/".length),
+        );
+        if (evidenceId === undefined) {
+          writeJson(response, 400, {
+            version: 1,
+            code: "invalid_evidence_id",
+            message: "A retained evidence ID is required.",
+          });
+          return;
+        }
+        const evidence = await readModel.getEvidence(evidenceId);
+        if (evidence === undefined) {
+          writeJson(response, 404, { version: 1, error: "evidence_not_found" });
+        } else {
+          writeJson(response, 200, evidence);
+        }
         return;
       }
       if (
@@ -809,10 +1271,11 @@ export const createMissionControlHost = (
   let stopRequested = false;
 
   const getOverview = async (): Promise<MissionControlOverview> => {
-    const [state, diagnosticsFromDisk] = await Promise.all([
+    const [state, eventRecords] = await Promise.all([
       store.read(),
-      readDiagnostics(paths.diagnosticsFilePath),
+      getEvents(),
     ]);
+    const diagnosticsFromDisk = eventRecords.map((record) => record.event);
     const serviceStatus = service.status();
     const lastDiagnostic = diagnosticsFromDisk.at(-1);
     const warnings = await recoveryWarnings(state, store);
@@ -889,6 +1352,10 @@ export const createMissionControlHost = (
     try {
       await service.stop();
     } finally {
+      for (const subscriber of eventSubscribers) {
+        subscriber.response.end();
+      }
+      eventSubscribers.clear();
       await closeServer(server);
       listening = undefined;
     }
@@ -904,11 +1371,18 @@ export const createMissionControlHost = (
     diagnostics,
     service,
     control: service.control,
+    readModel,
     server,
     listen,
     start,
     stop,
     getOverview,
+    getTaskInbox: readModel.getTaskInbox,
+    getTask: readModel.getTask,
+    getQueue: readModel.getQueue,
+    getAttempts: readModel.getAttempts,
+    getAttempt: readModel.getAttempt,
+    getEvidence: readModel.getEvidence,
   };
   return host;
 };

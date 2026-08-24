@@ -562,10 +562,28 @@ Pause stops new polling at a cycle boundary while allowing an active agent
 invocation to finish, and resume reuses the existing single polling loop. The
 request and outcome records are append-only JSONL under the durable
 `operator/commands.jsonl` path and redact protected worker material.
-The bundled overview polls that endpoint and adapts from desktop to tablet
-widths. It does not expose task bodies, central configuration, credentials, or
-arbitrary filesystem content. Set `server.bindAddress` explicitly only when an
-operator-controlled private ingress requires a non-loopback interface.
+The bundled overview also shows the repository-qualified task inbox, the
+worker-emitted ready queue, retained attempts, and a reconnecting operational
+event stream. The versioned inspection endpoints are `GET /api/v1/tasks`,
+`GET /api/v1/queue`, `GET /api/v1/attempts`,
+`GET /api/v1/attempts/:attemptId`, and `GET /api/v1/events`. Attempt evidence
+is addressed by an opaque retained identifier returned by the attempt view;
+the scoped form is
+`GET /api/v1/tasks/:taskId/attempts/:attemptId/evidence/:evidenceId`.
+`Last-Event-ID` resumes `/api/v1/events` after the acknowledged event without
+replaying it. Queue order is projected from the worker's ordered diagnostics,
+and the browser does not calculate an alternative priority.
+
+Task and attempt responses include source revisions, base branch and commit,
+authorization and eligibility decisions, dependencies, parent PRD references,
+profile and prompt digests, lease metadata, lifecycle events, commits,
+verification summaries, and draft pull-request links when retained. Task
+bodies, prompt templates, credentials, raw durable paths, and arbitrary
+filesystem content are excluded. Evidence reads accept only identifiers that
+were retained for the task and attempt; durable-root checks reject traversal,
+missing files, and symbolic-link escapes. Set `server.bindAddress` explicitly
+only when an operator-controlled private ingress requires a non-loopback
+interface.
 
 ### Consolidated retained POC gate
 

@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import {
   runWorkerDryRun,
+  type AuthorizationSource,
   type EligibilityDecision,
   type WorkerConfiguration,
 } from "./WorkerCoordinator.js";
@@ -136,6 +137,11 @@ export interface WorkerDiagnostic {
   readonly attemptId?: string;
   /** Immutable execution identity, when execution inputs were selected. */
   readonly executionIdentity?: string;
+  /** Authorization source and eligibility captured at the discovery boundary. */
+  readonly authorizationSource?: AuthorizationSource;
+  readonly eligible?: boolean;
+  /** Source revision used for the discovery decision, when a task exists. */
+  readonly sourceRevision?: string;
   /** Stable eligibility, recovery, or failure category. */
   readonly reasonCode?: string;
   /** Human-readable explanation without retained protected material. */
@@ -768,6 +774,9 @@ export const createWorkerService = (
       await emit({
         state: "discovered",
         taskId: decision.taskId,
+        authorizationSource: decision.authorization,
+        eligible: decision.eligible,
+        sourceRevision: decision.task.sourceRevision,
         message: `Discovered ${decision.taskId}.`,
       });
       const retainedAttempt =
@@ -781,6 +790,12 @@ export const createWorkerService = (
       await emit({
         state,
         taskId: decision.taskId,
+        ...(decision.executionIdentity === undefined
+          ? {}
+          : { executionIdentity: decision.executionIdentity }),
+        authorizationSource: decision.authorization,
+        eligible: decision.eligible,
+        sourceRevision: decision.task.sourceRevision,
         reasonCode: decision.reasonCode,
         message: decision.reason,
       });
