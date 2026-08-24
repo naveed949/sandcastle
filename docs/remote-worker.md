@@ -93,18 +93,28 @@ available through the operator API.
 
 The guarded command endpoint is `POST /api/v1/commands` (the compatibility path
 `/api/v1/control` has the same fixed allowlist). Its JSON body must contain
-`commandId`, `expectedRevision`, `command` (`run-now`, `pause`, `resume`, or
-`cancel`), and a non-empty operator `reason`; cancellation additionally
-requires `attemptId`. Requests are revision-checked and idempotent. A stale
+`commandId`, `expectedRevision`, `command` (`run-now`, `pause`, `resume`,
+`cancel`, `retry`, `acknowledge`, or `recover` with `recoveryAction`), and a
+non-empty operator `reason`;
+cancellation and recovery additionally require `attemptId`. Manual-intervention
+acknowledgement also requires an operator identity. Requests are
+revision-checked and idempotent. A stale
 revision returns `stale_revision` without changing worker state, while a
 repeated command ID returns the retained outcome without repeating its side
 effect. Pause only takes effect after the current polling cycle reaches a safe
 boundary and never aborts an active agent invocation. Resume reuses the
 existing service lock and polling loop. Cancellation delegates to the
 execution abort signal, so the normal attempt evidence and interrupted outcome
-are retained. Requests and outcomes are retained in append-only,
-secret-redacted `operator/commands.jsonl`; the audit is not a generic state
-transition or shell-command interface.
+are retained. `retry` is accepted only for an expired, unstarted claim with the
+worker's `safe_retry` disposition; it refreshes the task through the normal
+claim boundary before creating a new attempt. Live unstarted claims are
+`safe_resume` and started claims are `manual_intervention`, so neither can be
+retried by this command. Acknowledgement records the operator, reason, command
+identity, expected revision, and timestamp in the append-only audit, without
+editing attempts, outcomes, evidence, leases, branches, records, or task state.
+Recovery rejections expose stable reason codes. Requests and outcomes are
+retained in append-only, secret-redacted `operator/commands.jsonl`; the audit
+is not a generic state-transition or shell-command interface.
 
 For a standalone worker without the HTTP surface, compose the lower-level
 boundaries directly as shown below. Use the same `workspaceRoot` for
@@ -170,8 +180,9 @@ jq '.attempts[] | {attemptId, status, claim, outcomes}' \
 
 For `manual_intervention`, inspect the attempt's outcome evidence, structured
 record, Sandcastle run log, deterministic branch, and preserved worktree before
-deciding whether to publish, create a deliberately new retry, or abandon the
-attempt. Never delete or edit the state file to bypass a claim.
+deciding whether to acknowledge the review, create a deliberately new retry
+outside the generic recovery command, or abandon the attempt. Never delete or
+edit the state file to bypass a claim.
 
 An `unauthorized` or `ineligible` event is a policy decision, not a transient
 execution failure. Fix central authorization, repository profiles, dependency

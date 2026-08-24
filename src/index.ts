@@ -244,6 +244,7 @@ export {
   workerServicePaths,
   WorkerExecutionTimeoutError,
   WorkerServiceOperatorCancellationError,
+  WorkerRecoveryControlError,
   WorkerServiceLockError,
   WorkerServiceShutdownError,
 } from "./WorkerService.js";
@@ -251,6 +252,9 @@ export type {
   WorkerOperationalState,
   WorkerServiceMode,
   WorkerControlCommand,
+  WorkerRecoveryAction,
+  WorkerRecoveryDisposition,
+  WorkerRecoveryReasonCode,
   WorkerControlOutcomeCode,
   WorkerControlInput,
   WorkerControlRequest,

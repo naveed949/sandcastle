@@ -851,6 +851,308 @@ describe("WorkerService", () => {
     }
   });
 
+  it("accepts an operator safe-retry command only through fresh claim validation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "sandcastle-service-"));
+    try {
+      const store = createWorkerStateStore({
+        filePath: join(directory, "state.json"),
+      });
+      const request = runWorkerDryRun({ configuration, tasks: [task] })
+        .executionRequests[0]!;
+      const expired = await store.claimAttempt(request, {
+        owner: "worker-1",
+        leaseDurationMs: 1_000,
+        claimedAt: "2000-01-01T00:00:00.000Z",
+      });
+      const source = {
+        discover: vi.fn(async () => []),
+        read: vi.fn(async () => ({ task, relatedTasks: [] })),
+      };
+      const execution = {
+        execute: vi.fn(async (attempt) => {
+          await store.markAttemptStarted(attempt.attemptId);
+          await store.transitionAttempt(attempt.attemptId, {
+            status: "failed",
+            evidence: ["operator://safe-retry-test"],
+          });
+          return {
+            attemptId: attempt.attemptId,
+            taskId: attempt.request.taskId,
+            executionIdentity: attempt.executionIdentity,
+            baseCommit: attempt.request.task.baseCommit,
+            profileId: attempt.request.profileId,
+            profileDigest: attempt.request.profileDigest,
+            promptVersion: attempt.request.promptVersion,
+            promptTemplateDigest: attempt.request.promptTemplateDigest,
+            repository: attempt.request.task.repository,
+            status: "failed" as const,
+            failurePhase: "execution" as const,
+            error: "safe retry test stopped",
+            repositoryCredentialNames: [],
+            commits: [],
+            setup: [],
+            verification: [],
+            published: false as const,
+            recordPath: join(directory, "record.json"),
+          };
+        }),
+      };
+      const service = createWorkerService({
+        configuration,
+        source,
+        store,
+        execution,
+        publisher: {} as never,
+        owner: "worker-1",
+        lockFilePath: join(directory, "service.lock"),
+        pollIntervalMs: 1_000,
+        leaseDurationMs: 60_000,
+      });
+
+      const outcome = await service.control.command({
+        command: "retry",
+        commandId: "operator-safe-retry",
+        expectedRevision: 0,
+        attemptId: expired.attemptId,
+        reason: "retry the expired claim after the box restart",
+      });
+
+      expect(outcome).toMatchObject({
+        code: "accepted",
+        reasonCode: "safe_retry",
+        attemptId: expired.attemptId,
+      });
+      expect(source.read).toHaveBeenCalledOnce();
+      expect(execution.execute).toHaveBeenCalledWith(
+        expect.objectContaining({ attemptId: `${expired.attemptId}:retry` }),
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+      expect((await store.read()).attempts).toHaveLength(2);
+      expect(
+        (await store.read()).attempts.find(
+          (attempt) => attempt.attemptId === expired.attemptId,
+        )?.status,
+      ).toBe("interrupted");
+      const repeated = await service.control.command({
+        command: "retry",
+        commandId: "operator-safe-retry-repeat",
+        expectedRevision: 1,
+        attemptId: expired.attemptId,
+        reason: "repeat the same recovery after a network retry",
+      });
+      expect(repeated).toMatchObject({
+        code: "recovery_already_applied",
+        reasonCode: "recovery_already_applied",
+      });
+      expect(execution.execute).toHaveBeenCalledOnce();
+      expect(
+        (await store.read()).attempts.filter(
+          (attempt) => attempt.status === "active",
+        ),
+      ).toHaveLength(0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("acknowledges manual intervention without changing durable attempt evidence", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "sandcastle-service-"));
+    try {
+      const statePath = join(directory, "state.json");
+      const store = createWorkerStateStore({ filePath: statePath });
+      const request = runWorkerDryRun({ configuration, tasks: [task] })
+        .executionRequests[0]!;
+      const retained = await store.claimAttempt(request, {
+        owner: "worker-1",
+        leaseDurationMs: 1_000,
+        claimedAt: "2000-01-01T00:00:00.000Z",
+      });
+      await store.markAttemptStarted(retained.attemptId);
+      const before = await readFile(statePath, "utf8");
+      const service = createWorkerService({
+        configuration,
+        source: { discover: vi.fn(async () => []), read: vi.fn() },
+        store,
+        execution: {} as never,
+        publisher: {} as never,
+        owner: "worker-1",
+        lockFilePath: join(directory, "service.lock"),
+        pollIntervalMs: 1_000,
+        leaseDurationMs: 60_000,
+      });
+
+      const outcome = await service.control.command({
+        command: "acknowledge",
+        commandId: "manual-review-1",
+        expectedRevision: 0,
+        attemptId: retained.attemptId,
+        operator: "alice",
+        reason: "reviewed the retained worktree and evidence",
+      });
+
+      expect(outcome).toMatchObject({
+        code: "accepted",
+        reasonCode: "manual_intervention",
+        attemptId: retained.attemptId,
+      });
+      expect(await readFile(statePath, "utf8")).toBe(before);
+      const audit = (
+        await readFile(join(directory, "operator", "commands.jsonl"), "utf8")
+      )
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(audit).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "request",
+            command: "acknowledge",
+            commandId: "manual-review-1",
+            expectedRevision: 0,
+            operator: "alice",
+            reason: "reviewed the retained worktree and evidence",
+          }),
+          expect.objectContaining({
+            kind: "outcome",
+            command: "acknowledge",
+            commandId: "manual-review-1",
+            operator: "alice",
+            reasonCode: "manual_intervention",
+          }),
+        ]),
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects recovery actions with stable classifications at the safe boundary", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "sandcastle-service-"));
+    try {
+      const store = createWorkerStateStore({
+        filePath: join(directory, "state.json"),
+      });
+      const request = runWorkerDryRun({ configuration, tasks: [task] })
+        .executionRequests[0]!;
+      const retained = await store.claimAttempt(request, {
+        owner: "worker-1",
+        leaseDurationMs: 60 * 60_000,
+        claimedAt: new Date().toISOString(),
+      });
+      const source = {
+        discover: vi.fn(async () => []),
+        read: vi.fn(async () => ({ task, relatedTasks: [] })),
+      };
+      const service = createWorkerService({
+        configuration,
+        source,
+        store,
+        execution: { execute: vi.fn() },
+        publisher: {} as never,
+        owner: "worker-1",
+        lockFilePath: join(directory, "service.lock"),
+        pollIntervalMs: 1_000,
+        leaseDurationMs: 60_000,
+      });
+
+      await expect(
+        service.control.command({
+          command: "retry",
+          commandId: "retry-live-claim",
+          expectedRevision: 0,
+          attemptId: retained.attemptId,
+          reason: "operator tried to retry a live claim",
+        }),
+      ).resolves.toMatchObject({
+        code: "recovery_not_expired",
+        reasonCode: "safe_resume",
+      });
+      expect(source.read).not.toHaveBeenCalled();
+
+      await store.markAttemptStarted(retained.attemptId);
+      await expect(
+        service.control.command({
+          command: "retry",
+          commandId: "retry-side-effects",
+          expectedRevision: 0,
+          attemptId: retained.attemptId,
+          reason: "operator tried to bypass manual review",
+        }),
+      ).resolves.toMatchObject({
+        code: "recovery_manual_intervention",
+        reasonCode: "manual_intervention",
+      });
+      await expect(
+        service.control.command({
+          command: "acknowledge",
+          commandId: "ack-without-operator",
+          expectedRevision: 0,
+          attemptId: retained.attemptId,
+          reason: "missing operator identity",
+        }),
+      ).resolves.toMatchObject({
+        code: "recovery_operator_required",
+        reasonCode: "recovery_operator_required",
+      });
+      expect(source.read).not.toHaveBeenCalled();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("refreshes the authoritative task before a safe retry and rejects stale input", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "sandcastle-service-"));
+    try {
+      const store = createWorkerStateStore({
+        filePath: join(directory, "state.json"),
+      });
+      const request = runWorkerDryRun({ configuration, tasks: [task] })
+        .executionRequests[0]!;
+      const expired = await store.claimAttempt(request, {
+        owner: "worker-1",
+        leaseDurationMs: 1_000,
+        claimedAt: "2000-01-01T00:00:00.000Z",
+      });
+      const source = {
+        discover: vi.fn(async () => []),
+        read: vi.fn(async () => ({
+          task: { ...task, sourceRevision: "issue-revision-changed" },
+          relatedTasks: [],
+        })),
+      };
+      const service = createWorkerService({
+        configuration,
+        source,
+        store,
+        execution: { execute: vi.fn() },
+        publisher: {} as never,
+        owner: "worker-1",
+        lockFilePath: join(directory, "service.lock"),
+        pollIntervalMs: 1_000,
+        leaseDurationMs: 60_000,
+      });
+
+      await expect(
+        service.control.command({
+          command: "retry",
+          commandId: "retry-stale-input",
+          expectedRevision: 0,
+          attemptId: expired.attemptId,
+          reason: "retry only if the authoritative revision is unchanged",
+        }),
+      ).resolves.toMatchObject({
+        code: "recovery_stale_revision",
+        reasonCode: "recovery_stale_revision",
+      });
+      expect(source.read).toHaveBeenCalledOnce();
+      expect((await store.read()).attempts).toHaveLength(1);
+      expect((await store.read()).attempts[0]?.status).toBe("active");
+      expect(service.status().mode).not.toBe("unhealthy");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("stops new polling and delegates graceful-shutdown cancellation to execution", async () => {
     const directory = await mkdtemp(join(tmpdir(), "sandcastle-service-"));
     try {
