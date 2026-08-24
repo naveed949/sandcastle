@@ -559,6 +559,51 @@ const profileValues = (
   };
 };
 
+const eligibilityFor = (
+  decision: EligibilityDecision | undefined,
+  request: ExecutionRequest | undefined,
+  decisionEvent: MissionControlEventRecord | undefined,
+): MissionControlEligibility => {
+  if (decisionEvent !== undefined) {
+    return {
+      eligible:
+        decisionEvent.event.eligible ??
+        decision?.eligible ??
+        request !== undefined,
+      reasonCode:
+        decisionEvent.event.reasonCode ??
+        decision?.reasonCode ??
+        (request === undefined ? "not_reconstructed" : "eligible"),
+      reason: safeShortText(
+        decisionEvent.event.message,
+        decision?.reason ?? "Task decision retained by the worker.",
+      ),
+    };
+  }
+
+  if (decision !== undefined) {
+    return {
+      eligible: decision.eligible,
+      reasonCode: decision.reasonCode,
+      reason: safeShortText(decision.reason),
+    };
+  }
+
+  if (request !== undefined) {
+    return {
+      eligible: true,
+      reasonCode: "eligible",
+      reason: "Task is authorized and ready.",
+    };
+  }
+
+  return {
+    eligible: false,
+    reasonCode: "not_reconstructed",
+    reason: "The worker decision is not retained in the available diagnostics.",
+  };
+};
+
 const projectTask = (
   configuration: WorkerConfiguration,
   task: NormalizedTask,
@@ -576,37 +621,7 @@ const projectTask = (
     decisionEvent?.event.authorizationSource ??
     decision?.authorization ??
     fallbackAuthorization(configuration, task);
-  const eligibility: MissionControlEligibility =
-    decisionEvent !== undefined
-      ? {
-          eligible:
-            decisionEvent.event.eligible ??
-            decision?.eligible ??
-            request !== undefined,
-          reasonCode:
-            decisionEvent.event.reasonCode ??
-            decision?.reasonCode ??
-            (request === undefined ? "not_reconstructed" : "eligible"),
-          reason: safeShortText(
-            decisionEvent.event.message,
-            decision?.reason ?? "Task decision retained by the worker.",
-          ),
-        }
-      : decision === undefined
-        ? {
-            eligible: request !== undefined,
-            reasonCode:
-              request === undefined ? "not_reconstructed" : "eligible",
-            reason:
-              request === undefined
-                ? "The worker decision is not retained in the available diagnostics."
-                : "Task is authorized and ready.",
-          }
-        : {
-            eligible: decision.eligible,
-            reasonCode: decision.reasonCode,
-            reason: safeShortText(decision.reason),
-          };
+  const eligibility = eligibilityFor(decision, request, decisionEvent);
   const dependencies = task.dependencies.map((dependency) =>
     taskReference(dependency, snapshotsById.get(taskIdFor(dependency))),
   );
