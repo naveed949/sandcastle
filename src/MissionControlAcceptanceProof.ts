@@ -685,6 +685,81 @@ const assertOverviewAndInspection = (
   };
 };
 
+const assertGuardedControls = (
+  controls: MissionControlAcceptanceEvidence["controls"],
+): void => {
+  assertCommandIdempotency(controls.runNow, "run-now");
+  requireCondition(
+    successfulCommand(controls.pause.outcome) &&
+      controls.pause.statusAfter.status === 200 &&
+      controls.pause.statusAfter.body.mode === "paused",
+    "Pause did not reach the paused safe boundary.",
+    "controls",
+  );
+  requireCondition(
+    successfulCommand(controls.resume.outcome) &&
+      controls.resume.statusAfter.status === 200 &&
+      controls.resume.statusAfter.body.mode === "running",
+    "Resume did not restart the worker polling loop.",
+    "controls",
+  );
+  requireCondition(
+    successfulCommand(controls.cancellation.outcome) &&
+      controls.cancellation.outcome.attemptId ===
+        controls.cancellation.attemptAfter.body.attemptId &&
+      controls.cancellation.attemptAfter.status === 200 &&
+      ["interrupted", "failed"].includes(
+        controls.cancellation.attemptAfter.body.status,
+      ) &&
+      controls.cancellation.attemptAfter.body.evidence.length > 0,
+    "Cancellation did not retain a classified attempt and evidence.",
+    "controls",
+  );
+  requireCondition(
+    nonEmpty(controls.safeRetry.expiredAttemptId) &&
+      successfulCommand(controls.safeRetry.outcome) &&
+      controls.safeRetry.outcome.attemptId ===
+        controls.safeRetry.expiredAttemptId &&
+      controls.safeRetry.outcome.reasonCode === "safe_retry" &&
+      controls.safeRetry.attemptAfter.status === 200 &&
+      controls.safeRetry.attemptAfter.body.attemptId !==
+        controls.safeRetry.expiredAttemptId,
+    "Safe retry was not limited to an expired claim with a fresh attempt.",
+    "controls",
+  );
+
+  const manual = controls.manualIntervention;
+  requireCondition(
+    nonEmpty(manual.attemptId) &&
+      manual.before.attemptId === manual.attemptId &&
+      manual.before.status === "active" &&
+      manual.before.claim?.phase === "started" &&
+      manual.retry.code === "recovery_manual_intervention" &&
+      manual.retry.reasonCode === "manual_intervention" &&
+      manual.acknowledgement.code === "accepted" &&
+      manual.acknowledgement.reasonCode === "manual_intervention" &&
+      canonicalJson(manual.before) === canonicalJson(manual.after),
+    "Manual-intervention protection was bypassed or acknowledgement changed evidence.",
+    "controls",
+  );
+};
+
+const assertPublicationIdempotency = (
+  publication: MissionControlAcceptanceEvidence["publication"],
+): void => {
+  requireCondition(
+    publication.first.draft &&
+      publication.retry.draft &&
+      nonEmpty(publication.first.url) &&
+      publication.first.url === publication.retry.url &&
+      publication.first.headSha === publication.retry.headSha &&
+      publication.first.branchSha === publication.retry.branchSha &&
+      publication.first.headSha === publication.first.branchSha,
+    "Publication retry did not reuse one verified draft publication.",
+    "idempotency",
+  );
+};
+
 /** Authenticate the retained proof manifest under the acceptance run key. */
 export const missionControlAcceptanceProofDigest = (
   proof: UnsignedMissionControlAcceptanceProof,
@@ -733,74 +808,10 @@ export const runMissionControlAcceptanceProof = async (
   assertCredentialIsolation(evidence.credentials);
   assertDurability(evidence.durability, evidence.deployment);
   const lifecycle = assertOverviewAndInspection(evidence);
+  assertGuardedControls(evidence.controls);
+  assertPublicationIdempotency(evidence.publication);
 
-  assertCommandIdempotency(evidence.controls.runNow, "run-now");
-  requireCondition(
-    successfulCommand(evidence.controls.pause.outcome) &&
-      evidence.controls.pause.statusAfter.status === 200 &&
-      evidence.controls.pause.statusAfter.body.mode === "paused",
-    "Pause did not reach the paused safe boundary.",
-    "controls",
-  );
-  requireCondition(
-    successfulCommand(evidence.controls.resume.outcome) &&
-      evidence.controls.resume.statusAfter.status === 200 &&
-      evidence.controls.resume.statusAfter.body.mode === "running",
-    "Resume did not restart the worker polling loop.",
-    "controls",
-  );
-  requireCondition(
-    successfulCommand(evidence.controls.cancellation.outcome) &&
-      evidence.controls.cancellation.outcome.attemptId ===
-        evidence.controls.cancellation.attemptAfter.body.attemptId &&
-      evidence.controls.cancellation.attemptAfter.status === 200 &&
-      ["interrupted", "failed"].includes(
-        evidence.controls.cancellation.attemptAfter.body.status,
-      ) &&
-      evidence.controls.cancellation.attemptAfter.body.evidence.length > 0,
-    "Cancellation did not retain a classified attempt and evidence.",
-    "controls",
-  );
-  requireCondition(
-    nonEmpty(evidence.controls.safeRetry.expiredAttemptId) &&
-      successfulCommand(evidence.controls.safeRetry.outcome) &&
-      evidence.controls.safeRetry.outcome.attemptId ===
-        evidence.controls.safeRetry.expiredAttemptId &&
-      evidence.controls.safeRetry.outcome.reasonCode === "safe_retry" &&
-      evidence.controls.safeRetry.attemptAfter.status === 200 &&
-      evidence.controls.safeRetry.attemptAfter.body.attemptId !==
-        evidence.controls.safeRetry.expiredAttemptId,
-    "Safe retry was not limited to an expired claim with a fresh attempt.",
-    "controls",
-  );
   const manual = evidence.controls.manualIntervention;
-  requireCondition(
-    nonEmpty(manual.attemptId) &&
-      manual.before.attemptId === manual.attemptId &&
-      manual.before.status === "active" &&
-      manual.before.claim?.phase === "started" &&
-      manual.retry.code === "recovery_manual_intervention" &&
-      manual.retry.reasonCode === "manual_intervention" &&
-      manual.acknowledgement.code === "accepted" &&
-      manual.acknowledgement.reasonCode === "manual_intervention" &&
-      canonicalJson(manual.before) === canonicalJson(manual.after),
-    "Manual-intervention protection was bypassed or acknowledgement changed evidence.",
-    "controls",
-  );
-  requireCondition(
-    evidence.publication.first.draft &&
-      evidence.publication.retry.draft &&
-      nonEmpty(evidence.publication.first.url) &&
-      evidence.publication.first.url === evidence.publication.retry.url &&
-      evidence.publication.first.headSha ===
-        evidence.publication.retry.headSha &&
-      evidence.publication.first.branchSha ===
-        evidence.publication.retry.branchSha &&
-      evidence.publication.first.headSha ===
-        evidence.publication.first.branchSha,
-    "Publication retry did not reuse one verified draft publication.",
-    "idempotency",
-  );
 
   const checks: MissionControlAcceptanceChecks = {
     systemdUnit: true,
