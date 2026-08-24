@@ -57,7 +57,9 @@ the task source, state store, repository manager, execution engine, publisher,
 diagnostics, and `WorkerService`. It derives one `WorkerServicePaths` value from
 `workspaceRoot`, uses its `recordsRoot` for execution evidence, and uses its
 `serviceLockFilePath` for the same kernel-owned single-instance lock as the
-standalone service.
+standalone service. If repository workflows are enabled, pass one
+`createRepositoryWorkflowCoordinator()` as a host boundary; the host starts it
+only after the worker has acquired that lock.
 
 Keep GitHub credentials in the server-side `github.token` setting. Do not put
 that token in `WorkerConfiguration`, `agentRunOptions`, command profiles, or
@@ -67,8 +69,10 @@ the browser-visible overview. The host binds to `127.0.0.1` by default; set
 The host serves a responsive overview at `GET /api/v1/overview` and a compact
 status response at `GET /api/v1/status`. Both expose the worker's current mode,
 monotonic command revision, and pause state; the overview also includes the
-active attempt, cycle timing, recovery warnings, and counts for the diagnostic
-operational states. It rebuilds counts from the durable worker state and
+active attempt, cycle timing, recovery warnings, counts for the diagnostic
+operational states, and a secret-free `orchestration` health projection. That
+projection names `mission-control-host` as the authority and reports worker,
+workflow coordinator, HTTP, and event-stream component modes. It rebuilds counts from the durable worker state and
 append-only diagnostics, so it is disposable and cannot become a second source
 of scheduling authority.
 
@@ -134,10 +138,14 @@ boundaries directly as shown below. Use the same `workspaceRoot` for
 `workerServicePaths()` and `createWorkerRepositoryManager()`, and use the
 derived `recordsRoot` for `createWorkerExecutionEngine()`.
 
-Handle both `SIGINT` and `SIGTERM` by calling `service.stop()`. Shutdown stops
-new dispatch, interrupts the poll wait, and delegates active cancellation to
-Sandcastle. Await `start()` so the process remains alive until shutdown is
-complete.
+For a Mission Control host, handle both `SIGINT` and `SIGTERM` by calling
+`host.stop()`. Shutdown first stops new repository-workflow dispatch,
+interrupts the worker poll wait, and delegates active cancellation to
+Sandcastle. It waits up to the configured shutdown bound for component cleanup,
+releases the service lock during normal shutdown, closes the event stream, and
+then closes the HTTP server. Await `host.start()` so the process remains alive
+until shutdown is complete. A standalone worker should call `service.stop()`
+with the same signal handling.
 
 Example systemd unit:
 

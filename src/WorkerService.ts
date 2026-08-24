@@ -471,7 +471,8 @@ const operationalStateFor = (
   return "ineligible";
 };
 
-const acquireServiceLock = async (
+/** Acquire the kernel-owned lock shared by production dispatchers. */
+export const acquireWorkerServiceLock = async (
   lockFilePath: string,
 ): Promise<() => Promise<void>> => {
   await mkdir(dirname(lockFilePath), { recursive: true });
@@ -1205,7 +1206,7 @@ export const createWorkerService = (
       if (loopLock !== undefined) {
         return loopLock.then(() => runUnlockedRecoveryCycle(attemptId));
       }
-      const release = await acquireServiceLock(options.lockFilePath);
+      const release = await acquireWorkerServiceLock(options.lockFilePath);
       try {
         return await runUnlockedRecoveryCycle(attemptId);
       } finally {
@@ -1227,7 +1228,7 @@ export const createWorkerService = (
       return loopLock.then(() => runUnlockedCycle());
     }
     cycleInFlight ??= (async () => {
-      const release = await acquireServiceLock(options.lockFilePath);
+      const release = await acquireWorkerServiceLock(options.lockFilePath);
       try {
         return await performCycle();
       } finally {
@@ -1249,7 +1250,7 @@ export const createWorkerService = (
     if (pauseRequested) return Promise.resolve();
     stopRequested = false;
     serviceMode = "starting";
-    const acquiredLock = acquireServiceLock(options.lockFilePath);
+    const acquiredLock = acquireWorkerServiceLock(options.lockFilePath);
     loopLock = acquiredLock;
     loopInFlight = (async () => {
       try {

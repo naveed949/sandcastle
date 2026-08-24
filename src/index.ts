@@ -65,6 +65,13 @@ export type {
   RepositoryWorkflowControl,
   RepositoryWorkflowControlOptions,
 } from "./RepositoryWorkflowControl.js";
+export { createRepositoryWorkflowCoordinator } from "./RepositoryWorkflowCoordinator.js";
+export type {
+  RepositoryWorkflowCoordinator,
+  RepositoryWorkflowCoordinatorMode,
+  RepositoryWorkflowCoordinatorOptions,
+  RepositoryWorkflowCoordinatorStatus,
+} from "./RepositoryWorkflowCoordinator.js";
 export { createRepositoryWorkflowSupervisor } from "./RepositoryWorkflowSupervisor.js";
 export type {
   RepositoryWorkflowSupervisorControl,
@@ -279,6 +286,7 @@ export type {
 export {
   createJsonlWorkerDiagnostics,
   createWorkerService,
+  acquireWorkerServiceLock,
   workerServicePaths,
   WorkerExecutionTimeoutError,
   WorkerServiceOperatorCancellationError,
@@ -320,6 +328,9 @@ export type {
   MissionControlConfiguration,
   MissionControlHostBoundaries,
   MissionControlHostOptions,
+  MissionControlOrchestrationMode,
+  MissionControlComponentHealth,
+  MissionControlOrchestrationHealth,
   MissionControlActiveAttempt,
   MissionControlRecoveryWarning,
   MissionControlOperationalStateCounts,

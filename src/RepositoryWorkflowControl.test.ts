@@ -126,4 +126,49 @@ describe("createRepositoryWorkflowControl", () => {
     release();
     await active;
   });
+
+  it("uses the durable update boundary to allow only one concurrent dispatcher", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "repository-workflow-concurrent-"),
+    );
+    directories.push(directory);
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const control = createRepositoryWorkflowControl({
+      store: createRepositoryWorkflowStore({
+        filePath: join(directory, "workflows.json"),
+      }),
+      runtime: {
+        runCycle: vi.fn(async () => {
+          await pending;
+          return {
+            repository: "acme/app",
+            cycle: 1,
+            status: "idle" as const,
+            tasks: [],
+          };
+        }),
+      },
+      workflows: { "repo-work-v1": workflow },
+      createId: (() => {
+        let next = 0;
+        return () => `run-${++next}`;
+      })(),
+    });
+    await control.authorize({
+      repository: "acme/app",
+      featureBranch: "feat/batch",
+      workflowId: "repo-work-v1",
+    });
+
+    const first = control.runNow("acme/app");
+    const second = control.runNow("acme/app");
+    await expect(second).rejects.toThrow("already has an active workflow");
+    release();
+    await expect(first).resolves.toMatchObject({ status: "completed" });
+    const state = await control.inspect("acme/app");
+    expect(state?.activeRunId).toBeUndefined();
+  });
 });

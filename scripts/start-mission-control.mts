@@ -7,9 +7,9 @@ import {
   codex,
   createMissionControlHost,
   createRepositoryWorkflowControl,
+  createRepositoryWorkflowCoordinator,
   createRepositoryWorkflowRuntime,
   createRepositoryWorkflowStore,
-  createRepositoryWorkflowSupervisor,
   createSandbox,
   run,
 } from "../src/index.js";
@@ -72,6 +72,10 @@ await access(codexAuthPath).catch(() => {
 
 const profileId = "agnostic-node";
 const promptVersion = "agnostic-work-v1";
+const shutdownTimeoutMs = positiveInteger(
+  "SANDCASTLE_SHUTDOWN_TIMEOUT_MS",
+  120_000,
+);
 const sandboxFor = (repository: string) =>
   docker({
     env: { GH_REPO: repository },
@@ -246,7 +250,7 @@ const runtime = createRepositoryWorkflowRuntime({
     },
   },
 });
-const repositoryWorkflows = createRepositoryWorkflowControl({
+const repositoryWorkflowControl = createRepositoryWorkflowControl({
   store: createRepositoryWorkflowStore({
     filePath: resolve(workspaceRoot, "state", "repository-workflows.json"),
   }),
@@ -254,11 +258,11 @@ const repositoryWorkflows = createRepositoryWorkflowControl({
   workflows: { [repositoryWorkflow.id]: repositoryWorkflow },
 });
 const configuredRepositories = new Set(
-  (await repositoryWorkflows.list()).map(({ repository }) => repository),
+  (await repositoryWorkflowControl.list()).map(({ repository }) => repository),
 );
 for (const repository of repositories) {
   if (!configuredRepositories.has(repository)) {
-    await repositoryWorkflows.authorize({
+    await repositoryWorkflowControl.authorize({
       repository,
       featureBranch:
         process.env.SANDCASTLE_FEATURE_BRANCH?.trim() || "feat/repo-agnostic",
@@ -266,9 +270,10 @@ for (const repository of repositories) {
     });
   }
 }
-const supervisor = createRepositoryWorkflowSupervisor({
-  control: repositoryWorkflows,
+const workflowCoordinator = createRepositoryWorkflowCoordinator({
+  control: repositoryWorkflowControl,
   pollIntervalMs: positiveInteger("SANDCASTLE_POLL_INTERVAL_MS", 60_000),
+  shutdownTimeoutMs,
   onError: (repository, error) => console.error(`[${repository}]`, error),
 });
 
@@ -315,6 +320,7 @@ const host = createMissionControlHost({
       "SANDCASTLE_EXECUTION_TIMEOUT_MS",
       2 * 60 * 60_000,
     ),
+    shutdownTimeoutMs,
     github: { token: githubToken, account },
     agentRunOptions: {
       agent: codex(
@@ -339,25 +345,22 @@ const host = createMissionControlHost({
       port: positiveInteger("SANDCASTLE_PORT", 3000),
     },
   },
-  boundaries: { repositoryWorkflows },
+  boundaries: {
+    repositoryWorkflows: workflowCoordinator.control,
+    workflowCoordinator,
+  },
 });
 
 let stopping = false;
 const stop = (): void => {
   if (stopping) return;
   stopping = true;
-  supervisor.stop();
   void host.stop();
 };
 process.once("SIGINT", stop);
 process.once("SIGTERM", stop);
 
 console.log(
-  `Starting Mission Control for ${repositories.join(", ")} with durable state at ${workspaceRoot}`,
+  `Starting the Mission Control orchestration authority for ${repositories.join(", ")} with durable state at ${workspaceRoot}`,
 );
-const address = await host.listen();
-supervisor.start();
-console.log(
-  `Mission Control listening at http://${address.host}:${address.port}`,
-);
-await new Promise<void>(() => undefined);
+await host.start();

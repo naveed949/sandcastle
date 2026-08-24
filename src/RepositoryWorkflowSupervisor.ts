@@ -2,6 +2,7 @@ import type {
   AuthorizedRepositoryWorkflow,
   RepositoryWorkflowControl,
 } from "./RepositoryWorkflowControl.js";
+import { acquireWorkerServiceLock } from "./WorkerService.js";
 
 export interface RepositoryWorkflowSupervisorControl {
   list(): Promise<
@@ -21,6 +22,8 @@ export interface RepositoryWorkflowSupervisorOptions {
     | RepositoryWorkflowSupervisorControl
     | RepositoryWorkflowControl;
   readonly pollIntervalMs?: number;
+  /** Use the production service lock when this compatibility supervisor runs. */
+  readonly lockFilePath?: string;
   readonly onError?: (repository: string, error: unknown) => void;
 }
 
@@ -33,7 +36,11 @@ export const createRepositoryWorkflowSupervisor = (
   const runCycle = async (): Promise<void> => {
     if (cycling) return;
     cycling = true;
+    let release: (() => Promise<void>) | undefined;
     try {
+      if (options.lockFilePath !== undefined) {
+        release = await acquireWorkerServiceLock(options.lockFilePath);
+      }
       const repositories = await options.control.list();
       await Promise.all(
         repositories
@@ -47,6 +54,7 @@ export const createRepositoryWorkflowSupervisor = (
           }),
       );
     } finally {
+      if (release !== undefined) await release();
       cycling = false;
     }
   };
@@ -54,11 +62,14 @@ export const createRepositoryWorkflowSupervisor = (
     runCycle,
     start() {
       if (timer) return;
-      void runCycle();
-      timer = setInterval(
-        () => void runCycle(),
-        options.pollIntervalMs ?? 60_000,
-      );
+      void runCycle().catch((error) => {
+        options.onError?.("*", error);
+      });
+      timer = setInterval(() => {
+        void runCycle().catch((error) => {
+          options.onError?.("*", error);
+        });
+      }, options.pollIntervalMs ?? 60_000);
       timer.unref();
     },
     stop() {

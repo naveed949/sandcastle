@@ -114,7 +114,10 @@ export interface RepositoryWorkflowControl {
   inspect(
     repository: string,
   ): Promise<RepositoryWorkflowInspection | undefined>;
-  runNow(repository: string): Promise<RepositoryWorkflowRunRecord>;
+  runNow(
+    repository: string,
+    signal?: AbortSignal,
+  ): Promise<RepositoryWorkflowRunRecord>;
   pause(repository: string): Promise<void>;
   resume(repository: string): Promise<void>;
 }
@@ -206,55 +209,79 @@ export const createRepositoryWorkflowControl = (
         runs: state.runs.filter((run) => run.repository === normalized),
       };
     },
-    async runNow(repository) {
+    async runNow(repository, signal) {
       const configured = await requireRepository(repository);
-      if (configured.mode !== "active")
-        throw new Error(
-          `Repository ${configured.repository} is ${configured.mode}.`,
-        );
-      const workflow = options.workflows[configured.workflowId]!;
-      if (configured.nextCycle > workflow.maxCycles) {
-        throw new Error(
-          `Repository ${configured.repository} reached its ${workflow.maxCycles}-cycle limit.`,
-        );
+      const workflow = options.workflows[configured.workflowId];
+      if (workflow === undefined)
+        throw new Error(`Unknown workflow ${configured.workflowId}.`);
+      if (signal?.aborted) {
+        throw signal.reason instanceof Error
+          ? signal.reason
+          : new Error("Repository workflow was cancelled.");
       }
-      if (configured.activeRunId)
-        throw new Error(
-          `Repository ${configured.repository} already has an active workflow.`,
-        );
       const id = createId();
       const startedAt = now();
-      await options.store.update((state) => ({
-        ...state,
-        repositories: state.repositories.map((item) =>
-          item.repository === configured.repository
-            ? { ...item, activeRunId: id }
-            : item,
-        ),
-        runs: [
-          ...state.runs,
-          {
-            id,
-            repository: configured.repository,
-            workflowId: workflow.id,
-            startedAt,
-            status: "running",
-            cycles: [],
-          },
-        ],
-      }));
+      let claimed!: AuthorizedRepositoryWorkflow;
+      await options.store.update((state) => {
+        const current = state.repositories.find(
+          (item) => item.repository === configured.repository,
+        );
+        if (current === undefined)
+          throw new Error(
+            `Repository ${configured.repository} is not authorized.`,
+          );
+        if (current.mode !== "active")
+          throw new Error(
+            `Repository ${current.repository} is ${current.mode}.`,
+          );
+        if (current.nextCycle > workflow.maxCycles) {
+          throw new Error(
+            `Repository ${current.repository} reached its ${workflow.maxCycles}-cycle limit.`,
+          );
+        }
+        if (current.activeRunId)
+          throw new Error(
+            `Repository ${current.repository} already has an active workflow.`,
+          );
+        claimed = current;
+        return {
+          ...state,
+          repositories: state.repositories.map((item) =>
+            item.repository === current.repository
+              ? { ...item, activeRunId: id }
+              : item,
+          ),
+          runs: [
+            ...state.runs,
+            {
+              id,
+              repository: current.repository,
+              workflowId: workflow.id,
+              startedAt,
+              status: "running" as const,
+              cycles: [],
+            },
+          ],
+        };
+      });
       try {
+        if (signal?.aborted) {
+          throw signal.reason instanceof Error
+            ? signal.reason
+            : new Error("Repository workflow was cancelled.");
+        }
         const cycle = await options.runtime.runCycle({
-          repository: configured.repository,
-          featureBranch: configured.featureBranch,
+          repository: claimed.repository,
+          featureBranch: claimed.featureBranch,
           workflow,
-          cycle: configured.nextCycle,
+          cycle: claimed.nextCycle,
+          signal,
         });
         let completed!: RepositoryWorkflowRunRecord;
         await options.store.update((state) => ({
           ...state,
           repositories: state.repositories.map((item) =>
-            item.repository === configured.repository
+            item.repository === claimed.repository
               ? {
                   ...item,
                   activeRunId: undefined,
@@ -285,7 +312,7 @@ export const createRepositoryWorkflowControl = (
         await options.store.update((state) => ({
           ...state,
           repositories: state.repositories.map((item) =>
-            item.repository === configured.repository
+            item.repository === claimed.repository
               ? {
                   ...item,
                   activeRunId: undefined,

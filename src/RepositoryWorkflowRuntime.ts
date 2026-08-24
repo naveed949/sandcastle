@@ -112,6 +112,13 @@ export interface RepositoryWorkflowRuntimeOptions {
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
+const throwIfAborted = (signal: AbortSignal | undefined): void => {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error
+    ? signal.reason
+    : new Error("Repository workflow was cancelled.");
+};
+
 const mapConcurrent = async <T, R>(
   values: readonly T[],
   limit: number,
@@ -138,10 +145,12 @@ export const createRepositoryWorkflowRuntime = (
   options: RepositoryWorkflowRuntimeOptions,
 ): RepositoryWorkflowRuntime => ({
   async runCycle(input) {
+    throwIfAborted(input.signal);
     if (input.workflow.maxParallel < 1) {
       throw new Error("workflow maxParallel must be at least 1.");
     }
     const plan = await options.planner.plan(input);
+    throwIfAborted(input.signal);
     const issues = plan.issues;
     if (issues.length === 0) {
       return {
@@ -158,6 +167,7 @@ export const createRepositoryWorkflowRuntime = (
       input.workflow.maxParallel,
       async (issue) => {
         try {
+          throwIfAborted(input.signal);
           const implementation = await options.taskRunner.implement({
             ...input,
             issue,
@@ -165,6 +175,7 @@ export const createRepositoryWorkflowRuntime = (
           if (implementation.commits.length === 0) {
             return { issue, status: "no_changes" as const, implementation };
           }
+          throwIfAborted(input.signal);
           const review = await options.taskRunner.review({
             ...input,
             issue,
@@ -180,6 +191,7 @@ export const createRepositoryWorkflowRuntime = (
         }
       },
     );
+    throwIfAborted(input.signal);
     const completed = tasks.filter((task) => task.status === "reviewed");
     if (completed.length === 0) {
       return {
@@ -191,11 +203,13 @@ export const createRepositoryWorkflowRuntime = (
       };
     }
 
+    throwIfAborted(input.signal);
     const integration = await options.integrator.integrate({
       ...input,
       branches: completed.map((task) => task.issue.branch),
       issues: completed.map((task) => task.issue),
     });
+    throwIfAborted(input.signal);
     await options.issueTracker.closeIssues({
       repository: input.repository,
       issueNumbers: completed.map((task) => task.issue.number),

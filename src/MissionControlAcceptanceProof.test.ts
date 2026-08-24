@@ -234,6 +234,17 @@ const completeEvidence = (
             verified: 0,
             published: 1,
           },
+          orchestration: {
+            authority: "mission-control-host",
+            mode: "running",
+            lock: "owned",
+            components: {
+              worker: { mode: "running" },
+              workflowCoordinator: { mode: "not_configured" },
+              missionControl: { mode: "listening" },
+              eventStream: { mode: "ready" },
+            },
+          },
         },
       },
       tasks: { status: 200, body: { version: 1, revision: 3, tasks: [task] } },

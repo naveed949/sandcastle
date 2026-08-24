@@ -490,12 +490,14 @@ systemd deployment, backup, upgrade, and failure inspection guidance.
 
 ### Mission Control production host
 
-`createMissionControlHost()` is the production composition root for the worker
-and its operator overview plus guarded runtime and recovery controls. It
-constructs the GitHub source, durable state store, repository manager, execution
-engine, draft publisher, diagnostics, and `WorkerService` from one central
-configuration. The same durable root also supplies the kernel-owned service
-lock, so the HTTP surface cannot start a second worker loop.
+`createMissionControlHost()` is the production composition root for the worker,
+repository workflow coordinator, operator overview, and guarded runtime and
+recovery controls. It constructs the GitHub source, durable state store,
+repository manager, execution engine, draft publisher, diagnostics, and
+`WorkerService` from one central configuration. The same durable root also
+supplies the kernel-owned service lock. The host acquires that lock before it
+starts a workflow coordinator, so a second dispatcher cannot run alongside the
+authoritative process.
 
 ```typescript
 import { codex, createMissionControlHost } from "@ai-hero/sandcastle";
@@ -530,6 +532,14 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 await host.start();
 ```
 
+When repository workflows are enabled, create one
+`createRepositoryWorkflowCoordinator({ control })` and pass both its gated
+`control` and the coordinator as host boundaries. `host.start()` starts the
+worker and confirms its lock before starting the coordinator; `host.stop()`
+stops workflow dispatch, cancels the worker, waits for bounded cleanup, and
+then closes Mission Control and its event stream. The legacy polling supervisor
+accepts the same service-lock path and cannot dispatch while this host owns it.
+
 For an operator-ready Codex and Docker launcher, provide an explicit repository
 allowlist and a server-side GitHub token, then start the included script:
 
@@ -545,11 +555,11 @@ The launcher authorizes only repositories named in `SANDCASTLE_REPOSITORIES`
 and maps each one to an existing local checkout through the required JSON
 object in `SANDCASTLE_REPOSITORY_PATHS`. Each checkout owns its workflow and
 prompts; this repository's `.sandcastle/workflow.ts` is the shared declaration
-used by both `.sandcastle/run.ts` and Mission Control. The managed workflow runs
-the same planner, bounded parallel implementers, reviewers, serialized feature
-branch integrator, and issue-closing stages. Agent logs and cycle results are
-retained under `.sandcastle/mission-control` by default. Integration commits
-remain local; pushing is a separate operator action.
+used by both `.sandcastle/run.ts` and Mission Control. The host-owned
+coordinator runs one globally serialized repository workflow at a time. Agent
+logs and cycle results are retained under `.sandcastle/mission-control` by
+default. Integration commits remain local; pushing is a separate operator
+action.
 
 Repository workflows have their own durable mode, so pausing one repository
 does not pause the others. The operator API provides:
@@ -564,14 +574,16 @@ Override the defaults with `SANDCASTLE_FEATURE_BRANCH`,
 `SANDCASTLE_CODEX_AUTH_PATH`, `SANDCASTLE_BASE_BRANCH`,
 `SANDCASTLE_MISSION_CONTROL_ROOT`, `SANDCASTLE_WORKER_OWNER`,
 `SANDCASTLE_POLL_INTERVAL_MS`, `SANDCASTLE_LEASE_DURATION_MS`,
-`SANDCASTLE_EXECUTION_TIMEOUT_MS`, `SANDCASTLE_BIND_ADDRESS`, and
-`SANDCASTLE_PORT`.
+`SANDCASTLE_EXECUTION_TIMEOUT_MS`, `SANDCASTLE_SHUTDOWN_TIMEOUT_MS`,
+`SANDCASTLE_BIND_ADDRESS`, and `SANDCASTLE_PORT`.
 
 Configuration is validated before the host constructs a ready HTTP server or
 allows discovery, checkout, agent invocation, or publication. The versioned
 read-only endpoints are `GET /api/v1/overview` and `GET /api/v1/status`; they
 return worker mode, the monotonic command revision, active attempt, cycle
-timing, recovery warnings, and current operational-state counts. Runtime
+timing, recovery warnings, current operational-state counts, and a secret-free
+`orchestration` health object identifying the Mission Control host authority and
+worker, workflow coordinator, HTTP, and event-stream component modes. Runtime
 controls use `POST /api/v1/commands` with one of `run-now`, `pause`, `resume`,
 `cancel`, `retry`, or `acknowledge` (or the generic `recover` command with a
 `recoveryAction`):

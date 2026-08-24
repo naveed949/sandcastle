@@ -19,6 +19,11 @@ import {
   createMissionControlHost,
   type MissionControlConfiguration,
 } from "./MissionControl.js";
+import type {
+  RepositoryWorkflowCoordinator,
+  RepositoryWorkflowCoordinatorMode,
+} from "./RepositoryWorkflowCoordinator.js";
+import type { RepositoryWorkflowControl } from "./RepositoryWorkflowControl.js";
 import { WorkerServiceLockError } from "./WorkerService.js";
 
 const task: NormalizedTask = {
@@ -600,6 +605,152 @@ describe("Mission Control host", () => {
       await first.stop();
       await firstRunning;
       await second.stop();
+    }
+  });
+
+  it("owns workflow startup after the worker lock and reports all production components", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "sandcastle-mission-control-authority-"),
+    );
+    temporaryDirectories.push(directory);
+    let coordinatorMode: RepositoryWorkflowCoordinatorMode = "stopped";
+    const control = {
+      authorize: vi.fn(async () => undefined),
+      remove: vi.fn(async () => undefined),
+      list: vi.fn(async () => []),
+      inspect: vi.fn(async () => undefined),
+      runNow: vi.fn(async () => {
+        throw new Error("not expected");
+      }),
+      pause: vi.fn(async () => undefined),
+      resume: vi.fn(async () => undefined),
+    } satisfies RepositoryWorkflowControl;
+    const coordinator = {
+      control,
+      start: vi.fn(async () => {
+        coordinatorMode = "running";
+      }),
+      stop: vi.fn(async () => {
+        coordinatorMode = "stopped";
+      }),
+      status: () => ({ mode: coordinatorMode }),
+      runCycle: vi.fn(async () => undefined),
+    } satisfies RepositoryWorkflowCoordinator;
+    const source = {
+      discover: vi.fn(async () => []),
+      read: vi.fn(async () => undefined),
+    };
+    const host = createMissionControlHost({
+      configuration: createConfiguration(directory),
+      boundaries: {
+        source,
+        workflowCoordinator: coordinator,
+        repositoryManager: { prepare: vi.fn() },
+        execution: { execute: vi.fn() },
+        publisher: { publish: vi.fn() },
+      },
+    });
+
+    const running = host.start();
+    await vi.waitFor(() => expect(coordinator.start).toHaveBeenCalledOnce());
+    const address = await host.listen();
+    const statusResponse = await fetch(
+      `http://${address.host}:${address.port}/api/v1/status`,
+    );
+    expect(await statusResponse.json()).toMatchObject({
+      orchestration: {
+        authority: "mission-control-host",
+        mode: "running",
+        lock: "owned",
+        components: {
+          worker: { mode: "running" },
+          workflowCoordinator: { mode: "running" },
+          missionControl: { mode: "listening" },
+          eventStream: { mode: "ready" },
+        },
+      },
+    });
+    expect(source.discover).toHaveBeenCalled();
+
+    await host.stop();
+    await running;
+    expect(coordinator.stop).toHaveBeenCalledOnce();
+    expect(host.service.status().mode).toBe("stopped");
+  });
+
+  it("allows only one host-owned dispatcher through restart", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "sandcastle-mission-control-restart-authority-"),
+    );
+    temporaryDirectories.push(directory);
+    const makeCoordinator = () => {
+      let mode: RepositoryWorkflowCoordinatorMode = "stopped";
+      const control = {
+        authorize: vi.fn(async () => undefined),
+        remove: vi.fn(async () => undefined),
+        list: vi.fn(async () => []),
+        inspect: vi.fn(async () => undefined),
+        runNow: vi.fn(async () => {
+          throw new Error("not expected");
+        }),
+        pause: vi.fn(async () => undefined),
+        resume: vi.fn(async () => undefined),
+      } satisfies RepositoryWorkflowControl;
+      return {
+        control,
+        start: vi.fn(async () => {
+          mode = "running";
+        }),
+        stop: vi.fn(async () => {
+          mode = "stopped";
+        }),
+        status: () => ({ mode }),
+        runCycle: vi.fn(async () => undefined),
+      } satisfies RepositoryWorkflowCoordinator;
+    };
+    const makeHost = (coordinator: RepositoryWorkflowCoordinator) =>
+      createMissionControlHost({
+        configuration: createConfiguration(directory),
+        boundaries: {
+          workflowCoordinator: coordinator,
+          source: {
+            discover: vi.fn(async () => []),
+            read: vi.fn(async () => undefined),
+          },
+          repositoryManager: { prepare: vi.fn() },
+          execution: { execute: vi.fn() },
+          publisher: { publish: vi.fn() },
+        },
+      });
+
+    const firstCoordinator = makeCoordinator();
+    const first = makeHost(firstCoordinator);
+    const firstRun = first.start();
+    await vi.waitFor(() =>
+      expect(firstCoordinator.start).toHaveBeenCalledOnce(),
+    );
+
+    const competingCoordinator = makeCoordinator();
+    const competing = makeHost(competingCoordinator);
+    await expect(competing.start()).rejects.toBeInstanceOf(
+      WorkerServiceLockError,
+    );
+    expect(competingCoordinator.start).not.toHaveBeenCalled();
+
+    await first.stop();
+    await firstRun;
+    await competing.stop();
+
+    const restartedCoordinator = makeCoordinator();
+    const restarted = makeHost(restartedCoordinator);
+    const restartedRun = restarted.start();
+    try {
+      await vi.waitFor(() =>
+        expect(restartedCoordinator.start).toHaveBeenCalledOnce(),
+      );
+    } finally {
+      await restarted.stop();
+      await restartedRun;
     }
   });
 

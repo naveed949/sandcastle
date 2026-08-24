@@ -41,6 +41,10 @@ import {
   type WorkerServiceMode,
   type WorkerServicePaths,
 } from "./WorkerService.js";
+import type {
+  RepositoryWorkflowCoordinator,
+  RepositoryWorkflowCoordinatorStatus,
+} from "./RepositoryWorkflowCoordinator.js";
 import {
   createWorkerStateStore,
   type ExecutionAttempt,
@@ -112,12 +116,18 @@ export interface MissionControlConfiguration {
   readonly policyFilePath?: string;
   /** Optional append-only policy audit; defaults to operator/commands.jsonl. */
   readonly policyAuditFilePath?: string;
+  /** Maximum time to wait for host shutdown and component cleanup. */
+  readonly shutdownTimeoutMs?: number;
+  /** Maximum time to wait for the worker to acquire its startup lock. */
+  readonly startupTimeoutMs?: number;
 }
 
 /** Injectable boundaries used by integration tests and alternate deployments. */
 export interface MissionControlHostBoundaries {
   /** Optional multi-repository workflow control plane exposed to operators. */
   readonly repositoryWorkflows?: RepositoryWorkflowControl;
+  /** Host-owned repository workflow scheduler and lifecycle boundary. */
+  readonly workflowCoordinator?: RepositoryWorkflowCoordinator;
   /** Replace the default read-only GitHub adapter. */
   readonly source?: GitHubTaskSource;
   /** Replace repository preparation while retaining host composition. */
@@ -138,6 +148,31 @@ export interface MissionControlHostBoundaries {
 export interface MissionControlHostOptions {
   readonly configuration: MissionControlConfiguration;
   readonly boundaries?: MissionControlHostBoundaries;
+}
+
+export type MissionControlOrchestrationMode =
+  | "stopped"
+  | "starting"
+  | "running"
+  | "stopping"
+  | "unhealthy";
+
+export interface MissionControlComponentHealth {
+  readonly mode: string;
+  readonly detail?: string;
+}
+
+/** Secret-free health projection for the single production authority. */
+export interface MissionControlOrchestrationHealth {
+  readonly authority: "mission-control-host";
+  readonly mode: MissionControlOrchestrationMode;
+  readonly lock: "owned" | "released";
+  readonly components: {
+    readonly worker: MissionControlComponentHealth;
+    readonly workflowCoordinator: MissionControlComponentHealth;
+    readonly missionControl: MissionControlComponentHealth;
+    readonly eventStream: MissionControlComponentHealth;
+  };
 }
 
 /** Stable fields returned for the current active attempt. */
@@ -178,6 +213,7 @@ export interface MissionControlOverview {
   readonly nextExpectedCycle: string | null;
   readonly recoveryWarnings: readonly MissionControlRecoveryWarning[];
   readonly operationalStateCounts: MissionControlOperationalStateCounts;
+  readonly orchestration: MissionControlOrchestrationHealth;
 }
 
 export type {
@@ -220,6 +256,7 @@ export class MissionControlConfigurationError extends Error {
 /** Composed production host and its overview plus guarded control surface. */
 export interface MissionControlHost {
   readonly repositoryWorkflows?: RepositoryWorkflowControl;
+  readonly workflowCoordinator?: RepositoryWorkflowCoordinator;
   readonly paths: WorkerServicePaths;
   readonly source: GitHubTaskSource;
   readonly store: WorkerStateStore;
@@ -341,6 +378,22 @@ export const validateMissionControlConfiguration = (
       configuration.executionTimeoutMs <= 0)
   ) {
     issues.push("executionTimeoutMs must be a positive finite number");
+  }
+  if (
+    configuration.shutdownTimeoutMs !== undefined &&
+    (typeof configuration.shutdownTimeoutMs !== "number" ||
+      !Number.isFinite(configuration.shutdownTimeoutMs) ||
+      configuration.shutdownTimeoutMs <= 0)
+  ) {
+    issues.push("shutdownTimeoutMs must be a positive finite number");
+  }
+  if (
+    configuration.startupTimeoutMs !== undefined &&
+    (typeof configuration.startupTimeoutMs !== "number" ||
+      !Number.isFinite(configuration.startupTimeoutMs) ||
+      configuration.startupTimeoutMs <= 0)
+  ) {
+    issues.push("startupTimeoutMs must be a positive finite number");
   }
 
   const server = configuration.server ?? {};
@@ -958,6 +1011,72 @@ const closeServer = (server: Server): Promise<void> => {
   });
 };
 
+const withTimeout = async <T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> => {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+};
+
+const waitForWorkerReady = (
+  service: WorkerService,
+  serviceRun: Promise<void>,
+  timeoutMs: number,
+): Promise<void> =>
+  new Promise((resolve, reject) => {
+    let settled = false;
+    let poll: NodeJS.Timeout;
+    let timeout: NodeJS.Timeout;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearInterval(poll);
+      clearTimeout(timeout);
+      if (error === undefined) resolve();
+      else reject(error);
+    };
+    poll = setInterval(() => {
+      const mode = service.status().mode;
+      if (mode === "running" || mode === "paused") {
+        finish();
+      } else if (mode === "unhealthy" || mode === "stopped") {
+        finish(
+          new Error(`Worker service did not become ready; mode is ${mode}.`),
+        );
+      }
+    }, 5);
+    timeout = setTimeout(
+      () =>
+        finish(new Error(`Worker service startup exceeded ${timeoutMs}ms.`)),
+      timeoutMs,
+    );
+    poll.unref();
+    timeout.unref();
+
+    void serviceRun.then(
+      () => {
+        if (!settled && service.status().mode !== "running") {
+          finish(
+            new Error(
+              `Worker service stopped during startup; mode is ${service.status().mode}.`,
+            ),
+          );
+        }
+      },
+      (error: unknown) =>
+        finish(error instanceof Error ? error : new Error(String(error))),
+    );
+  });
+
 /** Compose the existing worker into a systemd-friendly host and read-only overview. */
 export const createMissionControlHost = (
   options: MissionControlHostOptions,
@@ -965,6 +1084,9 @@ export const createMissionControlHost = (
   validateMissionControlConfiguration(options.configuration);
   const configuration = options.configuration;
   const boundaries = options.boundaries ?? {};
+  const workflowCoordinator = boundaries.workflowCoordinator;
+  const repositoryWorkflows =
+    workflowCoordinator?.control ?? boundaries.repositoryWorkflows;
   const compositionIssues: string[] = [];
   if (
     boundaries.repositoryManager === undefined &&
@@ -1163,6 +1285,41 @@ export const createMissionControlHost = (
     getEvents,
   });
 
+  let hostMode: MissionControlOrchestrationMode = "stopped";
+  const orchestrationHealth = (
+    serverListening: boolean,
+  ): MissionControlOrchestrationHealth => {
+    const workerStatus = service.status();
+    const coordinatorStatus: RepositoryWorkflowCoordinatorStatus | undefined =
+      workflowCoordinator?.status();
+    const lockOwned = ["starting", "running", "pausing", "stopping"].includes(
+      workerStatus.mode,
+    );
+    return {
+      authority: "mission-control-host",
+      mode: hostMode,
+      lock: lockOwned ? "owned" : "released",
+      components: {
+        worker: { mode: workerStatus.mode },
+        workflowCoordinator: {
+          mode: coordinatorStatus?.mode ?? "not_configured",
+          ...(coordinatorStatus?.activeRepository === undefined
+            ? {}
+            : { detail: coordinatorStatus.activeRepository }),
+        },
+        missionControl: {
+          mode: serverListening ? "listening" : "stopped",
+        },
+        eventStream: {
+          mode: serverListening ? "ready" : "stopped",
+          ...(eventJournal === undefined
+            ? {}
+            : { detail: `last-event-id:${eventJournal.at(-1)?.id ?? 0}` }),
+        },
+      },
+    };
+  };
+
   const serverOptions = configuration.server ?? {};
   const bindAddress = serverOptions.bindAddress ?? "127.0.0.1";
   const port = serverOptions.port ?? 3000;
@@ -1170,7 +1327,6 @@ export const createMissionControlHost = (
     void (async () => {
       const url = new URL(request.url ?? "/", "http://mission-control.invalid");
       if (url.pathname === "/api/v1/repositories") {
-        const repositoryWorkflows = boundaries.repositoryWorkflows;
         if (!repositoryWorkflows) {
           writeJson(response, 404, {
             version: 1,
@@ -1226,7 +1382,6 @@ export const createMissionControlHost = (
         /^\/api\/v1\/repositories\/([^/]+)\/([^/]+)(?:\/(pause|resume|run))?$/u,
       );
       if (repositoryWorkflowMatch) {
-        const repositoryWorkflows = boundaries.repositoryWorkflows;
         const owner = decodePathValue(repositoryWorkflowMatch[1]!);
         const name = decodePathValue(repositoryWorkflowMatch[2]!);
         const action = repositoryWorkflowMatch[3];
@@ -1359,7 +1514,11 @@ export const createMissionControlHost = (
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/v1/status") {
-        writeJson(response, 200, { version: 1, ...service.status() });
+        writeJson(response, 200, {
+          version: 1,
+          ...service.status(),
+          orchestration: orchestrationHealth(server.listening),
+        });
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/v1/tasks") {
@@ -1671,6 +1830,7 @@ export const createMissionControlHost = (
         state,
         diagnosticsFromDisk,
       ),
+      orchestration: orchestrationHealth(server.listening),
     };
   };
 
@@ -1706,18 +1866,44 @@ export const createMissionControlHost = (
   const start = (): Promise<void> => {
     if (running !== undefined) return running;
     stopRequested = false;
+    hostMode = "starting";
     running = (async () => {
-      await listen();
-      if (stopRequested) {
-        await closeServer(server);
-        listening = undefined;
-        return;
-      }
+      let serviceRun: Promise<void> | undefined;
+      let coordinatorStarted = false;
       try {
-        await service.start();
+        // WorkerService owns the kernel lock for the lifetime of its polling
+        // loop. Do not start the workflow dispatcher until that lock is held.
+        serviceRun = service.start();
+        await waitForWorkerReady(
+          service,
+          serviceRun,
+          configuration.startupTimeoutMs ??
+            configuration.shutdownTimeoutMs ??
+            30_000,
+        );
+        if (stopRequested) return;
+        if (workflowCoordinator !== undefined) {
+          await workflowCoordinator.start();
+          coordinatorStarted = true;
+        }
+        if (stopRequested) return;
+        await listen();
+        hostMode = "running";
+        await serviceRun;
       } catch (error) {
-        await closeServer(server);
+        hostMode = "unhealthy";
+        if (coordinatorStarted) {
+          if (workflowCoordinator !== undefined) {
+            await workflowCoordinator.stop().catch(() => undefined);
+          }
+        }
+        await service.stop().catch(() => undefined);
+        await closeServer(server).catch(() => undefined);
+        listening = undefined;
         throw error;
+      } finally {
+        if (serviceRun !== undefined) await serviceRun.catch(() => undefined);
+        if (stopRequested && hostMode === "starting") hostMode = "stopped";
       }
     })().finally(() => {
       running = undefined;
@@ -1727,8 +1913,24 @@ export const createMissionControlHost = (
 
   const stop = async (): Promise<void> => {
     stopRequested = true;
+    if (hostMode !== "stopped") hostMode = "stopping";
+    const activeRun = running;
+    let cleanupError: unknown;
     try {
-      await service.stop();
+      // Stop new repository dispatch first, then cancel the worker execution
+      // that owns the service lock, and only then close the event stream.
+      if (workflowCoordinator !== undefined) {
+        await workflowCoordinator.stop().catch((error) => {
+          cleanupError ??= error;
+        });
+      }
+      await withTimeout(
+        service.stop(),
+        configuration.shutdownTimeoutMs ?? 30_000,
+        "Mission Control shutdown timed out.",
+      ).catch((error) => {
+        cleanupError ??= error;
+      });
     } finally {
       for (const subscriber of eventSubscribers) {
         subscriber.response.end();
@@ -1736,11 +1938,18 @@ export const createMissionControlHost = (
       eventSubscribers.clear();
       await closeServer(server);
       listening = undefined;
+      if (activeRun !== undefined && cleanupError === undefined) {
+        await activeRun.catch(() => undefined);
+      }
+      if (cleanupError === undefined) hostMode = "stopped";
+      else hostMode = "unhealthy";
     }
+    if (cleanupError !== undefined) throw cleanupError;
   };
 
   const host: MissionControlHost = {
-    repositoryWorkflows: boundaries.repositoryWorkflows,
+    repositoryWorkflows,
+    workflowCoordinator,
     paths,
     source,
     store,
