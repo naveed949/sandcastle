@@ -255,8 +255,12 @@ export const createWorkerExecutionEngine = (
               options.configurationProvider?.() ?? options.configuration,
             request,
             relatedTasks: startedAttempt.claim?.refreshedSnapshots,
+            ...(executionOptions.signal === undefined
+              ? {}
+              : { signal: executionOptions.signal }),
           });
         } catch (cause) {
+          if (executionOptions.signal?.aborted) status = "interrupted";
           failurePhase = "preparation";
           error = errorMessage(cause);
         }

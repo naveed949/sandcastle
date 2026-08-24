@@ -78,6 +78,7 @@ interface HarnessOptions {
   readonly commits?: readonly { readonly sha: string }[];
   readonly remoteBaseCommit?: string;
   readonly commandStdout?: string;
+  readonly closeError?: Error;
 }
 
 const createHarness = async (options: HarnessOptions = {}) => {
@@ -180,9 +181,12 @@ const createHarness = async (options: HarnessOptions = {}) => {
     },
   );
   const commands: string[] = [];
-  const close = vi.fn(async () => ({
-    preservedWorktreePath: options.preservedWorktreePath,
-  }));
+  const close = vi.fn(async () => {
+    if (options.closeError !== undefined) throw options.closeError;
+    return {
+      preservedWorktreePath: options.preservedWorktreePath,
+    };
+  });
   const operations: WorkerRepositoryOperations = {
     repositoryExists: async () => false,
     clone: async () => undefined,
@@ -429,6 +433,35 @@ describe("createRepositoryWorkflowImplementer", () => {
     expect(result.status).toBe("failed");
     expect(result.failurePhase).toBe("cleanup");
     expect(result.recovery).toBe("retryable");
+  }, 20_000);
+
+  it("classifies cleanup exceptions as retryable failures", async () => {
+    const harness = await createHarness({
+      closeError: new Error("worktree lock held"),
+    });
+
+    const result = await harness.implementer.implement(harness.first);
+
+    expect(result.status).toBe("failed");
+    expect(result.failurePhase).toBe("cleanup");
+    expect(result.message).toContain("worktree lock held");
+  }, 20_000);
+
+  it("classifies an already-cancelled signal without any side effect", async () => {
+    const harness = await createHarness();
+    const controller = new AbortController();
+    controller.abort(new Error("stopped before dispatch"));
+
+    const result = await harness.implementer.implement({
+      ...harness.first,
+      signal: controller.signal,
+    });
+
+    expect(result.status).toBe("cancelled");
+    expect(result.recovery).toBe("resumable");
+    expect(result.reasonCode).toBe("stage_cancelled");
+    expect(harness.runAgent).not.toHaveBeenCalled();
+    expect((await harness.store.read()).attempts[0]?.status).toBe("active");
   }, 20_000);
 
   it("isolates overlapping issue numbers by repository identity", async () => {

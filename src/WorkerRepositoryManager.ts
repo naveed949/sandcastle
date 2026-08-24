@@ -100,6 +100,8 @@ export interface PrepareWorkerRepositoryInput {
   readonly request: ExecutionRequest;
   /** Fresh claim-time snapshots needed to authorize PRD and dependency context. */
   readonly relatedTasks?: readonly NormalizedTask[];
+  /** Cancellation checked between preparation steps; aborts stop provisioning. */
+  readonly signal?: AbortSignal;
 }
 
 export interface WorkerRepositoryManager {
@@ -438,7 +440,15 @@ export const createWorkerRepositoryManager = (
     });
 
   return {
-    prepare: async ({ configuration, request, relatedTasks = [] }) => {
+    prepare: async ({ configuration, request, relatedTasks = [], signal }) => {
+      const throwIfAborted = (): void => {
+        if (signal?.aborted) {
+          throw new WorkerRepositoryError(
+            "Repository preparation was cancelled.",
+            "repository_operation_failed",
+          );
+        }
+      };
       // This policy check is deliberately the first action in the method. No filesystem,
       // clone, fetch, worktree, or command operation may precede it.
       const dryRun = runWorkerDryRun({
@@ -472,6 +482,7 @@ export const createWorkerRepositoryManager = (
       const branch = workerBranchFor(request);
 
       try {
+        throwIfAborted();
         if (!(await operations.repositoryExists(repositoryDir))) {
           await operations.clone({ canonicalRemote, repositoryDir });
         }
@@ -483,6 +494,7 @@ export const createWorkerRepositoryManager = (
             "remote_mismatch",
           );
         }
+        throwIfAborted();
         await operations.fetchBase({
           repositoryDir,
           baseBranch: request.task.baseBranch,
@@ -499,6 +511,7 @@ export const createWorkerRepositoryManager = (
             "base_mismatch",
           );
         }
+        throwIfAborted();
         if (
           !(await operations.hasCommit({
             repositoryDir,

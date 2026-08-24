@@ -68,14 +68,18 @@ export interface RepositoryWorkflowImplementerOptions {
   readonly timeoutMs?: number;
 }
 
-/** Retained outcome of one implementation stage invocation. */
-export interface RepositoryWorkflowImplementationRecord {
+/** Identity fields shared by every record of one implementation attempt. */
+export interface RepositoryWorkflowImplementationIdentity {
   readonly planId: string;
   readonly workflowIdentity: string;
   readonly repository: string;
   readonly taskId: string;
   readonly executionIdentity: string;
   readonly attemptId: string;
+}
+
+/** Retained outcome of one implementation stage invocation. */
+export interface RepositoryWorkflowImplementationRecord extends RepositoryWorkflowImplementationIdentity {
   readonly status: RepositoryWorkflowImplementationStatus;
   readonly recovery: RepositoryWorkflowImplementationRecovery;
   readonly reasonCode?: RepositoryWorkflowImplementationReasonCode;
@@ -126,16 +130,16 @@ const validateBinding = (
     isRecord(request) && isRecord(request.task),
     "Implementation requires the claimed execution request.",
   );
-  const input_ = plan.input;
+  const planInput = plan.input;
   if (
-    normalizeRepository(input_.repository) !==
+    normalizeRepository(planInput.repository) !==
       normalizeRepository(request.task.repository) ||
-    input_.taskId !== request.taskId ||
-    input_.attemptId !== attempt.attemptId ||
-    input_.executionIdentity !== attempt.executionIdentity ||
-    input_.executionIdentity !== request.executionIdentity ||
-    input_.profileId !== request.profileId ||
-    input_.profileDigest !== request.profileDigest
+    planInput.taskId !== request.taskId ||
+    planInput.attemptId !== attempt.attemptId ||
+    planInput.executionIdentity !== attempt.executionIdentity ||
+    planInput.executionIdentity !== request.executionIdentity ||
+    planInput.profileId !== request.profileId ||
+    planInput.profileDigest !== request.profileDigest
   ) {
     throw new RepositoryWorkflowImplementerContextError(
       "invalid_context",
@@ -250,6 +254,19 @@ export const createRepositoryWorkflowImplementer = (
           request.promptTemplate.includes("{{ACCEPTED_PLAN}}"),
         "Implementer prompt template must reference the {{ACCEPTED_PLAN}} marker.",
       );
+
+      // An operator signal that already fired classifies without side effects;
+      // the attempt stays claimable and lease recovery remains available.
+      if (input.signal?.aborted) {
+        return {
+          ...identity,
+          status: "cancelled",
+          recovery: "resumable",
+          reasonCode: "stage_cancelled",
+          message: `Implementation of ${request.taskId} was cancelled before execution began.`,
+          verification: [],
+        };
+      }
 
       // Stage-owned controls: operator cancellation and the stage deadline
       // both reach the agent and command subprocesses through one signal.

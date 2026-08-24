@@ -319,6 +319,35 @@ through the agent API. Run logs are forced into the qualified repository cache,
 and a dirty preserved worktree is retained as cleanup failure evidence instead
 of being reported as verified.
 
+### Plan-bound implementation stage
+
+Execute one accepted structured plan against its still-claimed attempt. The
+stage binds execution to the plan's frozen task revision, captured base
+commit, and repository profile; classifies stale revisions and base drift as
+retryable without side effects; never re-executes an attempt already started
+by a crashed run; and propagates stage timeout and operator cancellation to
+the agent and command subprocesses through one `AbortSignal`.
+
+```typescript
+import { createRepositoryWorkflowImplementer } from "@ai-hero/sandcastle";
+
+const implementer = createRepositoryWorkflowImplementer({
+  engine: execution,
+  store: state,
+  timeoutMs: 30 * 60_000,
+});
+
+const outcome = await implementer.implement({ plan, attempt });
+console.log(outcome.status, outcome.recovery, outcome.verification);
+```
+
+The implementer prompt template must reference an `{{ACCEPTED_PLAN}}` marker;
+the marker is expanded with the accepted plan JSON before the agent runs, and
+execution fails fast when the marker is present without a supplied plan. The
+workflow advances only on `verified`; cancelled and timed-out attempts are
+resumable through lease recovery, and classified failures are retryable with a
+fresh claim.
+
 ### Verification-gated draft pull requests
 
 Publish a retained verified attempt through a separate credentialed boundary.
