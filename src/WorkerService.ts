@@ -3,6 +3,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import {
   runWorkerDryRun,
+  type EligibilityDecision,
   type WorkerConfiguration,
 } from "./WorkerCoordinator.js";
 import { claimWorkerTask, WorkerClaimError } from "./WorkerClaimCoordinator.js";
@@ -218,6 +219,31 @@ const waitForPoll = (
     );
   });
 
+const operationalStateFor = (
+  decision: EligibilityDecision,
+  retainedAttempt: ExecutionAttempt | undefined,
+): WorkerOperationalState => {
+  if (retainedAttempt?.status === "published") return "published";
+  if (retainedAttempt?.status === "verified") return "verified";
+  if (
+    retainedAttempt?.status === "failed" ||
+    retainedAttempt?.status === "interrupted"
+  ) {
+    return "blocked";
+  }
+  if (decision.eligible) return "ready";
+  if (decision.reasonCode === "unauthorized_repository") {
+    return "unauthorized";
+  }
+  if (
+    decision.reasonCode === "blocked" ||
+    decision.reasonCode === "unmet_dependency"
+  ) {
+    return "blocked";
+  }
+  return "ineligible";
+};
+
 const acquireServiceLock = async (
   lockFilePath: string,
 ): Promise<() => Promise<void>> => {
@@ -310,12 +336,12 @@ export const createWorkerService = (
   const completeCycle = (result: WorkerCycleResult): WorkerCycleResult => {
     const completedAt = now();
     lastCompletedCycle = completedAt;
-    nextExpectedCycle =
-      serviceMode === "running" || serviceMode === "starting"
-        ? new Date(
-            Date.parse(completedAt) + options.pollIntervalMs,
-          ).toISOString()
-        : undefined;
+    nextExpectedCycle = undefined;
+    if (serviceMode === "running" || serviceMode === "starting") {
+      nextExpectedCycle = new Date(
+        Date.parse(completedAt) + options.pollIntervalMs,
+      ).toISOString();
+    }
     return result;
   };
 
@@ -507,22 +533,7 @@ export const createWorkerService = (
               (attempt) =>
                 attempt.executionIdentity === decision.executionIdentity,
             );
-      const state: WorkerOperationalState =
-        retainedAttempt?.status === "published"
-          ? "published"
-          : retainedAttempt?.status === "verified"
-            ? "verified"
-            : retainedAttempt?.status === "failed" ||
-                retainedAttempt?.status === "interrupted"
-              ? "blocked"
-              : decision.eligible
-                ? "ready"
-                : decision.reasonCode === "unauthorized_repository"
-                  ? "unauthorized"
-                  : decision.reasonCode === "blocked" ||
-                      decision.reasonCode === "unmet_dependency"
-                    ? "blocked"
-                    : "ineligible";
+      const state = operationalStateFor(decision, retainedAttempt);
       await emit({
         state,
         taskId: decision.taskId,
