@@ -33,6 +33,44 @@ export type {
 } from "./createWorktree.js";
 export type { PromptArgs } from "./PromptArgumentSubstitution.js";
 export type { AgentStreamEvent } from "./AgentStreamEmitter.js";
+export { createRepositoryWorkflowRuntime } from "./RepositoryWorkflowRuntime.js";
+export type {
+  RepositoryWorkflowAgent,
+  RepositoryWorkflowDefinition,
+  RepositoryWorkflowIssue,
+  RepositoryWorkflowCycleInput,
+  RepositoryWorkflowAgentResult,
+  RepositoryWorkflowPlanner,
+  RepositoryWorkflowTaskRunner,
+  RepositoryWorkflowIntegrator,
+  RepositoryWorkflowIssueTracker,
+  RepositoryWorkflowTaskResult,
+  RepositoryWorkflowCycleResult,
+  RepositoryWorkflowRuntime,
+  RepositoryWorkflowRuntimeOptions,
+} from "./RepositoryWorkflowRuntime.js";
+export {
+  createRepositoryWorkflowControl,
+  createRepositoryWorkflowStore,
+} from "./RepositoryWorkflowControl.js";
+export type {
+  RepositoryWorkflowMode,
+  AuthorizedRepositoryWorkflow,
+  RepositoryWorkflowRunRecord,
+  RepositoryWorkflowState,
+  RepositoryWorkflowStore,
+  RepositoryWorkflowStoreOptions,
+  AuthorizeRepositoryWorkflowInput,
+  RepositoryWorkflowInspection,
+  RepositoryWorkflowControl,
+  RepositoryWorkflowControlOptions,
+} from "./RepositoryWorkflowControl.js";
+export { createRepositoryWorkflowSupervisor } from "./RepositoryWorkflowSupervisor.js";
+export type {
+  RepositoryWorkflowSupervisorControl,
+  RepositoryWorkflowSupervisor,
+  RepositoryWorkflowSupervisorOptions,
+} from "./RepositoryWorkflowSupervisor.js";
 export {
   transferClaudeSession,
   transferCodexSession,

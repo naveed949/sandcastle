@@ -1,8 +1,7 @@
 import * as sandcastle from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+import { repositoryWorkflow } from "./workflow.js";
 
-const MAX_ITERATIONS = 10;
-const MAX_PARALLEL = 4;
 const ISSUE_REPOSITORY = "naveed949/sandcastle";
 
 const createDockerSandbox = () =>
@@ -17,15 +16,23 @@ const createDockerSandbox = () =>
     ],
   });
 
-for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
-  console.log(`\n=== Iteration ${iteration}/${MAX_ITERATIONS} ===\n`);
+for (
+  let iteration = 1;
+  iteration <= repositoryWorkflow.maxCycles;
+  iteration++
+) {
+  console.log(
+    `\n=== Iteration ${iteration}/${repositoryWorkflow.maxCycles} ===\n`,
+  );
 
   // Phase 1: Plan — orchestrator agent analyzes issues and picks parallelizable work
   const plan = await sandcastle.run({
     sandbox: createDockerSandbox(),
     name: "Planner",
-    agent: sandcastle.codex("gpt-5.6-terra", { effort: "medium" }),
-    promptFile: "./.sandcastle/plan-prompt.md",
+    agent: sandcastle.codex(repositoryWorkflow.planner.model, {
+      effort: repositoryWorkflow.planner.effort,
+    }),
+    promptFile: repositoryWorkflow.planner.prompt,
   });
 
   const planMatch = plan.stdout.match(/<plan>([\s\S]*?)<\/plan>/);
@@ -55,7 +62,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   let running = 0;
   const queue: (() => void)[] = [];
   const acquire = () =>
-    running < MAX_PARALLEL
+    running < repositoryWorkflow.maxParallel
       ? (running++, Promise.resolve())
       : new Promise<void>((resolve) => queue.push(resolve));
   const release = () => {
@@ -84,8 +91,10 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
 
         const result = await sandbox.run({
           name: "Implementer #" + issue.number,
-          agent: sandcastle.codex("gpt-5.6-luna", { effort: "max" }),
-          promptFile: "./.sandcastle/implement-prompt.md",
+          agent: sandcastle.codex(repositoryWorkflow.implementer.model, {
+            effort: repositoryWorkflow.implementer.effort,
+          }),
+          promptFile: repositoryWorkflow.implementer.prompt,
           promptArgs: {
             ISSUE_NUMBER: String(issue.number),
             ISSUE_TITLE: issue.title,
@@ -96,8 +105,10 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
         if (result.commits.length > 0) {
           await sandbox.run({
             name: "Reviewer #" + issue.number,
-            agent: sandcastle.codex("gpt-5.6-sol", { effort: "medium" }),
-            promptFile: "./.sandcastle/review-prompt.md",
+            agent: sandcastle.codex(repositoryWorkflow.reviewer.model, {
+              effort: repositoryWorkflow.reviewer.effort,
+            }),
+            promptFile: repositoryWorkflow.reviewer.prompt,
             promptArgs: {
               ISSUE_NUMBER: String(issue.number),
               ISSUE_TITLE: issue.title,
@@ -156,8 +167,8 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     sandbox: createDockerSandbox(),
     name: "Merger",
     maxIterations: 10,
-    agent: sandcastle.codex("gpt-5.6-terra"),
-    promptFile: "./.sandcastle/merge-prompt.md",
+    agent: sandcastle.codex(repositoryWorkflow.integrator.model),
+    promptFile: repositoryWorkflow.integrator.prompt,
     promptArgs: {
       BRANCHES: completedBranches.map((b) => `- ${b}`).join("\n"),
       ISSUES: completedIssues

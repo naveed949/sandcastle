@@ -64,6 +64,7 @@ import {
   type MissionControlTaskView,
 } from "./MissionControlReadModel.js";
 import { containsProtectedWorkerMaterial } from "./WorkerIsolationPolicy.js";
+import type { RepositoryWorkflowControl } from "./RepositoryWorkflowControl.js";
 export { createMissionControlReadModel } from "./MissionControlReadModel.js";
 import {
   createMissionControlPolicyAdministration,
@@ -115,6 +116,8 @@ export interface MissionControlConfiguration {
 
 /** Injectable boundaries used by integration tests and alternate deployments. */
 export interface MissionControlHostBoundaries {
+  /** Optional multi-repository workflow control plane exposed to operators. */
+  readonly repositoryWorkflows?: RepositoryWorkflowControl;
   /** Replace the default read-only GitHub adapter. */
   readonly source?: GitHubTaskSource;
   /** Replace repository preparation while retaining host composition. */
@@ -216,6 +219,7 @@ export class MissionControlConfigurationError extends Error {
 
 /** Composed production host and its overview plus guarded control surface. */
 export interface MissionControlHost {
+  readonly repositoryWorkflows?: RepositoryWorkflowControl;
   readonly paths: WorkerServicePaths;
   readonly source: GitHubTaskSource;
   readonly store: WorkerStateStore;
@@ -618,6 +622,7 @@ const overviewHtml = `<!doctype html>
           <p class="muted" id="control-status" aria-live="polite"></p>
         </section>
         <section class="panel"><h2>Operational state counts</h2><div id="counts" class="grid"></div></section>
+        <section class="panel"><h2>Authorized repositories</h2><p class="muted">Select a repository to inspect workflow cycles, task stages, commits, and retained log references.</p><div id="repositories" class="list"></div><pre id="repository-detail" class="list-item muted">Select a repository.</pre></section>
         <section class="panel"><h2>Task inbox</h2><p class="muted">Repository-qualified snapshots and worker eligibility decisions.</p><div id="tasks" class="list"></div></section>
         <section class="panel"><h2>Deterministic ready queue</h2><p class="muted">Order is emitted by the worker and is not recalculated by this page.</p><div id="queue" class="list"></div></section>
         <section class="panel"><h2>Attempts</h2><p class="muted">Claim, lease, lifecycle, evidence, and publication inspection is available through the versioned API.</p><div id="attempts" class="list"></div></section>
@@ -632,6 +637,25 @@ const overviewHtml = `<!doctype html>
       let latestRevision = 0;
       let activeAttemptId = null;
       const appendLine = (parent, value, className) => { const item = document.createElement("div"); item.className = className || "list-item"; item.textContent = value; parent.append(item); return item; };
+      const repositoryUrl = (repository, action) => "/api/v1/repositories/" + repository.split("/").map(encodeURIComponent).join("/") + (action ? "/" + action : "");
+      const renderRepositories = async () => {
+        const response = await fetch("/api/v1/repositories", { cache: "no-store" });
+        const list = document.getElementById("repositories"); list.replaceChildren();
+        if (!response.ok) { appendLine(list, "Repository workflows are not configured.", "muted"); return; }
+        const payload = await response.json();
+        payload.repositories.forEach((repository) => {
+          const item = document.createElement("div"); item.className = "list-item";
+          const select = document.createElement("button"); select.dataset.repository = repository.repository; select.textContent = repository.repository;
+          const status = document.createTextNode(" • " + repository.mode + " • " + repository.workflowId + " • cycle " + repository.nextCycle + " ");
+          const action = document.createElement("button"); action.dataset.repositoryAction = repository.mode === "paused" ? "resume" : "pause"; action.dataset.repository = repository.repository; action.textContent = repository.mode === "paused" ? "Resume" : "Pause";
+          item.append(select, status, action); list.append(item);
+        });
+        if (payload.repositories.length === 0) appendLine(list, "No authorized repositories.", "muted");
+      };
+      const inspectRepository = async (repository) => {
+        const response = await fetch(repositoryUrl(repository), { cache: "no-store" });
+        text("repository-detail", response.ok ? JSON.stringify(await response.json(), null, 2) : "Repository inspection unavailable.");
+      };
       const renderInspection = async () => {
         try {
           const [tasksResponse, queueResponse, attemptsResponse] = await Promise.all([
@@ -685,6 +709,7 @@ const overviewHtml = `<!doctype html>
             item.append(label, value); return item;
           }));
           void renderInspection();
+          void renderRepositories();
         } catch { text("updated", "Overview unavailable"); }
       }
       function renderRecoveryWarnings(recoveryWarnings) {
@@ -731,6 +756,13 @@ const overviewHtml = `<!doctype html>
       }
       document.addEventListener("click", (event) => {
         const target = event.target;
+        const repositoryAction = target && target.closest ? target.closest("[data-repository-action]") : null;
+        if (repositoryAction) {
+          void fetch(repositoryUrl(repositoryAction.dataset.repository, repositoryAction.dataset.repositoryAction), { method: "POST" }).then(() => { void renderRepositories(); void inspectRepository(repositoryAction.dataset.repository); });
+          return;
+        }
+        const repository = target && target.closest ? target.closest("[data-repository]") : null;
+        if (repository) { void inspectRepository(repository.dataset.repository); return; }
         const button = target && target.closest ? target.closest("[data-command]") : null;
         if (button) void sendCommand(button.dataset.command, button.dataset.attemptId);
       });
@@ -1137,6 +1169,112 @@ export const createMissionControlHost = (
   const server = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? "/", "http://mission-control.invalid");
+      if (url.pathname === "/api/v1/repositories") {
+        const repositoryWorkflows = boundaries.repositoryWorkflows;
+        if (!repositoryWorkflows) {
+          writeJson(response, 404, {
+            version: 1,
+            error: "repository_workflows_not_configured",
+          });
+          return;
+        }
+        if (request.method === "GET") {
+          writeJson(response, 200, {
+            version: 1,
+            repositories: await repositoryWorkflows.list(),
+          });
+          return;
+        }
+        if (request.method === "POST") {
+          try {
+            const body = (await readJsonBody(request)) as Record<
+              string,
+              unknown
+            >;
+            if (
+              !isNonEmptyString(body.repository) ||
+              !isNonEmptyString(body.featureBranch) ||
+              !isNonEmptyString(body.workflowId)
+            ) {
+              writeJson(response, 422, {
+                version: 1,
+                error: "invalid_repository_workflow",
+              });
+              return;
+            }
+            await repositoryWorkflows.authorize({
+              repository: body.repository,
+              featureBranch: body.featureBranch,
+              workflowId: body.workflowId,
+            });
+            writeJson(
+              response,
+              201,
+              await repositoryWorkflows.inspect(body.repository),
+            );
+          } catch (error) {
+            writeJson(response, 422, {
+              version: 1,
+              error: "repository_workflow_rejected",
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
+          return;
+        }
+      }
+      const repositoryWorkflowMatch = url.pathname.match(
+        /^\/api\/v1\/repositories\/([^/]+)\/([^/]+)(?:\/(pause|resume|run))?$/u,
+      );
+      if (repositoryWorkflowMatch) {
+        const repositoryWorkflows = boundaries.repositoryWorkflows;
+        const owner = decodePathValue(repositoryWorkflowMatch[1]!);
+        const name = decodePathValue(repositoryWorkflowMatch[2]!);
+        const action = repositoryWorkflowMatch[3];
+        if (!repositoryWorkflows || !owner || !name) {
+          writeJson(response, 404, {
+            version: 1,
+            error: "repository_workflow_not_found",
+          });
+          return;
+        }
+        const repository = `${owner}/${name}`;
+        try {
+          if (request.method === "GET" && !action) {
+            const inspection = await repositoryWorkflows.inspect(repository);
+            writeJson(
+              response,
+              inspection ? 200 : 404,
+              inspection ?? { version: 1, error: "repository_not_found" },
+            );
+            return;
+          }
+          if (request.method === "DELETE" && !action) {
+            await repositoryWorkflows.remove(repository);
+            response.statusCode = 204;
+            response.end();
+            return;
+          }
+          if (request.method === "POST" && action) {
+            if (action === "pause") await repositoryWorkflows.pause(repository);
+            else if (action === "resume")
+              await repositoryWorkflows.resume(repository);
+            else await repositoryWorkflows.runNow(repository);
+            writeJson(
+              response,
+              200,
+              await repositoryWorkflows.inspect(repository),
+            );
+            return;
+          }
+        } catch (error) {
+          writeJson(response, 409, {
+            version: 1,
+            error: "repository_workflow_rejected",
+            message: error instanceof Error ? error.message : String(error),
+          });
+          return;
+        }
+      }
       if (request.method === "GET" && url.pathname === "/api/v1/policy") {
         try {
           writeJson(response, 200, await host.policy.inspect());
@@ -1602,6 +1740,7 @@ export const createMissionControlHost = (
   };
 
   const host: MissionControlHost = {
+    repositoryWorkflows: boundaries.repositoryWorkflows,
     paths,
     source,
     store,

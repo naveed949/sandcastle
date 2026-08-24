@@ -43,6 +43,7 @@
     "test:acceptance:restart": "vitest run src/WorkerRestartAcceptanceProof.live.test.ts",
     "test:acceptance:poc-gate": "vitest run src/WorkerPocGate.live.test.ts",
     "test:acceptance:mission-control": "vitest run src/MissionControlAcceptanceProof.live.test.ts",
+    "mission-control": "tsx scripts/start-mission-control.mts",
     "test:acceptance:all": "node scripts/run-worker-acceptance-gate.mjs",
     "test:watch": "vitest",
     "typecheck": "tsgo --noEmit",

@@ -530,6 +530,43 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 await host.start();
 ```
 
+For an operator-ready Codex and Docker launcher, provide an explicit repository
+allowlist and a server-side GitHub token, then start the included script:
+
+```bash
+GITHUB_TOKEN=... \
+SANDCASTLE_REPOSITORIES=owner/repository,owner/another-repository \
+SANDCASTLE_REPOSITORY_PATHS='{"owner/repository":"/srv/repository","owner/another-repository":"/srv/another-repository"}' \
+SANDCASTLE_GITHUB_ACCOUNT=owner \
+npm run mission-control
+```
+
+The launcher authorizes only repositories named in `SANDCASTLE_REPOSITORIES`
+and maps each one to an existing local checkout through the required JSON
+object in `SANDCASTLE_REPOSITORY_PATHS`. Each checkout owns its workflow and
+prompts; this repository's `.sandcastle/workflow.ts` is the shared declaration
+used by both `.sandcastle/run.ts` and Mission Control. The managed workflow runs
+the same planner, bounded parallel implementers, reviewers, serialized feature
+branch integrator, and issue-closing stages. Agent logs and cycle results are
+retained under `.sandcastle/mission-control` by default. Integration commits
+remain local; pushing is a separate operator action.
+
+Repository workflows have their own durable mode, so pausing one repository
+does not pause the others. The operator API provides:
+
+- `GET` and `POST /api/v1/repositories` to list or authorize repositories.
+- `GET` and `DELETE /api/v1/repositories/:owner/:name` to inspect full retained
+  run/cycle/task/agent evidence or remove authorization.
+- `POST /api/v1/repositories/:owner/:name/pause`, `/resume`, or `/run` for
+  independent workflow control.
+
+Override the defaults with `SANDCASTLE_FEATURE_BRANCH`,
+`SANDCASTLE_CODEX_AUTH_PATH`, `SANDCASTLE_BASE_BRANCH`,
+`SANDCASTLE_MISSION_CONTROL_ROOT`, `SANDCASTLE_WORKER_OWNER`,
+`SANDCASTLE_POLL_INTERVAL_MS`, `SANDCASTLE_LEASE_DURATION_MS`,
+`SANDCASTLE_EXECUTION_TIMEOUT_MS`, `SANDCASTLE_BIND_ADDRESS`, and
+`SANDCASTLE_PORT`.
+
 Configuration is validated before the host constructs a ready HTTP server or
 allows discovery, checkout, agent invocation, or publication. The versioned
 read-only endpoints are `GET /api/v1/overview` and `GET /api/v1/status`; they
