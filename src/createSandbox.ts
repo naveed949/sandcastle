@@ -710,6 +710,7 @@ export interface CreateSandboxFromWorktreeOptions {
   readonly worktreePath: string;
   readonly hostRepoDir: string;
   readonly sandbox: SandboxProvider;
+  readonly env?: Record<string, string>;
   readonly hooks?: SandboxHooks;
   readonly copyToWorktree?: string[];
   readonly timeouts?: Timeouts;
@@ -774,11 +775,12 @@ export const createSandboxFromWorktree = async (
     const resolvedEnv = await Effect.runPromise(
       resolveEnv(hostRepoDir).pipe(Effect.provide(NodeContext.layer)),
     );
-    const env = mergeProviderEnv({
+    const providerEnv = mergeProviderEnv({
       resolvedEnv,
       agentProviderEnv: {},
       sandboxProviderEnv: options.sandbox.env,
     });
+    const env = { ...providerEnv, ...options.env };
 
     const provider = options.sandbox;
 

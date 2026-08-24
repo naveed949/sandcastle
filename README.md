@@ -121,6 +121,411 @@ console.log(result.commits); // array of { sha } for commits created
 console.log(result.branch); // target branch name
 ```
 
+### Repo-agnostic worker dry runs
+
+`runWorkerDryRun()` evaluates centrally authorized, normalized tasks without
+checking out a repository, invoking an agent, mutating GitHub, pushing, or
+creating a pull request. Repository-wide authorization uses a policy with
+`authorized: true`; an exact task can be authorized in a profile-only policy by
+adding its `{ repository, kind, number }` reference to `authorizedTasks`.
+
+```typescript
+import {
+  claimWorkerTask,
+  createGitHubTaskSource,
+  createWorkerStateStore,
+  runGitHubWorkerDryRun,
+  runWorkerDryRun,
+  type NormalizedTask,
+  type WorkerConfiguration,
+} from "@ai-hero/sandcastle";
+
+const configuration: WorkerConfiguration = {
+  repositories: {
+    "owner/repository": {
+      authorized: true,
+      baseBranch: "main",
+      profileId: "node",
+    },
+  },
+  profiles: {
+    node: {
+      setupCommands: ["npm ci"],
+      verificationCommands: ["npm test"],
+    },
+  },
+  authorizedTasks: [],
+  taskDependencies: [
+    {
+      task: { repository: "owner/repository", kind: "issue", number: 9 },
+      blockedBy: [{ repository: "owner/repository", kind: "issue", number: 8 }],
+    },
+  ],
+  dependencyCompletionStates: ["closed", "completed"],
+  promptVersion: "worker-v1",
+  promptTemplates: {
+    "worker-v1": "Implement this immutable task snapshot:\n{{TASK_SNAPSHOT}}",
+  },
+};
+
+declare const normalizedTasks: readonly NormalizedTask[];
+
+const result = runWorkerDryRun({
+  configuration,
+  tasks: normalizedTasks,
+});
+
+console.log(result.humanReadable);
+console.log(result.machineReadable.executionRequests);
+```
+
+For read-only GitHub discovery, inject the account and token into a task
+source, then pass its snapshots through the same coordinator:
+
+```typescript
+const source = createGitHubTaskSource({
+  account: "naveed949",
+  token: process.env.GITHUB_TOKEN,
+});
+
+const liveResult = await runGitHubWorkerDryRun({
+  source,
+  configuration,
+  // Account-wide discovery is an inbox input; authorization is still decided
+  // by the central configuration above.
+  includeAccountWide: true,
+});
+```
+
+The source reads approved repositories, explicit task references, and
+accessible issues authored by the configured account. It uses only GET
+requests, and exact-task authorization does not authorize sibling issues.
+
+Each normalized task also retains its source labels, along with its source
+revision, base branch and commit, supported relationships, and optional PRD
+context. A read-only GitHub task source can produce these snapshots for the
+same dry-run seam; it never checks out a repository or writes GitHub state.
+GitHub's blocked-by and sub-issue APIs plus `taskDependencies` are the only
+authoritative graph inputs. Issue bodies and generated text cannot add or
+override edges. Every discovery cycle and claim refresh re-reads dependency
+state; the completion rule defaults to `closed` or `completed` and can be
+narrowed centrally with `dependencyCompletionStates`.
+
+The result contains stable reason codes for every task, deterministic ordering,
+and execution identities bound to the task revision, base commit, profile
+digest, prompt version, and prompt-template digest. The selected immutable
+template is retained in the execution request and must include a
+`{{TASK_SNAPSHOT}}` marker. The machine-readable projection reports
+`readOnly: true` and an empty `mutations` list.
+For a leaf with a parent PRD, the marker receives an immutable
+`{ task, context: { parentPrd } }` envelope. The full PRD snapshot and its
+revision are retained in the request and bound to its execution identity;
+the PRD itself receives a `prd` rejection and is never dispatched.
+
+### Durable worker state
+
+Persist a dry-run result before starting execution so a worker restart can
+reconstruct the discovered task snapshots, selected execution requests, and
+active attempts:
+
+```typescript
+const state = createWorkerStateStore({
+  filePath: ".sandcastle/worker-state.json",
+});
+
+await state.recordDiscovery(liveResult);
+const request = liveResult.executionRequests[0];
+if (request !== undefined) {
+  const attempt = await claimWorkerTask({
+    source,
+    store: state,
+    configuration,
+    request,
+    owner: "worker-1",
+    leaseDurationMs: 5 * 60_000,
+  });
+  // This is the boundary after which repository or agent side effects may exist.
+  await state.markAttemptStarted(attempt.attemptId);
+  await state.transitionAttempt(attempt.attemptId, {
+    status: "verified",
+    evidence: ["ci://run/42"],
+  });
+}
+```
+
+`recordDiscovery()` and `createAttempt()` are idempotent for unchanged
+snapshots and execution identities. `read()` returns the durable state after a
+restart. Attempt transitions are monotonic: an active attempt may be marked
+`interrupted`, `failed`, or `verified`; only a verified attempt may become
+`published`. Each terminal outcome retains its timestamp and evidence
+references. To deliberately retry a terminal attempt, pass a new `attemptId`
+to `createAttempt()`; an existing active attempt for the same execution
+identity still prevents duplicate work.
+
+`claimWorkerTask()` freshly re-reads the task, re-evaluates authorization and
+eligibility, and rejects a changed source revision or execution identity before
+persisting an attempt. A successful claim durably binds the task ID, source
+revision, execution identity, owner, and lease expiry. Live claims survive
+restarts and idempotent re-entry does not duplicate them. Use
+`inspectExpiredLeases()` to distinguish `safe_retry` claims, where execution
+never started, from `manual_intervention` claims whose retained state indicates
+that side effects may exist. A safe retry requires a new `attemptId`; the old
+claim is retained as interrupted rather than silently overwritten.
+
+### Local worker execution
+
+After a revision-bound claim, a repository manager can prepare the frozen base
+in a repository-qualified cache and worktree. It rechecks central authorization
+before any repository operation, validates the canonical GitHub remote and the
+configured base branch at the frozen commit, and creates a deterministic branch.
+
+```typescript
+import {
+  claudeCode,
+  createWorkerExecutionEngine,
+  createWorkerRepositoryManager,
+} from "@ai-hero/sandcastle";
+import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+
+const repositories = createWorkerRepositoryManager({
+  workspaceRoot: "/srv/sandcastle-worker",
+  agentRunOptions: {
+    agent: claudeCode("claude-opus-4-8"),
+    sandbox: docker(),
+  },
+});
+
+const execution = createWorkerExecutionEngine({
+  configuration,
+  repositoryManager: repositories,
+  store: state,
+  recordsRoot: "/srv/sandcastle-worker/records",
+});
+
+const result = await execution.execute(attempt);
+console.log(result.status, result.commits, result.verification);
+```
+
+The execution engine runs only centrally approved setup and verification
+commands. Setup, agent execution, and verification share one repository-scoped
+sandbox, including for isolated providers; repository commands never run in a
+host shell. Every profile must declare at least one non-empty verification
+command, and an attempt becomes `verified` only when those commands pass and
+the agent retained at least one valid commit. The engine invokes the existing
+Sandcastle runtime with a prompt derived from the immutable task snapshot and
+retains a structured local record. It does not push, create a pull request,
+accept a no-sandbox provider or lifecycle hooks, or pass repository credentials
+through the agent API. Run logs are forced into the qualified repository cache,
+and a dirty preserved worktree is retained as cleanup failure evidence instead
+of being reported as verified.
+
+### Verification-gated draft pull requests
+
+Publish a retained verified attempt through a separate credentialed boundary.
+The publisher rechecks central authorization, validates both the cached remote
+and GitHub destination, and pushes the exact verified commit to the
+repository- and execution-qualified branch.
+
+```typescript
+import {
+  createDefaultWorkerPublicationOperations,
+  createWorkerPublisher,
+} from "@ai-hero/sandcastle";
+
+const publisher = createWorkerPublisher({
+  configuration,
+  workspaceRoot: "/srv/sandcastle-worker",
+  store: state,
+  operations: createDefaultWorkerPublicationOperations({
+    // Keep this credential in the publisher process; it is never passed to
+    // the Sandcastle agent or its sandbox.
+    token: process.env.GITHUB_TOKEN!,
+  }),
+});
+
+const publication = await publisher.publish(attempt.attemptId);
+console.log(publication.pullRequest.url);
+```
+
+Only a draft pull request can be created or reused. Its body records the source
+task, execution identity, frozen base, resulting commits, and verification
+summary. A restart after push but before pull-request creation reuses the exact
+remote branch, and subsequent retries reuse the matching draft pull request.
+The publication API cannot mark a pull request ready, merge it, or mutate the
+source issue.
+
+### Cross-repository acceptance evidence
+
+After live attempts have been verified and published, retain one proof that
+checks the complete authorization and isolation scenario before writing any
+acceptance artifact:
+
+```typescript
+import {
+  runCrossRepositoryAcceptanceProof,
+  workerStateFilePath,
+} from "@ai-hero/sandcastle";
+
+const proof = await runCrossRepositoryAcceptanceProof({
+  proofPath: "/srv/sandcastle-worker/acceptance/cross-repository.json",
+  workspaceRoot: "/srv/sandcastle-worker",
+  recordsRoot: "/srv/sandcastle-worker/records",
+  source,
+  initialConfiguration,
+  authorizedConfiguration,
+  approvedTasks: [sameNumberInRepositoryA, sameNumberInRepositoryB],
+  thirdPartyTask,
+  thirdPartySibling,
+  owner: "acceptance-worker",
+  leaseDurationMs: 5 * 60_000,
+  runtimeFor,
+});
+
+console.log(proof.initialAuthorization, proof.authorizedDecision);
+console.log(workerStateFilePath("/srv/sandcastle-worker", "owner/repository"));
+```
+
+The harness first performs account-only GitHub discovery and rejects the
+account-authored third-party task before requesting any runtime. It then claims,
+executes, verifies, and publishes the three authorized tasks sequentially. The
+two approved repositories must use different execution profiles, and the exact
+third-party grant must leave its sibling rejected. Each run retains a distinct
+attempt, deterministic branch, repository-qualified state, cache, worktree,
+run log, execution record, immutable snapshot, verification evidence, and
+draft pull request. It reads every cache, worktree, run log, state file, and
+execution record back from disk and rejects retained credential/configuration
+material instead of trusting a runtime-provided isolation assertion.
+
+Run the opt-in, unmocked GitHub acceptance fixture with:
+
+```bash
+SANDCASTLE_CROSS_REPO_ACCEPTANCE_FIXTURE=$PWD/scripts/cross-repository-acceptance.fixture.mts \
+SANDCASTLE_CROSS_REPO_ACCEPTANCE_SCENARIO=/absolute/path/to/scenario.json \
+  npm run test:acceptance:cross-repository
+```
+
+The committed fixture wires dedicated GitHub repositories to the real issue
+tracker, Docker-backed repository manager, execution engine, draft publisher,
+and repository-qualified state stores. The scenario JSON supplies the two
+configurations and four issue references as `RunCrossRepositoryAcceptanceProofInput`
+fields; `GITHUB_TOKEN` remains in the discovery/publication process and is
+rejected if it appears in agent-visible options or retained artifacts.
+
+### PRD dependency-chain acceptance evidence
+
+`runDependencyChainAcceptanceProof()` executes exactly three concrete PRD
+leaves sequentially. Before every stage it re-discovers the complete graph,
+requires only the next leaf to be eligible, and requires all later leaves to
+remain rejected with `unmet_dependency`. Claiming then independently re-reads
+the selected task, its blockers, and its parent PRD before any execution side
+effect.
+
+The retained JSON includes every observed snapshot, full PRD context,
+execution identity, attempt and execution-record references, verification
+results, commits, and draft pull-request reference. A dedicated live fixture
+may use its operator-owned `afterStagePublished` hook to apply the configured
+completion label between stages; this authority never crosses the agent
+boundary.
+
+```bash
+SANDCASTLE_DEPENDENCY_ACCEPTANCE_FIXTURE=$PWD/scripts/dependency-chain-acceptance.fixture.mts \
+SANDCASTLE_DEPENDENCY_ACCEPTANCE_SCENARIO=/absolute/path/to/scenario.json \
+  npm run test:acceptance:dependency-chain
+```
+
+### Continuous remote worker service
+
+Compose the proven worker boundaries into a restartable, single-execution
+polling service with persistent state and diagnostics:
+
+```typescript
+import {
+  createJsonlWorkerDiagnostics,
+  createWorkerService,
+  workerServicePaths,
+} from "@ai-hero/sandcastle";
+
+const paths = workerServicePaths("/srv/sandcastle-worker");
+const service = createWorkerService({
+  configuration,
+  source,
+  store,
+  execution,
+  publisher,
+  owner: "dev-box-1",
+  lockFilePath: paths.serviceLockFilePath,
+  pollIntervalMs: 60_000,
+  leaseDurationMs: 30 * 60_000,
+  executionTimeoutMs: 2 * 60 * 60_000,
+  discovery: {
+    includeConfiguredRepositories: true,
+    includeAccountWide: true,
+  },
+  diagnostics: createJsonlWorkerDiagnostics(paths.diagnosticsFilePath),
+});
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => void service.stop());
+}
+
+await service.start();
+```
+
+`runCycle()` is also available for one-shot operation and coalesces concurrent
+calls into one cycle. `start()` waits between non-overlapping cycles and can be
+started again after `stop()` completes. A stop prevents new dispatch and aborts
+the active Sandcastle execution through its existing `AbortSignal` boundary.
+The interrupted attempt and preserved worktree remain available for inspection.
+
+On restart, an unstarted live claim resumes, an expired unstarted claim receives
+a new retry attempt, a verified attempt resumes idempotent draft publication,
+and any started attempt with possible side effects is blocked for manual
+intervention. Previously published execution identities are not dispatched
+again. Structured JSONL diagnostics distinguish `discovered`, `unauthorized`,
+`ineligible`, `ready`, `claimed`, `running`, `blocked`, `failed`, `verified`,
+and `published` states.
+
+See [Remote worker operations](docs/remote-worker.md) for credential scope,
+systemd deployment, backup, upgrade, and failure inspection guidance.
+
+### Consolidated retained POC gate
+
+`runWorkerPocGate()` is the final fail-closed acceptance boundary. It performs
+two fresh discovery cycles, compares their ordered decisions and execution
+identities, proves an unauthorized account-authored task remains inbox-only,
+and validates retained restart, cross-repository, dependency-chain,
+publication-provenance, and privileged-action audit evidence. A successful run
+atomically writes both machine-readable JSON and a Markdown operator report.
+
+The restart evidence deliberately covers two dispositions: a started attempt
+with possible side effects remains blocked for manual intervention without a
+new claim, branch, or pull request; a verified attempt resumes publication by
+reusing its deterministic branch and one draft pull request.
+
+Use `runWorkerRestartAcceptanceProof()` (or the opt-in
+`test:acceptance:restart` fixture) to capture those states and live branch/PR
+observations around replacement-service cycles. Its manifest is HMAC-bound to
+the same deployed gate run as the guarded-action audit.
+
+Run the opt-in deployed-worker fixture with:
+
+```bash
+SANDCASTLE_POC_GATE_FIXTURE=$PWD/scripts/poc-gate.fixture.mts \
+SANDCASTLE_POC_GATE_SCENARIO=/absolute/path/to/poc-gate-scenario.json \
+  npm run test:acceptance:poc-gate
+```
+
+To execute the complete release gate without allowing missing fixtures to be
+reported as skipped tests, configure all four live fixture variables and run:
+
+```bash
+npm run test:acceptance:all
+```
+
+See [Final POC gate](docs/poc-gate.md) for artifact requirements, audit
+boundaries, limitations, and the evidence required before expanding beyond the
+single-worker GitHub POC.
+
 ### All options
 
 ```typescript
@@ -456,6 +861,7 @@ import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 
 await using sandbox = await wt.createSandbox({
   sandbox: docker(),
+  env: { CI: "1" },
   hooks: { sandbox: { onSandboxReady: [{ command: "npm install" }] } },
 });
 
@@ -464,6 +870,9 @@ await sandbox.close();
 
 // wt.close() cleans up the worktree
 ```
+
+The optional `env` is injected when the reusable sandbox is created, so both
+`sandbox.exec()` commands and later agent runs share it.
 
 `wt.close()` checks for uncommitted changes: if the worktree is dirty, it's preserved on disk; if clean, it's removed. `await using` calls `close()` automatically. The worktree persists after `run()`, `interactive()`, and `createSandbox()` complete, so you can hand it to another agent or inspect it.
 

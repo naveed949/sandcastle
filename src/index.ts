@@ -98,3 +98,187 @@ export type {
   MergeToHeadBranchStrategy,
   NamedBranchStrategy,
 } from "./SandboxProvider.js";
+export {
+  runWorkerDryRun,
+  configuredTaskDependencies,
+  workerConfigurationDigest,
+  workerTaskId,
+  WorkerConfigurationError,
+  NormalizedTaskError,
+} from "./WorkerCoordinator.js";
+export type {
+  TaskKind,
+  TaskState,
+  TaskReference,
+  ConfiguredTaskDependencies,
+  DependencyCompletionState,
+  ExecutionProfile,
+  RepositoryPolicy,
+  WorkerConfiguration,
+  NormalizedTask,
+  ExecutionContext,
+  EligibilityReasonCode,
+  AuthorizationSource,
+  EligibilityDecision,
+  ExecutionRequest,
+  DryRunMutation,
+  DryRunMachineOutput,
+  DryRunResult,
+  WorkerDryRunInput,
+} from "./WorkerCoordinator.js";
+export {
+  createGitHubTaskSource,
+  runGitHubWorkerDryRun,
+  GitHubTaskSourceError,
+} from "./GitHubTaskSource.js";
+export type {
+  GitHubRequestInit,
+  GitHubResponse,
+  GitHubFetch,
+  GitHubTaskStateLabels,
+  GitHubTaskSourceOptions,
+  GitHubTaskDiscoveryInput,
+  GitHubTaskSource,
+  GitHubTaskReadResult,
+  GitHubWorkerDryRunInput,
+  GitHubTaskReadInput,
+} from "./GitHubTaskSource.js";
+export {
+  createWorkerStateStore,
+  WorkerStateStoreError,
+} from "./WorkerStateStore.js";
+export type {
+  TaskSnapshotRecord,
+  ExecutionRequestRecord,
+  AttemptStatus,
+  AttemptOutcomeRecord,
+  ExecutionAttempt,
+  CreateAttemptOptions,
+  AttemptTransition,
+  WorkerState,
+  WorkerStateStoreOptions,
+  WorkerStateStore,
+  AttemptClaim,
+  ClaimAttemptOptions,
+  LeaseRecoveryDisposition,
+  ExpiredLeaseRecovery,
+} from "./WorkerStateStore.js";
+export { claimWorkerTask, WorkerClaimError } from "./WorkerClaimCoordinator.js";
+export type {
+  ClaimTaskSource,
+  ClaimTaskReadResult,
+  ClaimWorkerTaskInput,
+  WorkerClaimErrorCode,
+} from "./WorkerClaimCoordinator.js";
+export {
+  createDefaultWorkerRepositoryOperations,
+  createWorkerRepositoryManager,
+  workerBranchFor,
+  workerRepositoryDirectory,
+  WorkerRepositoryError,
+} from "./WorkerRepositoryManager.js";
+export type {
+  WorkerCommandPhase,
+  WorkerCommandEvidence,
+  WorkerAgentInvocation,
+  WorkerAgentResult,
+  PreparedWorkerRepository,
+  PrepareWorkerRepositoryInput,
+  WorkerRepositoryManager,
+  WorkerRepositoryOperations,
+  WorkerRepositoryErrorCode,
+  WorkerRepositoryManagerOptions,
+} from "./WorkerRepositoryManager.js";
+export { createWorkerExecutionEngine } from "./WorkerExecutionEngine.js";
+export type {
+  WorkerExecutionFailurePhase,
+  WorkerExecutionResult,
+  WorkerExecutionOptions,
+  WorkerExecutionEngineOptions,
+  WorkerExecutionEngine,
+} from "./WorkerExecutionEngine.js";
+export {
+  createDefaultWorkerPublicationOperations,
+  createWorkerPublisher,
+  WorkerPublicationError,
+} from "./WorkerPublication.js";
+export type {
+  PublicationDestination,
+  PublishedBranch,
+  DraftPullRequest,
+  WorkerPublicationOperations,
+  WorkerPublicationResult,
+  WorkerPublisher,
+  WorkerPublisherOptions,
+  WorkerPublicationFetch,
+  WorkerPublicationInspectionOperations,
+  DefaultWorkerPublicationOperationsOptions,
+  WorkerPublicationErrorCode,
+} from "./WorkerPublication.js";
+export {
+  runCrossRepositoryAcceptanceProof,
+  runDependencyChainAcceptanceProof,
+  workerStateFilePath,
+  WorkerAcceptanceProofError,
+} from "./WorkerAcceptanceProof.js";
+export type {
+  WorkerAcceptanceProofErrorCode,
+  WorkerIsolationObservation,
+  WorkerAcceptanceRunPaths,
+  CrossRepositoryAcceptanceRuntime,
+  RunCrossRepositoryAcceptanceProofInput,
+  RunDependencyChainAcceptanceProofInput,
+  RetainedExecutionProvenance,
+  RetainedAcceptanceRun,
+  RetainedDependencyStage,
+  DependencyChainAcceptanceProof,
+  CrossRepositoryAcceptanceProof,
+} from "./WorkerAcceptanceProof.js";
+export type {
+  WorkerGuardedActionEvent,
+  WorkerGuardedActionRecorder,
+} from "./WorkerGuardedActions.js";
+export {
+  createJsonlWorkerDiagnostics,
+  createWorkerService,
+  workerServicePaths,
+  WorkerExecutionTimeoutError,
+  WorkerServiceLockError,
+  WorkerServiceShutdownError,
+} from "./WorkerService.js";
+export type {
+  WorkerOperationalState,
+  WorkerDiagnostic,
+  WorkerDiagnostics,
+  WorkerServicePaths,
+  WorkerCycleResult,
+  WorkerService,
+  WorkerServiceOptions,
+} from "./WorkerService.js";
+export { runWorkerPocGate, WorkerPocGateError } from "./WorkerPocGate.js";
+export { createWorkerPocBoundaryAuditRecorder } from "./WorkerPocGateAudit.js";
+export { runWorkerRestartAcceptanceProof } from "./WorkerRestartAcceptanceProof.js";
+export type {
+  WorkerRestartObservation,
+  WorkerRestartAcceptanceScenario,
+  RunWorkerRestartAcceptanceProofInput,
+} from "./WorkerRestartAcceptanceProof.js";
+export type {
+  CreateWorkerPocBoundaryAuditRecorderInput,
+  WorkerPocBoundaryAuditRecordInput,
+  WorkerPocBoundaryAuditRecorder,
+} from "./WorkerPocGateAudit.js";
+export type {
+  WorkerPocGateErrorCode,
+  WorkerRestartScenarioEvidence,
+  WorkerRestartAcceptanceEvidence,
+  WorkerPrivilegedAction,
+  WorkerPocBoundaryAction,
+  WorkerPocBoundaryAuditEvent,
+  WorkerPocBoundaryAudit,
+  WorkerPocPublicationProvenance,
+  WorkerPocLimitation,
+  WorkerPocFutureEvidence,
+  WorkerPocGateProof,
+  RunWorkerPocGateInput,
+} from "./WorkerPocGate.js";
