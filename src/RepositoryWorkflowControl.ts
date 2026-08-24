@@ -782,18 +782,25 @@ const taskProjectionFor = (
 ): RepositoryWorkflowProjectionTask | undefined => {
   const task = run?.cycles.at(-1)?.tasks.at(-1);
   if (task === undefined) return undefined;
+  let stage: string;
+  switch (task.status) {
+    case "reviewed":
+      stage = "reviewing";
+      break;
+    case "no_changes":
+      stage = "completed";
+      break;
+    case "failed":
+      stage = "failed";
+      break;
+  }
   return {
     taskId: workflowTaskId(repository, task.issue),
     repository,
     kind: "issue",
     number: task.issue.number,
     title: task.issue.title,
-    stage:
-      task.status === "reviewed"
-        ? "reviewing"
-        : task.status === "no_changes"
-          ? "completed"
-          : "failed",
+    stage,
   };
 };
 
@@ -815,35 +822,42 @@ const queueEntriesFor = (
   workflows: Readonly<Record<string, RepositoryWorkflowDefinition>>,
   at: string,
 ): readonly RepositoryWorkflowQueueEntry[] => {
-  const entries = state.repositories.map((repository) => {
+  const queueStateFor = (
+    repository: AuthorizedRepositoryWorkflow,
+  ): RepositoryWorkflowQueueEntry["state"] => {
+    if (repository.mode !== "active") {
+      return repository.blockingReason === undefined
+        ? "paused"
+        : "manual_intervention";
+    }
+    if (repository.activeRunId !== undefined) return "claimed";
+    if (repository.lastFailure?.classification === "terminal") {
+      return "terminal";
+    }
+    if (
+      repository.nextEligibleAt !== undefined &&
+      Date.parse(repository.nextEligibleAt) > Date.parse(at)
+    ) {
+      return "backoff";
+    }
     const workflow = workflows[repository.workflowId];
+    if (workflow !== undefined && repository.nextCycle > workflow.maxCycles) {
+      return "paused";
+    }
+    return "ready";
+  };
+
+  const entries = state.repositories.map((repository) => {
     const identity =
       repository.workflowIdentity ??
       repositoryWorkflowIdentity(repository.repository, repository.workflowId);
-    const failed = repository.lastFailure?.classification;
-    const stateValue: RepositoryWorkflowQueueEntry["state"] =
-      repository.mode !== "active"
-        ? repository.blockingReason !== undefined
-          ? "manual_intervention"
-          : "paused"
-        : repository.activeRunId !== undefined
-          ? "claimed"
-          : failed === "terminal"
-            ? "terminal"
-            : repository.nextEligibleAt !== undefined &&
-                Date.parse(repository.nextEligibleAt) > Date.parse(at)
-              ? "backoff"
-              : workflow !== undefined &&
-                  repository.nextCycle > workflow.maxCycles
-                ? "paused"
-                : "ready";
     return {
       position: 0,
       repository: repository.repository,
       workflowId: repository.workflowId,
       workflowIdentity: identity,
       cycle: repository.nextCycle,
-      state: stateValue,
+      state: queueStateFor(repository),
       ...(repository.nextEligibleAt === undefined
         ? {}
         : { nextEligibleAt: repository.nextEligibleAt }),
@@ -864,6 +878,36 @@ const queueEntriesFor = (
     .filter((entry) => entry.state === "ready")
     .sort(compare)
     .map((entry, index) => ({ ...entry, position: index + 1 }));
+};
+
+const projectionStageFor = (
+  repository: AuthorizedRepositoryWorkflow,
+  run: RepositoryWorkflowRunRecord | undefined,
+  at: string,
+): RepositoryWorkflowProjectionEntry["stage"] => {
+  if (repository.mode !== "active" && run?.status !== "running") {
+    return repository.blockingReason === undefined
+      ? "paused"
+      : "manual_intervention";
+  }
+  if (
+    repository.nextEligibleAt !== undefined &&
+    Date.parse(repository.nextEligibleAt) > Date.parse(at)
+  ) {
+    return "backoff";
+  }
+  return stageForRun(run);
+};
+
+const runStatusForFailure = (
+  classification: RepositoryWorkflowFailure["classification"],
+  aborted: boolean,
+): RepositoryWorkflowRunStatus => {
+  if (aborted) return "interrupted";
+  if (classification === "manual_intervention") {
+    return "manual_intervention";
+  }
+  return "failed";
 };
 
 /** Operator control plane for durable, globally schedulable repository workflows. */
@@ -1064,15 +1108,7 @@ export const createRepositoryWorkflowControl = (
           : state.runs.find(
               (candidate) => candidate.id === repository.activeRunId,
             );
-      const stage =
-        repository.mode !== "active" && run?.status !== "running"
-          ? repository.blockingReason !== undefined
-            ? "manual_intervention"
-            : "paused"
-          : repository.nextEligibleAt !== undefined &&
-              Date.parse(repository.nextEligibleAt) > Date.parse(generatedAt)
-            ? "backoff"
-            : stageForRun(run);
+      const stage = projectionStageFor(repository, run, generatedAt);
       const task = taskProjectionFor(repository.repository, run);
       return {
         repository: repository.repository,
@@ -1517,19 +1553,13 @@ export const createRepositoryWorkflowControl = (
               classification,
               occurredAt: completedAt,
             };
-            const recovery: RepositoryWorkflowRecoveryDisposition =
-              signal?.aborted
-                ? "resumable"
-                : classification === "retryable"
-                  ? "retryable"
-                  : classification;
+            const aborted = signal?.aborted === true;
+            const recovery: RepositoryWorkflowRecoveryDisposition = aborted
+              ? "resumable"
+              : classification;
             failed = {
               ...currentRun,
-              status: signal?.aborted
-                ? "interrupted"
-                : classification === "manual_intervention"
-                  ? "manual_intervention"
-                  : "failed",
+              status: runStatusForFailure(classification, aborted),
               completedAt,
               recovery,
               failure,
@@ -1549,17 +1579,15 @@ export const createRepositoryWorkflowControl = (
               activeRunId: undefined,
               failureCount,
               lastFailure: failure,
-              ...(classification === "retryable" && !signal?.aborted
+              ...(classification === "retryable" && !aborted
                 ? { nextEligibleAt: retryAt }
                 : {}),
               ...(classification === "terminal" ||
               classification === "manual_intervention" ||
-              signal?.aborted
+              aborted
                 ? {
                     mode: "paused" as const,
-                    blockingReason: signal?.aborted
-                      ? "workflow_interrupted"
-                      : code,
+                    blockingReason: aborted ? "workflow_interrupted" : code,
                   }
                 : {}),
             };
