@@ -311,6 +311,133 @@ describe("createRepositoryWorkflowPlanner", () => {
     expect(await planStore.list()).toEqual([]);
   });
 
+  it("fails prompt expansion before invocation when the repository profile is missing", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "repository-planner-profile-context-"),
+    );
+    directories.push(directory);
+    const planStore = createRepositoryWorkflowPlanStore({
+      store: createRepositoryWorkflowStore({
+        filePath: join(directory, "workflows.json"),
+      }),
+    });
+    const invoke = vi.fn(async () => ({ stdout: "" }));
+    const planner = createRepositoryWorkflowPlanner({ invoke, planStore });
+    const incomplete = {
+      ...input(),
+      attempt: {
+        ...input().attempt,
+        request: { ...input().attempt.request, profile: undefined },
+      },
+    } as unknown as RepositoryWorkflowPlanningInput;
+
+    await expect(planner.plan(incomplete)).rejects.toMatchObject(
+      new RepositoryWorkflowPlannerContextError(
+        "missing_context",
+        "Planner requires the repository execution profile.",
+      ),
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    expect(await planStore.list()).toEqual([]);
+  });
+
+  it("rejects dependency evidence that conflicts with the claim-time snapshot", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "repository-planner-dependency-evidence-"),
+    );
+    directories.push(directory);
+    const planStore = createRepositoryWorkflowPlanStore({
+      store: createRepositoryWorkflowStore({
+        filePath: join(directory, "workflows.json"),
+      }),
+    });
+    const invoke = vi.fn(async () => ({ stdout: "" }));
+    const planner = createRepositoryWorkflowPlanner({ invoke, planStore });
+    const dependency = {
+      ...task,
+      number: 7,
+      title: "Completed dependency",
+      sourceRevision: "issue:7:rev-1",
+      state: "closed" as const,
+      dependencies: [],
+      children: [],
+    };
+    const dependentTask = {
+      ...task,
+      dependencies: [
+        { repository: "acme/one", kind: "issue" as const, number: 7 },
+      ],
+    };
+    const base = input();
+    const dependentInput: RepositoryWorkflowPlanningInput = {
+      ...base,
+      taskSnapshot: dependentTask,
+      attempt: {
+        ...base.attempt,
+        request: { ...base.attempt.request, task: dependentTask },
+        claim: {
+          ...base.attempt.claim!,
+          refreshedSnapshots: [dependentTask, dependency],
+        },
+      },
+      eligibility: { ...base.eligibility, task: dependentTask },
+      dependencyEvidence: [
+        {
+          taskId: "acme/one:issue:7",
+          repository: "acme/one",
+          kind: "issue",
+          number: 7,
+          sourceRevision: "forged-revision",
+          state: "open",
+          satisfied: true,
+        },
+      ],
+    };
+
+    await expect(planner.plan(dependentInput)).rejects.toMatchObject(
+      new RepositoryWorkflowPlannerContextError(
+        "invalid_context",
+        "Dependency evidence for acme/one:issue:7 does not match the claim-time snapshot.",
+      ),
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    expect(await planStore.list()).toEqual([]);
+  });
+
+  it("rejects eligibility provenance that does not match the claimed snapshot", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "repository-planner-eligibility-provenance-"),
+    );
+    directories.push(directory);
+    const planStore = createRepositoryWorkflowPlanStore({
+      store: createRepositoryWorkflowStore({
+        filePath: join(directory, "workflows.json"),
+      }),
+    });
+    const invoke = vi.fn(async () => ({
+      stdout: '<plan>{"version":1}</plan>',
+    }));
+    const planner = createRepositoryWorkflowPlanner({ invoke, planStore });
+    const mismatchedEligibility = {
+      ...input().eligibility,
+      task: { ...task, title: "A different snapshot" },
+    };
+
+    await expect(
+      planner.plan({
+        ...input(),
+        eligibility: mismatchedEligibility,
+      }),
+    ).rejects.toMatchObject(
+      new RepositoryWorkflowPlannerContextError(
+        "invalid_context",
+        "Eligibility does not describe the claimed task snapshot.",
+      ),
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    expect(await planStore.list()).toEqual([]);
+  });
+
   it("keeps equal issue numbers isolated by repository", async () => {
     const directory = await mkdtemp(
       join(tmpdir(), "repository-planner-repositories-"),

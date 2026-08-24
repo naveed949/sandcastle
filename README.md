@@ -595,6 +595,8 @@ revision, and dependency evidence to the agent. The agent must emit a versioned
 `<plan>` object containing task intent, proposed work, verification strategy,
 risks, and evidence. Authorization, dependency order, queue position, and merge
 policy are server-owned fields and are rejected if included in agent output.
+Claim-time task, eligibility, profile, and dependency provenance are checked
+again before invocation; missing or conflicting context fails closed.
 Accepted plans and their input provenance are retained in the same workflow
 state and appear under the projection's `plans` collection. Missing context,
 malformed output, cancellation, and timeout do not advance implementation;

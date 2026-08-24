@@ -323,8 +323,12 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
-const validTimestamp = (value: string, name: string): string => {
-  if (value.trim() === "" || Number.isNaN(Date.parse(value))) {
+const validTimestamp = (value: unknown, name: string): string => {
+  if (
+    typeof value !== "string" ||
+    value.trim() === "" ||
+    Number.isNaN(Date.parse(value))
+  ) {
     throw new RepositoryWorkflowPlannerContextError(
       "invalid_context",
       `${name} must be a valid timestamp.`,
@@ -333,8 +337,8 @@ const validTimestamp = (value: string, name: string): string => {
   return value;
 };
 
-const requireString = (value: string | undefined, name: string): string => {
-  if (value === undefined || value.trim() === "") {
+const requireString = (value: unknown, name: string): string => {
+  if (typeof value !== "string" || value.trim() === "") {
     throw new RepositoryWorkflowPlannerContextError(
       "missing_context",
       `Planner requires ${name}.`,
@@ -343,8 +347,8 @@ const requireString = (value: string | undefined, name: string): string => {
   return value.trim();
 };
 
-const requirePositiveInteger = (value: number, name: string): number => {
-  if (!Number.isInteger(value) || value < 1) {
+const requirePositiveInteger = (value: unknown, name: string): number => {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
     throw new RepositoryWorkflowPlannerContextError(
       "invalid_context",
       `${name} must be a positive integer.`,
@@ -483,51 +487,109 @@ const normalizeDependencyEvidence = (
     ...task.dependencies,
     ...(task.parentPrd === undefined ? [] : [task.parentPrd]),
   ];
-  if (references.length === 0) return [];
+  const uniqueReferences = [
+    ...new Map(
+      references.map((reference) => [workerTaskId(reference), reference]),
+    ).values(),
+  ];
   const snapshots = new Map(
     (attempt.claim?.refreshedSnapshots ?? []).map((snapshot) => [
       workerTaskId(snapshot),
       snapshot,
     ]),
   );
-  if (supplied !== undefined) {
-    const suppliedById = new Map(supplied.map((item) => [item.taskId, item]));
-    return references.map((reference) => {
-      const id = workerTaskId(reference);
-      const evidence = suppliedById.get(id);
-      if (evidence === undefined) {
-        throw new RepositoryWorkflowPlannerContextError(
-          "missing_context",
-          `Planner is missing dependency evidence for ${id}.`,
-        );
-      }
-      if (
-        evidence.repository !== reference.repository ||
-        evidence.kind !== reference.kind ||
-        evidence.number !== reference.number
-      ) {
-        throw new RepositoryWorkflowPlannerContextError(
-          "invalid_context",
-          `Dependency evidence for ${id} does not match the authoritative dependency.`,
-        );
-      }
-      return evidence;
-    });
-  }
-  return references.map((reference) => {
+
+  const evidenceFor = (
+    reference: NormalizedTask["dependencies"][number],
+  ): RepositoryWorkflowDependencyEvidence => {
     const id = workerTaskId(reference);
     const snapshot = snapshots.get(id);
+    if (snapshot === undefined) {
+      throw new RepositoryWorkflowPlannerContextError(
+        "missing_context",
+        `Planner is missing claim-time dependency evidence for ${id}.`,
+      );
+    }
     return {
       taskId: id,
       repository: reference.repository,
       kind: reference.kind,
       number: reference.number,
-      sourceRevision: snapshot?.sourceRevision ?? "unavailable",
-      state: snapshot?.state ?? "unavailable",
-      satisfied:
-        snapshot?.state === "closed" || snapshot?.state === "completed",
+      sourceRevision: snapshot.sourceRevision,
+      state: snapshot.state,
+      satisfied: snapshot.state === "closed" || snapshot.state === "completed",
     };
-  });
+  };
+
+  if (supplied !== undefined) {
+    if (supplied.length !== uniqueReferences.length) {
+      throw new RepositoryWorkflowPlannerContextError(
+        "invalid_context",
+        "Planner dependency evidence must contain exactly the authoritative dependencies.",
+      );
+    }
+    const suppliedById = new Map<
+      string,
+      RepositoryWorkflowDependencyEvidence
+    >();
+    for (const item of supplied) {
+      if (
+        !isRecord(item) ||
+        typeof item.taskId !== "string" ||
+        typeof item.repository !== "string" ||
+        typeof item.kind !== "string" ||
+        typeof item.number !== "number" ||
+        typeof item.sourceRevision !== "string" ||
+        (typeof item.state !== "string" && item.state !== "unavailable") ||
+        typeof item.satisfied !== "boolean"
+      ) {
+        throw new RepositoryWorkflowPlannerContextError(
+          "invalid_context",
+          "Planner dependency evidence has an invalid shape.",
+        );
+      }
+      if (suppliedById.has(item.taskId)) {
+        throw new RepositoryWorkflowPlannerContextError(
+          "invalid_context",
+          `Planner dependency evidence repeats ${item.taskId}.`,
+        );
+      }
+      suppliedById.set(
+        item.taskId,
+        item as RepositoryWorkflowDependencyEvidence,
+      );
+    }
+    if (suppliedById.size !== uniqueReferences.length) {
+      throw new RepositoryWorkflowPlannerContextError(
+        "invalid_context",
+        "Planner dependency evidence contains an unexpected dependency.",
+      );
+    }
+    return uniqueReferences.map((reference) => {
+      const expected = evidenceFor(reference);
+      const suppliedEvidence = suppliedById.get(expected.taskId);
+      if (
+        suppliedEvidence === undefined ||
+        normalizeRepository(suppliedEvidence.repository) !==
+          normalizeRepository(expected.repository) ||
+        suppliedEvidence.kind !== expected.kind ||
+        suppliedEvidence.number !== expected.number ||
+        suppliedEvidence.sourceRevision !== expected.sourceRevision ||
+        suppliedEvidence.state !== expected.state ||
+        suppliedEvidence.satisfied !== expected.satisfied
+      ) {
+        throw new RepositoryWorkflowPlannerContextError(
+          "invalid_context",
+          `Dependency evidence for ${expected.taskId} does not match the claim-time snapshot.`,
+        );
+      }
+      // Return the claim-derived value so the caller cannot alter retained
+      // dependency provenance even when its supplied copy happens to match.
+      return expected;
+    });
+  }
+
+  return uniqueReferences.map(evidenceFor);
 };
 
 const validateInput = (
@@ -543,6 +605,12 @@ const validateInput = (
       "Planner input is required.",
     );
   }
+  if (!isRecord(input.repositoryWorkflow)) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "missing_context",
+      "Planner requires the repository workflow context.",
+    );
+  }
   const task = input.taskSnapshot;
   const attempt = input.attempt;
   if (task === undefined) {
@@ -551,11 +619,35 @@ const validateInput = (
       "Planner requires an immutable task snapshot.",
     );
   }
+  if (!isRecord(task)) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "invalid_context",
+      "Planner task snapshot must be an object.",
+    );
+  }
+  if (!isRecord(attempt)) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "missing_context",
+      "Planner requires the claimed execution attempt.",
+    );
+  }
   const request = attempt?.request;
   if (request === undefined) {
     throw new RepositoryWorkflowPlannerContextError(
       "missing_context",
       "Planner requires the claimed execution request.",
+    );
+  }
+  if (!isRecord(request) || !isRecord(request.task)) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "invalid_context",
+      "Planner claimed execution request is malformed.",
+    );
+  }
+  if (!isRecord(input.eligibility)) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "missing_context",
+      "Planner requires the deterministic eligibility decision.",
     );
   }
   if (
@@ -569,6 +661,20 @@ const validateInput = (
     );
   }
   const claim = attempt.claim;
+  requireString(task.repository, "task repository");
+  requireString(task.sourceRevision, "task source revision");
+  requireString(task.baseBranch, "task base branch");
+  requireString(task.baseCommit, "task base revision");
+  requireString(request.taskId, "claimed task identity");
+  requireString(request.executionIdentity, "claimed execution identity");
+  requireString(request.profileId, "repository profile ID");
+  requireString(request.profileDigest, "repository profile digest");
+  if (!isRecord(request.profile)) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "missing_context",
+      "Planner requires the repository execution profile.",
+    );
+  }
   const repository = requireString(input.repository, "claimed repository");
   const workflowIdentity = requireString(
     input.repositoryWorkflow.workflowIdentity,
@@ -598,7 +704,23 @@ const validateInput = (
       "Eligibility does not describe the claimed task.",
     );
   }
+  if (JSON.stringify(input.eligibility.task) !== JSON.stringify(task)) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "invalid_context",
+      "Eligibility does not describe the claimed task snapshot.",
+    );
+  }
   if (
+    attempt.executionIdentity !== request.executionIdentity ||
+    input.eligibility.executionIdentity !== request.executionIdentity
+  ) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "invalid_context",
+      "Planner execution identity does not match the claimed task.",
+    );
+  }
+  if (
+    JSON.stringify(request.task) !== JSON.stringify(task) ||
     workerTaskId(task) !== request.taskId ||
     task.sourceRevision !== request.task.sourceRevision ||
     task.baseCommit !== request.task.baseCommit ||
@@ -608,6 +730,15 @@ const validateInput = (
     throw new RepositoryWorkflowPlannerContextError(
       "invalid_context",
       "Planner task context does not match the claimed execution request.",
+    );
+  }
+  if (
+    claim.refreshedSnapshots !== undefined &&
+    !Array.isArray(claim.refreshedSnapshots)
+  ) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "invalid_context",
+      "Planner claim-time snapshots must be an array.",
     );
   }
   const claimedSnapshot = claim.refreshedSnapshots?.find(
