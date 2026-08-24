@@ -593,6 +593,37 @@ describe("reviewAndRemediate", () => {
     expect(implementer.implement).toHaveBeenCalledTimes(2);
   }, 20_000);
 
+  it("enters manual intervention when the remediation time budget is exhausted", async () => {
+    const world = await createWorld();
+    const reviewer = createRepositoryWorkflowReviewer({
+      invoke: async () => ({ stdout: stdoutWith(changesRequestedVerdict()) }),
+      createId: () => "review-deadline",
+    });
+    const implementer = { implement: vi.fn() };
+
+    const result = await reviewAndRemediate({
+      plan: world.plan,
+      attempt: world.verifiedAttempt,
+      implementation: world.implementation,
+      implementationDiff: world.implementationDiff,
+      configuration,
+      source: { read: vi.fn() },
+      store: world.store,
+      reviewer,
+      implementer: implementer as never,
+      owner: "reviewer-test",
+      leaseDurationMs: 60_000,
+      reviewerPromptVersion: "reviewer-v1",
+      reviewerPromptTemplate: reviewerPrompt,
+      maxRemediationIterations: 3,
+      deadlineMs: 0,
+    });
+
+    expect(result.status).toBe("manual_intervention");
+    expect(result.reasonCode).toBe("remediation_deadline_exceeded");
+    expect(implementer.implement).not.toHaveBeenCalled();
+  }, 20_000);
+
   it("returns failed on a malformed verdict without remediating", async () => {
     const world = await createWorld();
     const reviewer = createRepositoryWorkflowReviewer({

@@ -934,137 +934,11 @@ const systemEvidenceFor = (
   })),
 ];
 
-class PlannerCancellationError extends Error {
-  readonly code = "planner_cancelled";
-
-  constructor(reason: unknown) {
-    super(reason instanceof Error ? reason.message : "Planner was cancelled.");
-    this.name = "PlannerCancellationError";
-  }
-}
-
-class PlannerTimeoutError extends Error {
-  readonly code = "planner_timeout";
-
-  constructor(timeoutMs: number) {
-    super(`Planner exceeded ${timeoutMs}ms.`);
-    this.name = "PlannerTimeoutError";
-  }
-}
-
-const invokeWithControls = async (
-  invoke: RepositoryWorkflowPlannerInvoker,
-  prompt: string,
-  signal: AbortSignal | undefined,
-  timeoutMs: number,
-): Promise<RepositoryWorkflowPlannerInvocationResult> => {
-  const controller = new AbortController();
-  let timer: NodeJS.Timeout | undefined;
-  let removeAbortListener: (() => void) | undefined;
-  let controlError: PlannerCancellationError | PlannerTimeoutError | undefined;
-  const abortWith = (
-    error: PlannerCancellationError | PlannerTimeoutError,
-    reason: unknown = error,
-  ): PlannerCancellationError | PlannerTimeoutError => {
-    if (controlError === undefined) {
-      controlError = error;
-      controller.abort(reason);
-    }
-    return controlError;
-  };
-  const cancellation = new Promise<never>((_, reject) => {
-    if (signal?.aborted) {
-      reject(abortWith(new PlannerCancellationError(signal.reason)));
-      return;
-    }
-    if (signal !== undefined) {
-      const onAbort = () => {
-        reject(
-          abortWith(new PlannerCancellationError(signal.reason), signal.reason),
-        );
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-      removeAbortListener = () => signal.removeEventListener("abort", onAbort);
-    }
-  });
-  if (signal?.aborted) {
-    throw new PlannerCancellationError(signal.reason);
-  }
-  const invocation = invoke({ prompt, signal: controller.signal }).then(
-    (result) => {
-      if (controlError !== undefined) throw controlError;
-      return result;
-    },
-    (error) => {
-      if (controlError !== undefined) throw controlError;
-      throw error;
-    },
-  );
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(abortWith(new PlannerTimeoutError(timeoutMs)));
-    }, timeoutMs);
-  });
-  try {
-    return await Promise.race([invocation, cancellation, timeout]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-    removeAbortListener?.();
-    void invocation.catch(() => undefined);
-  }
-};
-
-const toPlannerError = (
-  error: unknown,
-): {
-  readonly code: string;
-  readonly message: string;
-  readonly recovery: RepositoryWorkflowPlanRecovery;
-  readonly status: RepositoryWorkflowPlanStatus;
-} => {
-  if (error instanceof PlannerCancellationError) {
-    return {
-      code: error.code,
-      message: error.message,
-      recovery: "resumable",
-      status: "cancelled",
-    };
-  }
-  if (error instanceof PlannerTimeoutError) {
-    return {
-      code: error.code,
-      message: error.message,
-      recovery: "resumable",
-      status: "timed_out",
-    };
-  }
-  // A malformed structured plan is resumable: the agent session can be
-  // resumed with feedback per the structured-output recovery surface.
-  if (error instanceof Error && error.name === "StructuredOutputError") {
-    return {
-      code: "invalid_structured_output",
-      message: error.message,
-      recovery: "resumable",
-      status: "failed",
-    };
-  }
-  // Any other failure is terminal for this stage; only operator-classified
-  // cancellation and timeout may resume without re-planning from scratch.
-  if (isRecord(error) && typeof error.code === "string") {
-    return {
-      code: error.code,
-      message: errorMessage(error),
-      recovery: "terminal",
-      status: "failed",
-    };
-  }
-  return {
-    code: "planner_invocation_failed",
-    message: errorMessage(error),
-    recovery: "terminal",
-    status: "failed",
-  };
-};
+import {
+  classifyStageFailure,
+  invokeStage,
+  StageCancellationError,
+} from "./StageInvocation.js";
 
 /** Create a planner that handles exactly one claimed eligible task and no later stage. */
 export const createRepositoryWorkflowPlanner = (
@@ -1144,12 +1018,14 @@ export const createRepositoryWorkflowPlanner = (
 
       try {
         const prompt = expandRepositoryWorkflowPlannerPrompt(input);
-        const invocation = await invokeWithControls(
-          options.invoke,
+        const invocation = await invokeStage({
+          invoke: options.invoke,
           prompt,
-          input.signal,
+          signal: input.signal,
           timeoutMs,
-        );
+          cancelCode: "planner_cancelled",
+          timeoutCode: "planner_timeout",
+        });
         const output =
           await extractStructuredOutput<RepositoryWorkflowPlannerOutput>(
             invocation.stdout,
@@ -1199,7 +1075,12 @@ export const createRepositoryWorkflowPlanner = (
         await options.planStore.save(record);
         return record;
       } catch (error) {
-        const failure = toPlannerError(error);
+        const failure = classifyStageFailure(error, {
+          cancelCode: "planner_cancelled",
+          timeoutCode: "planner_timeout",
+          invalidOutputCode: "invalid_structured_output",
+          unknownCode: "planner_invocation_failed",
+        });
         const record: RepositoryWorkflowPlanRecord = {
           ...baseRecord,
           status: failure.status,

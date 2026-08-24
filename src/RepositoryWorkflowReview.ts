@@ -17,7 +17,10 @@ import {
   type RepositoryWorkflowStore,
 } from "./RepositoryWorkflowControl.js";
 import type { RepositoryWorkflowPlanRecord } from "./RepositoryWorkflowPlanner.js";
-import type { RepositoryWorkflowImplementationRecord } from "./RepositoryWorkflowImplementer.js";
+import type {
+  RepositoryWorkflowImplementationInput,
+  RepositoryWorkflowImplementationRecord,
+} from "./RepositoryWorkflowImplementer.js";
 import {
   claimWorkerTask,
   WorkerClaimError,
@@ -26,6 +29,7 @@ import {
 import type { ExecutionAttempt } from "./WorkerStateStore.js";
 import type { WorkerStateStore } from "./WorkerStateStore.js";
 import type { WorkerCommandEvidence } from "./WorkerRepositoryManager.js";
+import { classifyStageFailure, invokeStage } from "./StageInvocation.js";
 
 /** Terminal outcomes of one reviewer stage invocation. */
 export type RepositoryWorkflowReviewStatus =
@@ -507,142 +511,6 @@ const validateReviewInput = (
   };
 };
 
-class ReviewerCancellationError extends Error {
-  readonly code = "reviewer_cancelled";
-
-  constructor(reason: unknown) {
-    super(reason instanceof Error ? reason.message : "Review was cancelled.");
-    this.name = "ReviewerCancellationError";
-  }
-}
-
-class ReviewerTimeoutError extends Error {
-  readonly code = "reviewer_timeout";
-
-  constructor(timeoutMs: number) {
-    super(`Review exceeded ${timeoutMs}ms.`);
-    this.name = "ReviewerTimeoutError";
-  }
-}
-
-const invokeWithControls = async (
-  invoke: RepositoryWorkflowReviewerInvoker,
-  prompt: string,
-  signal: AbortSignal | undefined,
-  timeoutMs: number,
-): Promise<RepositoryWorkflowReviewerInvocationResult> => {
-  const controller = new AbortController();
-  let timer: NodeJS.Timeout | undefined;
-  let removeAbortListener: (() => void) | undefined;
-  let controlError:
-    | ReviewerCancellationError
-    | ReviewerTimeoutError
-    | undefined;
-  const abortWith = (
-    error: ReviewerCancellationError | ReviewerTimeoutError,
-    reason: unknown = error,
-  ): ReviewerCancellationError | ReviewerTimeoutError => {
-    if (controlError === undefined) {
-      controlError = error;
-      controller.abort(reason);
-    }
-    return controlError;
-  };
-  const cancellation = new Promise<never>((_, reject) => {
-    if (signal?.aborted) {
-      reject(abortWith(new ReviewerCancellationError(signal.reason)));
-      return;
-    }
-    if (signal !== undefined) {
-      const onAbort = () => {
-        reject(
-          abortWith(
-            new ReviewerCancellationError(signal.reason),
-            signal.reason,
-          ),
-        );
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-      removeAbortListener = () => signal.removeEventListener("abort", onAbort);
-    }
-  });
-  if (signal?.aborted) {
-    throw new ReviewerCancellationError(signal.reason);
-  }
-  const invocation = invoke({ prompt, signal: controller.signal }).then(
-    (result) => {
-      if (controlError !== undefined) throw controlError;
-      return result;
-    },
-    (error) => {
-      if (controlError !== undefined) throw controlError;
-      throw error;
-    },
-  );
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(abortWith(new ReviewerTimeoutError(timeoutMs)));
-    }, timeoutMs);
-  });
-  try {
-    return await Promise.race([invocation, cancellation, timeout]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-    removeAbortListener?.();
-    void invocation.catch(() => undefined);
-  }
-};
-
-const toReviewError = (
-  error: unknown,
-): {
-  readonly code: string;
-  readonly message: string;
-  readonly recovery: "resumable" | "terminal";
-  readonly status: "failed" | "cancelled" | "timed_out";
-} => {
-  if (error instanceof ReviewerCancellationError) {
-    return {
-      code: error.code,
-      message: error.message,
-      recovery: "resumable",
-      status: "cancelled",
-    };
-  }
-  if (error instanceof ReviewerTimeoutError) {
-    return {
-      code: error.code,
-      message: error.message,
-      recovery: "resumable",
-      status: "timed_out",
-    };
-  }
-  // A malformed verdict is resumable via session feedback; any other
-  // reviewer failure is terminal for this invocation.
-  if (error instanceof Error && error.name === "StructuredOutputError") {
-    return {
-      code: "invalid_structured_output",
-      message: error.message,
-      recovery: "resumable",
-      status: "failed",
-    };
-  }
-  if (isRecord(error) && typeof error.code === "string") {
-    return {
-      code: error.code,
-      message: errorMessage(error),
-      recovery: "terminal",
-      status: "failed",
-    };
-  }
-  return {
-    code: "reviewer_invocation_failed",
-    message: errorMessage(error),
-    recovery: "terminal",
-    status: "failed",
-  };
-};
-
 /** Create a reviewer that produces one advisory verdict with no write authority. */
 export const createRepositoryWorkflowReviewer = (
   options: RepositoryWorkflowReviewerOptions,
@@ -683,12 +551,14 @@ export const createRepositoryWorkflowReviewer = (
 
       try {
         const prompt = expandRepositoryWorkflowReviewerPrompt(input);
-        const invocation = await invokeWithControls(
-          options.invoke,
+        const invocation = await invokeStage({
+          invoke: options.invoke,
           prompt,
-          input.signal,
+          signal: input.signal,
           timeoutMs,
-        );
+          cancelCode: "reviewer_cancelled",
+          timeoutCode: "reviewer_timeout",
+        });
         const verdict =
           await extractStructuredOutput<RepositoryWorkflowReviewerOutput>(
             invocation.stdout,
@@ -739,7 +609,12 @@ export const createRepositoryWorkflowReviewer = (
         await options.reviewStore?.save(record);
         return record;
       } catch (error) {
-        const failure = toReviewError(error);
+        const failure = classifyStageFailure(error, {
+          cancelCode: "reviewer_cancelled",
+          timeoutCode: "reviewer_timeout",
+          invalidOutputCode: "invalid_structured_output",
+          unknownCode: "reviewer_invocation_failed",
+        });
         const record: RepositoryWorkflowReviewRecord = {
           ...provenance,
           status: failure.status,
@@ -757,7 +632,7 @@ export const createRepositoryWorkflowReviewer = (
 /** Implementation stage seam consumed by the remediation loop. */
 export interface RepositoryWorkflowRemediator {
   implement(
-    input: import("./RepositoryWorkflowImplementer.js").RepositoryWorkflowImplementationInput,
+    input: RepositoryWorkflowImplementationInput,
   ): Promise<RepositoryWorkflowImplementationRecord>;
 }
 
@@ -807,7 +682,8 @@ export interface ReviewAndRemediateOptions {
   readonly reviewerPromptTemplate: string;
   /** Maximum number of re-implementation passes; default 3. */
   readonly maxRemediationIterations?: number;
-  /** Wall-clock budget across the whole loop; exhausted budgets require an operator. */
+  /** Wall-clock budget checked between remediation iterations; per-review
+   * overrun is bounded separately by the reviewer's timeoutMs. */
   readonly deadlineMs?: number;
   readonly signal?: AbortSignal;
 }
@@ -845,7 +721,6 @@ export const reviewAndRemediate = async (
         reviews,
         implementationAttemptIds,
         ...(priorReviewId === undefined ? {} : { finalReview: reviews.at(-1) }),
-        reasonCode: undefined,
         message: "Review and remediation was cancelled by the operator.",
       };
     }
