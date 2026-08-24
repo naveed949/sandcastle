@@ -103,8 +103,33 @@ export type {
   RepositoryWorkflowImplementationRecovery,
   RepositoryWorkflowImplementationReasonCode,
   RepositoryWorkflowImplementationInput,
+  RepositoryWorkflowImplementationIdentity,
   RepositoryWorkflowImplementationRecord,
 } from "./RepositoryWorkflowImplementer.js";
+export {
+  createRepositoryWorkflowReviewStore,
+  createRepositoryWorkflowReviewer,
+  expandRepositoryWorkflowReviewerPrompt,
+  reviewAndRemediate,
+  RepositoryWorkflowReviewerContextError,
+} from "./RepositoryWorkflowReview.js";
+export type {
+  RepositoryWorkflowReviewStatus,
+  RepositoryWorkflowReviewRecovery,
+  RepositoryWorkflowReviewFinding,
+  RepositoryWorkflowReviewerOutput,
+  RepositoryWorkflowReviewRecord,
+  RepositoryWorkflowReviewProjection,
+  RepositoryWorkflowReviewerInvoker,
+  RepositoryWorkflowReviewStore,
+  RepositoryWorkflowReviewInput,
+  RepositoryWorkflowReviewerOptions,
+  RepositoryWorkflowReviewerStage,
+  RepositoryWorkflowRemediator,
+  RepositoryWorkflowReviewOutcome,
+  ReviewAndRemediateResult,
+  ReviewAndRemediateOptions,
+} from "./RepositoryWorkflowReview.js";
 export type {
   RepositoryWorkflowPlanStatus,
   RepositoryWorkflowPlanRecovery,

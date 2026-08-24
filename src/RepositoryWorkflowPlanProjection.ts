@@ -2,6 +2,10 @@ import type {
   RepositoryWorkflowPlanProjection,
   RepositoryWorkflowPlanRecord,
 } from "./RepositoryWorkflowPlanner.js";
+import type {
+  RepositoryWorkflowReviewProjection,
+  RepositoryWorkflowReviewRecord,
+} from "./RepositoryWorkflowReview.js";
 
 /** Convert a retained plan into the safe Mission Control workflow projection. */
 export const projectRepositoryWorkflowPlan = (
@@ -36,5 +40,36 @@ export const projectRepositoryWorkflowPlan = (
   completedAt: record.completedAt,
   ...(record.plan === undefined ? {} : { plan: record.plan }),
   evidence: record.evidence,
+  ...(record.error === undefined ? {} : { errorCode: record.error.code }),
+});
+
+/** Convert a retained review into the safe Mission Control workflow projection. */
+export const projectRepositoryWorkflowReview = (
+  record: RepositoryWorkflowReviewRecord,
+): RepositoryWorkflowReviewProjection => ({
+  id: record.id,
+  version: record.version,
+  status: record.status,
+  recovery: record.recovery,
+  repository: record.repository,
+  workflowIdentity: record.workflowIdentity,
+  taskId: record.taskId,
+  planId: record.planId,
+  implementationAttemptId: record.implementationAttemptId,
+  executionIdentity: record.executionIdentity,
+  remediationIteration: record.remediationIteration,
+  ...(record.priorReviewId === undefined
+    ? {}
+    : { priorReviewId: record.priorReviewId }),
+  promptVersion: record.promptVersion,
+  promptTemplateDigest: record.promptTemplateDigest,
+  implementationDiffDigest: record.implementationDiffDigest,
+  createdAt: record.createdAt,
+  completedAt: record.completedAt,
+  ...(record.remediationDeadlineAt === undefined
+    ? {}
+    : { remediationDeadlineAt: record.remediationDeadlineAt }),
+  ...(record.verdict === undefined ? {} : { verdict: record.verdict }),
+  evidenceCount: record.evidence.length,
   ...(record.error === undefined ? {} : { errorCode: record.error.code }),
 });

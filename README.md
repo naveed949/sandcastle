@@ -348,6 +348,54 @@ workflow advances only on `verified`; cancelled and timed-out attempts are
 resumable through lease recovery, and classified failures are retryable with a
 fresh claim.
 
+### Independent review and bounded remediation
+
+Review verified implementation work with a read-only reviewer stage. The
+reviewer sees only text — frozen task snapshot, accepted plan, implementation
+diff, verification evidence, and repository policy — never a repository
+handle, so it cannot mutate the implementation worktree.
+
+```typescript
+import {
+  createRepositoryWorkflowReviewer,
+  createRepositoryWorkflowReviewStore,
+  reviewAndRemediate,
+} from "@ai-hero/sandcastle";
+
+const reviewer = createRepositoryWorkflowReviewer({
+  invoke, // your agent boundary; output arrives in a <review> tag
+  reviewStore: createRepositoryWorkflowReviewStore({ store: workflows }),
+});
+
+const result = await reviewAndRemediate({
+  plan,
+  attempt: verifiedAttempt,
+  implementation,
+  implementationDiff,
+  configuration,
+  source,
+  store: workerState,
+  reviewer,
+  implementer,
+  owner: "supervisor",
+  leaseDurationMs: 60_000,
+  reviewerPromptVersion: "reviewer-v1",
+  reviewerPromptTemplate: "<review> {{IMPLEMENTATION_DIFF}}",
+  maxRemediationIterations: 2,
+  deadlineMs: 30 * 60_000,
+});
+console.log(result.status, result.reviews.length);
+```
+
+Verdicts use a versioned schema (verdict, severity, findings, locations,
+rationale, required actions). Approval is gated deterministically: an approved
+verdict may not carry a blocking finding, and cancellation, timeout, malformed
+output, or reviewer failure never approve the task. Changes requested trigger
+at most `maxRemediationIterations` fresh claims and implementations, each
+linked to its prior reviews; exhausting iterations or the time budget enters a
+manual-intervention state instead of approving. Every review in the chain is
+persisted and projected to Mission Control.
+
 ### Verification-gated draft pull requests
 
 Publish a retained verified attempt through a separate credentialed boundary.

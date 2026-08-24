@@ -14,11 +14,18 @@ import type {
   RepositoryWorkflowIssue,
   RepositoryWorkflowRuntime,
 } from "./RepositoryWorkflowRuntime.js";
-import { projectRepositoryWorkflowPlan } from "./RepositoryWorkflowPlanProjection.js";
+import {
+  projectRepositoryWorkflowPlan,
+  projectRepositoryWorkflowReview,
+} from "./RepositoryWorkflowPlanProjection.js";
 import type {
   RepositoryWorkflowPlanProjection,
   RepositoryWorkflowPlanRecord,
 } from "./RepositoryWorkflowPlanner.js";
+import type {
+  RepositoryWorkflowReviewProjection,
+  RepositoryWorkflowReviewRecord,
+} from "./RepositoryWorkflowReview.js";
 
 export type RepositoryWorkflowMode = "active" | "pausing" | "paused";
 
@@ -106,6 +113,8 @@ export interface RepositoryWorkflowState {
   readonly runs: readonly RepositoryWorkflowRunRecord[];
   /** Structured planner attempts retained alongside workflow runs. */
   readonly plans?: readonly RepositoryWorkflowPlanRecord[];
+  /** Structured review verdicts retained alongside planner records. */
+  readonly reviews?: readonly RepositoryWorkflowReviewRecord[];
 }
 
 export interface RepositoryWorkflowStoreUpdateOptions {
@@ -250,6 +259,8 @@ export interface RepositoryWorkflowProjection {
   readonly entries: readonly RepositoryWorkflowQueueEntry[];
   /** Redacted structured planner attempts and accepted plans. */
   readonly plans?: readonly RepositoryWorkflowPlanProjection[];
+  /** Redacted structured review verdicts and remediation chains. */
+  readonly reviews?: readonly RepositoryWorkflowReviewProjection[];
 }
 
 export interface RepositoryWorkflowControl {
@@ -311,6 +322,7 @@ const emptyState = (): RepositoryWorkflowState => ({
   repositories: [],
   runs: [],
   plans: [],
+  reviews: [],
 });
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -454,6 +466,58 @@ const normalizePlanRecords = (
       );
     }
     return cloneJson(candidate) as unknown as RepositoryWorkflowPlanRecord;
+  });
+};
+
+const normalizeReviewRecords = (
+  value: unknown,
+): readonly RepositoryWorkflowReviewRecord[] => {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new RepositoryWorkflowStoreError(
+      "Repository workflow state reviews must be an array.",
+    );
+  }
+  const ids = new Set<string>();
+  return value.map((candidate) => {
+    if (!isRecord(candidate) || typeof candidate.id !== "string") {
+      throw new RepositoryWorkflowStoreError(
+        "Repository workflow state contains an invalid review record.",
+      );
+    }
+    if (ids.has(candidate.id)) {
+      throw new RepositoryWorkflowStoreError(
+        `Repository workflow state contains duplicate review record ${candidate.id}.`,
+        "conflict",
+      );
+    }
+    ids.add(candidate.id);
+    if (
+      candidate.version !== 1 ||
+      (candidate.status !== "completed" &&
+        candidate.status !== "failed" &&
+        candidate.status !== "cancelled" &&
+        candidate.status !== "timed_out") ||
+      (candidate.recovery !== "resumable" &&
+        candidate.recovery !== "terminal" &&
+        candidate.recovery !== "manual_intervention") ||
+      typeof candidate.repository !== "string" ||
+      typeof candidate.workflowIdentity !== "string" ||
+      typeof candidate.taskId !== "string" ||
+      typeof candidate.planId !== "string" ||
+      typeof candidate.implementationAttemptId !== "string" ||
+      typeof candidate.executionIdentity !== "string" ||
+      typeof candidate.remediationIteration !== "number" ||
+      !Number.isInteger(candidate.remediationIteration) ||
+      candidate.remediationIteration < 0 ||
+      typeof candidate.createdAt !== "string" ||
+      typeof candidate.completedAt !== "string"
+    ) {
+      throw new RepositoryWorkflowStoreError(
+        `Repository workflow review record ${candidate.id} is invalid.`,
+      );
+    }
+    return cloneJson(candidate) as unknown as RepositoryWorkflowReviewRecord;
   });
 };
 
@@ -657,6 +721,7 @@ const normalizeState = (value: unknown): RepositoryWorkflowState => {
     );
   }
   const plans = normalizePlanRecords(value.plans);
+  const reviews = normalizeReviewRecords(value.reviews);
   return {
     version: 1,
     revision,
@@ -666,6 +731,9 @@ const normalizeState = (value: unknown): RepositoryWorkflowState => {
     ),
     runs: runs.sort((left, right) => left.id.localeCompare(right.id)),
     plans: [...plans].sort((left, right) => left.id.localeCompare(right.id)),
+    reviews: [...reviews].sort((left, right) =>
+      left.id.localeCompare(right.id),
+    ),
   };
 };
 
@@ -1209,6 +1277,11 @@ export const createRepositoryWorkflowControl = (
         ? {}
         : {
             plans: state.plans.map(projectRepositoryWorkflowPlan),
+          }),
+      ...(state.reviews === undefined
+        ? {}
+        : {
+            reviews: state.reviews.map(projectRepositoryWorkflowReview),
           }),
     };
   };
