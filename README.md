@@ -491,7 +491,7 @@ systemd deployment, backup, upgrade, and failure inspection guidance.
 ### Mission Control production host
 
 `createMissionControlHost()` is the production composition root for the worker
-and its operator overview plus guarded runtime controls. It constructs the GitHub source, durable
+and its operator overview plus guarded runtime and recovery controls. It constructs the GitHub source, durable
 state store, repository manager, execution engine, draft publisher, diagnostics,
 and `WorkerService` from one central configuration. The same durable root also
 supplies the kernel-owned service lock, so the HTTP surface cannot start a
@@ -536,7 +536,8 @@ read-only endpoints are `GET /api/v1/overview` and `GET /api/v1/status`; they
 return worker mode, the monotonic command revision, active attempt, cycle
 timing, recovery warnings, and current operational-state counts. Runtime
 controls use `POST /api/v1/commands` with one of `run-now`, `pause`, `resume`,
-or `cancel`:
+`cancel`, `retry`, or `acknowledge` (or the generic `recover` command with a
+`recoveryAction`):
 
 ```typescript
 const status = await fetch("http://127.0.0.1:3000/api/v1/status").then(
@@ -560,6 +561,14 @@ Cancellation also requires the active attempt ID. Stale revisions are rejected
 without worker mutation; duplicate command IDs return their retained outcome.
 Pause stops new polling at a cycle boundary while allowing an active agent
 invocation to finish, and resume reuses the existing single polling loop. The
+`retry` command requires an attempt classified as `safe_retry`: the claim must
+be expired, unstarted, and freshly revalidated against the authoritative task
+source before a new lease is created. A live unstarted claim is shown as
+`safe_resume`, while a started claim is shown as `manual_intervention` and
+cannot be retried. `acknowledge` requires an operator identity and reason; it
+records the acknowledgement in the append-only audit without changing the
+attempt, outcome, evidence, lease, branch, record, or task state. Recovery
+rejections include stable `reasonCode` values. The
 request and outcome records are append-only JSONL under the durable
 `operator/commands.jsonl` path and redact protected worker material.
 The bundled overview polls that endpoint and adapts from desktop to tablet

@@ -31,6 +31,8 @@ import {
   type WorkerDiagnostic,
   type WorkerControlRequest,
   type WorkerControlOutcomeCode,
+  type WorkerRecoveryAction,
+  type WorkerRecoveryDisposition,
   type WorkerServiceControl,
   type WorkerDiagnostics,
   type WorkerOperationalState,
@@ -123,6 +125,10 @@ export interface MissionControlRecoveryWarning {
   readonly taskId: string;
   readonly reasonCode: string;
   readonly message: string;
+  /** Recovery classification surfaced without granting new authority. */
+  readonly disposition?: WorkerRecoveryDisposition;
+  /** Fixed operator actions permitted for this classification. */
+  readonly availableActions: readonly WorkerRecoveryAction[];
 }
 
 /** Current count of tasks in each diagnostic operational state. */
@@ -380,6 +386,8 @@ const recoveryWarnings = async (
           attemptId: attempt.attemptId,
           taskId: attempt.request.taskId,
           reasonCode: "manual_intervention",
+          disposition: "manual_intervention",
+          availableActions: ["acknowledge"],
           message:
             "This attempt may have side effects and requires operator review.",
         });
@@ -390,7 +398,20 @@ const recoveryWarnings = async (
             attemptId: attempt.attemptId,
             taskId: attempt.request.taskId,
             reasonCode: recovery.disposition,
+            disposition: recovery.disposition,
+            availableActions:
+              recovery.disposition === "safe_retry" ? ["retry"] : [],
             message: "This expired claim is retained for worker recovery.",
+          });
+        } else {
+          warnings.push({
+            attemptId: attempt.attemptId,
+            taskId: attempt.request.taskId,
+            reasonCode: "safe_resume",
+            disposition: "safe_resume",
+            availableActions: [],
+            message:
+              "This live unstarted claim is safe to resume; retry is not permitted.",
           });
         }
       }
@@ -400,6 +421,7 @@ const recoveryWarnings = async (
         attemptId: attempt.attemptId,
         taskId: attempt.request.taskId,
         reasonCode: "interrupted_attempt",
+        availableActions: [],
         message: "This interrupted attempt remains retained for inspection.",
       });
     }
@@ -429,6 +451,10 @@ const overviewHtml = `<!doctype html>
       .metric small { color: #94a3b8; text-transform: uppercase; letter-spacing: 0.08em; }
       .stack { display: grid; gap: 1rem; margin-top: 1rem; }
       #warnings { color: #fbbf24; }
+      .recovery-warning { display: grid; gap: 0.45rem; padding: 0.7rem 0; border-bottom: 1px solid #374151; }
+      .recovery-warning:last-child { border-bottom: 0; }
+      .recovery-warning strong { color: #fde68a; }
+      .recovery-warning button { justify-self: start; padding: 0.45rem 0.7rem; border: 1px solid #f59e0b; border-radius: 0.4rem; background: #92400e; color: #fffbeb; cursor: pointer; }
       #counts { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
       .count { display: flex; justify-content: space-between; gap: 1rem; }
       .controls { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 0.9rem; }
@@ -460,11 +486,12 @@ const overviewHtml = `<!doctype html>
         <div class="panel metric"><small>Next expected cycle</small><strong id="next-cycle">—</strong></div>
       </section>
       <div class="stack">
-        <section class="panel"><h2>Recovery warnings</h2><div id="warnings" class="muted">None</div></section>
+        <section class="panel"><h2>Recovery controls</h2><div id="warnings" class="muted">None</div></section>
         <section class="panel">
           <h2>Runtime controls</h2>
           <p class="muted">Every action is revision-checked and retained in the operator audit.</p>
           <div class="controls">
+            <input id="operator" aria-label="Operator identity" placeholder="Operator identity (for acknowledgement)" autocomplete="off">
             <input id="reason" aria-label="Operator reason" placeholder="Operator reason" autocomplete="off">
             <button data-command="run-now">Run cycle now</button>
             <button data-command="pause">Pause polling</button>
@@ -478,6 +505,7 @@ const overviewHtml = `<!doctype html>
     </main>
     <script>
       const labels = { discovered: "Discovered", unauthorized: "Unauthorized", ineligible: "Ineligible", ready: "Ready", claimed: "Claimed", running: "Running", blocked: "Blocked", failed: "Failed", verified: "Verified", published: "Published" };
+      const recoveryLabels = { safe_retry: "Safe retry", safe_resume: "Safe resume", manual_intervention: "Manual intervention", interrupted_attempt: "Interrupted attempt" };
       const text = (id, value) => { document.getElementById(id).textContent = value; };
       const formatTime = (value) => value ? new Date(value).toLocaleString() : "—";
       let latestRevision = 0;
@@ -495,8 +523,7 @@ const overviewHtml = `<!doctype html>
           text("last-cycle", formatTime(overview.lastCompletedCycle));
           text("next-cycle", formatTime(overview.nextExpectedCycle));
           text("updated", "Updated " + new Date().toLocaleTimeString());
-          const warnings = document.getElementById("warnings");
-          warnings.textContent = overview.recoveryWarnings.length === 0 ? "None" : overview.recoveryWarnings.map((warning) => warning.reasonCode + ": " + warning.message).join(" • ");
+          renderRecoveryWarnings(overview.recoveryWarnings);
           const counts = document.getElementById("counts");
           counts.replaceChildren(...Object.entries(overview.operationalStateCounts).map(([state, count]) => {
             const item = document.createElement("div"); item.className = "panel count";
@@ -506,13 +533,40 @@ const overviewHtml = `<!doctype html>
           }));
         } catch { text("updated", "Overview unavailable"); }
       }
-      async function sendCommand(command) {
+      function renderRecoveryWarnings(recoveryWarnings) {
+        const warnings = document.getElementById("warnings");
+        warnings.replaceChildren();
+        if (recoveryWarnings.length === 0) { warnings.textContent = "None"; return; }
+        recoveryWarnings.forEach((warning) => {
+          const item = document.createElement("div"); item.className = "recovery-warning";
+          const title = document.createElement("strong"); title.textContent = (recoveryLabels[warning.reasonCode] || warning.reasonCode) + " · " + warning.attemptId;
+          const detail = document.createElement("span"); detail.textContent = warning.message;
+          item.append(title, detail);
+          (warning.availableActions || []).forEach((action) => {
+            const button = document.createElement("button");
+            button.dataset.command = action;
+            button.dataset.attemptId = warning.attemptId;
+            button.textContent = action === "retry" ? "Retry safely" : "Acknowledge manual intervention";
+            item.append(button);
+          });
+          if (warning.reasonCode === "safe_resume") {
+            const safeResume = document.createElement("span"); safeResume.textContent = "Safe resume is automatic at the next worker cycle."; item.append(safeResume);
+          }
+          warnings.append(item);
+        });
+      }
+      async function sendCommand(command, targetAttemptId) {
+        const operatorInput = document.getElementById("operator");
         const reasonInput = document.getElementById("reason");
+        const operator = operatorInput.value.trim();
         const reason = reasonInput.value.trim();
         if (!reason) { text("control-status", "Enter an operator reason first."); return; }
+        if (command === "acknowledge" && !operator) { text("control-status", "Enter an operator identity first."); return; }
         const commandId = command + "-" + Date.now() + "-" + Math.random().toString(36).slice(2);
         const payload = { command, commandId, expectedRevision: latestRevision, reason };
-        if (command === "cancel") payload.attemptId = activeAttemptId;
+        if (operator) payload.operator = operator;
+        if (targetAttemptId) payload.attemptId = targetAttemptId;
+        else if (command === "cancel") payload.attemptId = activeAttemptId;
         try {
           const response = await fetch("/api/v1/commands", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
           const outcome = await response.json();
@@ -521,7 +575,11 @@ const overviewHtml = `<!doctype html>
           void refresh();
         } catch { text("control-status", "Command unavailable."); }
       }
-      document.querySelectorAll("[data-command]").forEach((button) => button.addEventListener("click", () => void sendCommand(button.dataset.command)));
+      document.addEventListener("click", (event) => {
+        const target = event.target;
+        const button = target && target.closest ? target.closest("[data-command]") : null;
+        if (button) void sendCommand(button.dataset.command, button.dataset.attemptId);
+      });
       void refresh();
       setInterval(() => void refresh(), 5000);
     </script>
@@ -592,7 +650,10 @@ const parseControlRequest = (
     command !== "run-now" &&
     command !== "pause" &&
     command !== "resume" &&
-    command !== "cancel"
+    command !== "cancel" &&
+    command !== "retry" &&
+    command !== "acknowledge" &&
+    command !== "recover"
   ) {
     return undefined;
   }
@@ -610,12 +671,29 @@ const parseControlRequest = (
   if (value.attemptId !== undefined && typeof value.attemptId !== "string") {
     return undefined;
   }
+  if (value.operator !== undefined && typeof value.operator !== "string") {
+    return undefined;
+  }
+  if (value.operatorId !== undefined && typeof value.operatorId !== "string") {
+    return undefined;
+  }
+  const recoveryAction = value.recoveryAction ?? value.action;
+  if (
+    recoveryAction !== undefined &&
+    recoveryAction !== "retry" &&
+    recoveryAction !== "acknowledge"
+  ) {
+    return undefined;
+  }
   return {
     command,
     commandId: value.commandId,
     expectedRevision: value.expectedRevision,
     ...(value.reason === undefined ? {} : { reason: value.reason }),
     ...(value.attemptId === undefined ? {} : { attemptId: value.attemptId }),
+    ...(value.operator === undefined ? {} : { operator: value.operator }),
+    ...(value.operatorId === undefined ? {} : { operatorId: value.operatorId }),
+    ...(recoveryAction === undefined ? {} : { recoveryAction }),
   };
 };
 

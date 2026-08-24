@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { NormalizedTask } from "./WorkerCoordinator.js";
+import { runWorkerDryRun, type NormalizedTask } from "./WorkerCoordinator.js";
 import {
   createMissionControlHost,
   type MissionControlConfiguration,
@@ -124,6 +124,157 @@ describe("Mission Control host", () => {
       expect(html).toContain("/api/v1/overview");
       expect(html).toContain("/api/v1/commands");
       expect(html).toMatch(/@media[^{]*\{/);
+    } finally {
+      await host.stop();
+    }
+  });
+
+  it("projects safe retry, safe resume, and manual intervention distinctly", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "sandcastle-mission-control-"),
+    );
+    temporaryDirectories.push(directory);
+    const worker = {
+      ...workerConfiguration,
+      repositories: {
+        "acme/app": { authorized: true, baseBranch: "main", profileId: "node" },
+      },
+      profiles: { node: { setupCommands: [], verificationCommands: ["true"] } },
+    };
+    const configuration = {
+      ...createConfiguration(directory),
+      worker,
+    } satisfies MissionControlConfiguration;
+    const host = createMissionControlHost({
+      configuration,
+      boundaries: {
+        source: { discover: vi.fn(async () => []), read: vi.fn() },
+        repositoryManager: { prepare: vi.fn() },
+        execution: { execute: vi.fn() },
+        publisher: { publish: vi.fn() },
+      },
+    });
+    const safeRetryTask = { ...task, number: 16 };
+    const safeResumeTask = { ...task, number: 17 };
+    const manualTask = { ...task, number: 18 };
+    try {
+      const requests = runWorkerDryRun({
+        configuration: worker,
+        tasks: [safeRetryTask, safeResumeTask, manualTask],
+      }).executionRequests;
+      const safeRetry = await host.store.claimAttempt(requests[0]!, {
+        owner: "mission-control-test",
+        leaseDurationMs: 1_000,
+        claimedAt: "2000-01-01T00:00:00.000Z",
+      });
+      await host.store.claimAttempt(requests[1]!, {
+        owner: "mission-control-test",
+        leaseDurationMs: 60 * 60_000,
+        claimedAt: new Date().toISOString(),
+      });
+      const manual = await host.store.claimAttempt(requests[2]!, {
+        owner: "mission-control-test",
+        leaseDurationMs: 1_000,
+        claimedAt: "2000-01-01T00:00:00.000Z",
+      });
+      await host.store.markAttemptStarted(manual.attemptId);
+
+      const overview = await host.getOverview();
+
+      expect(overview.recoveryWarnings).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            attemptId: safeRetry.attemptId,
+            reasonCode: "safe_retry",
+            availableActions: ["retry"],
+          }),
+          expect.objectContaining({
+            reasonCode: "safe_resume",
+            availableActions: [],
+          }),
+          expect.objectContaining({
+            attemptId: manual.attemptId,
+            reasonCode: "manual_intervention",
+            availableActions: ["acknowledge"],
+          }),
+        ]),
+      );
+
+      const page = await fetch(
+        `http://${(await host.listen()).host}:${(await host.listen()).port}/`,
+      );
+      const html = await page.text();
+      expect(html).toContain("Safe retry");
+      expect(html).toContain("Safe resume");
+      expect(html).toContain("Manual intervention");
+      expect(html).toContain("Retry safely");
+      expect(html).toContain("Acknowledge manual intervention");
+    } finally {
+      await host.stop();
+    }
+  });
+
+  it("accepts manual acknowledgement through the guarded HTTP command surface", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "sandcastle-mission-control-"),
+    );
+    temporaryDirectories.push(directory);
+    const worker = {
+      ...workerConfiguration,
+      repositories: {
+        "acme/app": { authorized: true, baseBranch: "main", profileId: "node" },
+      },
+      profiles: { node: { setupCommands: [], verificationCommands: ["true"] } },
+    };
+    const host = createMissionControlHost({
+      configuration: { ...createConfiguration(directory), worker },
+      boundaries: {
+        source: { discover: vi.fn(async () => []), read: vi.fn() },
+        repositoryManager: { prepare: vi.fn() },
+        execution: { execute: vi.fn() },
+        publisher: { publish: vi.fn() },
+      },
+    });
+    try {
+      const request = runWorkerDryRun({
+        configuration: worker,
+        tasks: [{ ...task, number: 19 }],
+      }).executionRequests[0]!;
+      const retained = await host.store.claimAttempt(request, {
+        owner: "mission-control-test",
+        leaseDurationMs: 1_000,
+        claimedAt: "2000-01-01T00:00:00.000Z",
+      });
+      await host.store.markAttemptStarted(retained.attemptId);
+      const before = await readFile(host.paths.stateFilePath, "utf8");
+      const address = await host.listen();
+
+      const response = await postCommand(address, {
+        command: "acknowledge",
+        commandId: "http-manual-ack",
+        expectedRevision: 0,
+        attemptId: retained.attemptId,
+        operator: "alice",
+        reason: "reviewed retained evidence",
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        command: "acknowledge",
+        code: "accepted",
+        reasonCode: "manual_intervention",
+      });
+      expect(await readFile(host.paths.stateFilePath, "utf8")).toBe(before);
+
+      const duplicate = await postCommand(address, {
+        command: "acknowledge",
+        commandId: "http-manual-ack",
+        expectedRevision: 99,
+      });
+      expect(duplicate.status).toBe(200);
+      expect(await duplicate.json()).toMatchObject({
+        commandId: "http-manual-ack",
+        code: "accepted",
+      });
     } finally {
       await host.stop();
     }

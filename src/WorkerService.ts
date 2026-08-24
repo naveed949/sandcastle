@@ -40,8 +40,41 @@ export type WorkerServiceMode =
   | "stopping"
   | "unhealthy";
 
+/** Recovery actions exposed by the guarded operator surface. */
+export type WorkerRecoveryAction = "retry" | "acknowledge";
+
+/** Classification that determines which recovery action, if any, is safe. */
+export type WorkerRecoveryDisposition =
+  | "safe_retry"
+  | "safe_resume"
+  | "manual_intervention";
+
+/** Stable reason codes for recovery decisions and rejected actions. */
+export type WorkerRecoveryReasonCode =
+  | WorkerRecoveryDisposition
+  | "recovery_action_required"
+  | "recovery_target_required"
+  | "recovery_target_not_found"
+  | "recovery_target_not_claimed"
+  | "recovery_not_expired"
+  | "recovery_claim_refresh_failed"
+  | "recovery_claim_conflict"
+  | "recovery_operator_required"
+  | "recovery_acknowledgement_not_allowed"
+  | "recovery_already_applied"
+  | "recovery_stale_revision"
+  | "recovery_invalid_request";
+
 /** The deliberately small set of operator mutations exposed by the worker. */
-export type WorkerControlCommand = "run-now" | "pause" | "resume" | "cancel";
+export type WorkerControlCommand =
+  | "run-now"
+  | "pause"
+  | "resume"
+  | "cancel"
+  | "retry"
+  | "acknowledge"
+  /** Generic recovery spelling; recoveryAction selects retry or acknowledge. */
+  | "recover";
 
 /** Stable machine-readable outcomes for guarded operator commands. */
 export type WorkerControlOutcomeCode =
@@ -55,7 +88,20 @@ export type WorkerControlOutcomeCode =
   | "target_mismatch"
   | "no_active_execution"
   | "service_unhealthy"
-  | "command_failed";
+  | "command_failed"
+  | "recovery_action_required"
+  | "recovery_target_required"
+  | "recovery_target_not_found"
+  | "recovery_target_not_claimed"
+  | "recovery_not_expired"
+  | "recovery_manual_intervention"
+  | "recovery_claim_refresh_failed"
+  | "recovery_claim_conflict"
+  | "recovery_operator_required"
+  | "recovery_acknowledgement_not_allowed"
+  | "recovery_already_applied"
+  | "recovery_stale_revision"
+  | "recovery_invalid_request";
 
 /** Revision-checked input for one guarded operator command. */
 export interface WorkerControlRequest {
@@ -69,6 +115,14 @@ export interface WorkerControlRequest {
   readonly reason?: string;
   /** Required for cancellation so a stale operator cannot cancel another attempt. */
   readonly attemptId?: string;
+  /** Human operator identity required for manual-intervention acknowledgement. */
+  readonly operator?: string;
+  /** Compatibility spelling for callers that use an operator identity field. */
+  readonly operatorId?: string;
+  /** Action selected when `command` is the generic `recover` command. */
+  readonly recoveryAction?: WorkerRecoveryAction;
+  /** Compatibility spelling for generic recovery callers. */
+  readonly action?: WorkerRecoveryAction;
 }
 
 /** Shared input for the named methods on the narrow control surface. */
@@ -84,6 +138,7 @@ export interface WorkerControlOutcome {
   readonly revision: number;
   readonly message: string;
   readonly attemptId?: string;
+  readonly reasonCode?: WorkerRecoveryReasonCode;
 }
 
 /** One append-only operator command request or outcome record. */
@@ -97,6 +152,9 @@ export interface WorkerControlAuditRecord {
   readonly revision: number;
   readonly reason?: string;
   readonly attemptId?: string;
+  readonly operator?: string;
+  readonly recoveryAction?: WorkerRecoveryAction;
+  readonly reasonCode?: WorkerRecoveryReasonCode;
   readonly code?: WorkerControlOutcomeCode;
   readonly message?: string;
 }
@@ -109,6 +167,9 @@ export interface WorkerServiceControl {
   pause(request: WorkerControlInput): Promise<WorkerControlOutcome>;
   resume(request: WorkerControlInput): Promise<WorkerControlOutcome>;
   cancel(request: WorkerControlInput): Promise<WorkerControlOutcome>;
+  retry(request: WorkerControlInput): Promise<WorkerControlOutcome>;
+  acknowledge(request: WorkerControlInput): Promise<WorkerControlOutcome>;
+  recover(request: WorkerControlInput): Promise<WorkerControlOutcome>;
 }
 
 /** Read-only lifecycle timing exposed to an operator surface. */
@@ -297,6 +358,38 @@ export class WorkerServiceOperatorCancellationError extends Error {
   }
 }
 
+/** A guarded recovery rejection that must not make the worker unhealthy. */
+export class WorkerRecoveryControlError extends Error {
+  readonly code: Extract<
+    WorkerControlOutcomeCode,
+    | "recovery_action_required"
+    | "recovery_target_required"
+    | "recovery_target_not_found"
+    | "recovery_target_not_claimed"
+    | "recovery_not_expired"
+    | "recovery_manual_intervention"
+    | "recovery_claim_refresh_failed"
+    | "recovery_claim_conflict"
+    | "recovery_operator_required"
+    | "recovery_acknowledgement_not_allowed"
+    | "recovery_already_applied"
+    | "recovery_stale_revision"
+    | "recovery_invalid_request"
+  >;
+  readonly reasonCode: WorkerRecoveryReasonCode;
+
+  constructor(
+    code: WorkerRecoveryControlError["code"],
+    reasonCode: WorkerRecoveryReasonCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "WorkerRecoveryControlError";
+    this.code = code;
+    this.reasonCode = reasonCode;
+  }
+}
+
 const waitForPoll = (
   milliseconds: number,
   signal: AbortSignal,
@@ -394,6 +487,9 @@ const CONTROL_COMMANDS: readonly WorkerControlCommand[] = [
   "pause",
   "resume",
   "cancel",
+  "retry",
+  "acknowledge",
+  "recover",
 ];
 
 const CONTROL_OUTCOME_CODES: readonly WorkerControlOutcomeCode[] = [
@@ -408,6 +504,37 @@ const CONTROL_OUTCOME_CODES: readonly WorkerControlOutcomeCode[] = [
   "no_active_execution",
   "service_unhealthy",
   "command_failed",
+  "recovery_action_required",
+  "recovery_target_required",
+  "recovery_target_not_found",
+  "recovery_target_not_claimed",
+  "recovery_not_expired",
+  "recovery_manual_intervention",
+  "recovery_claim_refresh_failed",
+  "recovery_claim_conflict",
+  "recovery_operator_required",
+  "recovery_acknowledgement_not_allowed",
+  "recovery_already_applied",
+  "recovery_stale_revision",
+  "recovery_invalid_request",
+];
+
+const RECOVERY_REASON_CODES: readonly WorkerRecoveryReasonCode[] = [
+  "safe_retry",
+  "safe_resume",
+  "manual_intervention",
+  "recovery_action_required",
+  "recovery_target_required",
+  "recovery_target_not_found",
+  "recovery_target_not_claimed",
+  "recovery_not_expired",
+  "recovery_claim_refresh_failed",
+  "recovery_claim_conflict",
+  "recovery_operator_required",
+  "recovery_acknowledgement_not_allowed",
+  "recovery_already_applied",
+  "recovery_stale_revision",
+  "recovery_invalid_request",
 ];
 
 const isWorkerControlCommand = (
@@ -422,6 +549,12 @@ const isWorkerControlOutcomeCode = (
   typeof value === "string" &&
   (CONTROL_OUTCOME_CODES as readonly string[]).includes(value);
 
+const isWorkerRecoveryReasonCode = (
+  value: unknown,
+): value is WorkerRecoveryReasonCode =>
+  typeof value === "string" &&
+  (RECOVERY_REASON_CODES as readonly string[]).includes(value);
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -429,6 +562,25 @@ const redactedOperatorText = (value: string): string =>
   containsProtectedWorkerMaterial(value)
     ? "Protected worker material redacted."
     : value;
+
+const recoveryActionFor = (
+  request: WorkerControlRequest,
+): WorkerRecoveryAction | undefined => {
+  if (request.command === "retry") return "retry";
+  if (request.command === "acknowledge") return "acknowledge";
+  if (request.command !== "recover") return undefined;
+  return request.recoveryAction ?? request.action;
+};
+
+const isRecoveryCommand = (request: WorkerControlRequest): boolean =>
+  request.command === "retry" ||
+  request.command === "acknowledge" ||
+  request.command === "recover";
+
+const operatorFor = (request: WorkerControlRequest): string | undefined => {
+  const operator = request.operator ?? request.operatorId;
+  return typeof operator === "string" ? operator : undefined;
+};
 
 interface LoadedControlAudit {
   readonly revision: number;
@@ -483,6 +635,9 @@ const loadControlAudit = (filePath: string): LoadedControlAudit => {
       message: redactedOperatorText(value.message),
       ...(typeof value.attemptId === "string"
         ? { attemptId: value.attemptId }
+        : {}),
+      ...(isWorkerRecoveryReasonCode(value.reasonCode)
+        ? { reasonCode: value.reasonCode }
         : {}),
     });
   }
@@ -556,6 +711,9 @@ export const createWorkerService = (
       ...(record.reason === undefined
         ? {}
         : { reason: redactedOperatorText(record.reason) }),
+      ...(record.operator === undefined
+        ? {}
+        : { operator: redactedOperatorText(record.operator) }),
       ...(record.message === undefined
         ? {}
         : { message: redactedOperatorText(record.message) }),
@@ -675,6 +833,127 @@ export const createWorkerService = (
       message: `Published ${taskId} as draft ${publication.pullRequest.url}.`,
     });
     return true;
+  };
+
+  interface RecoveryInspection {
+    readonly attempt: ExecutionAttempt;
+    readonly disposition: WorkerRecoveryDisposition;
+  }
+
+  const inspectRecoveryTarget = async (
+    attemptId: string,
+  ): Promise<RecoveryInspection> => {
+    const persisted = await options.store.read();
+    const attempt = persisted.attempts.find(
+      (candidate) => candidate.attemptId === attemptId,
+    );
+    if (attempt === undefined) {
+      throw new WorkerRecoveryControlError(
+        "recovery_target_not_found",
+        "recovery_target_not_found",
+        `Recovery target ${attemptId} was not found.`,
+      );
+    }
+    if (attempt.status !== "active" || attempt.claim === undefined) {
+      const retryAttempt = persisted.attempts.find(
+        (candidate) => candidate.attemptId === `${attemptId}:retry`,
+      );
+      if (retryAttempt !== undefined) {
+        throw new WorkerRecoveryControlError(
+          "recovery_already_applied",
+          "recovery_already_applied",
+          `Recovery target ${attemptId} already has a retained retry attempt.`,
+        );
+      }
+      throw new WorkerRecoveryControlError(
+        "recovery_target_not_claimed",
+        "recovery_target_not_claimed",
+        `Recovery target ${attemptId} is not an active guarded claim.`,
+      );
+    }
+    if (attempt.claim.phase === "started") {
+      return { attempt, disposition: "manual_intervention" };
+    }
+    const expired = await options.store.inspectExpiredLeases({ at: now() });
+    const recovery = expired.find(
+      (candidate) => candidate.attemptId === attempt.attemptId,
+    );
+    return {
+      attempt,
+      disposition:
+        recovery?.disposition === "safe_retry" ? "safe_retry" : "safe_resume",
+    };
+  };
+
+  const performRecoveryRetry = async (
+    attemptId: string,
+  ): Promise<WorkerCycleResult> => {
+    const events: WorkerDiagnostic[] = [];
+    const emit = async (
+      event: Omit<WorkerDiagnostic, "timestamp">,
+    ): Promise<void> => {
+      const diagnostic = { timestamp: now(), ...event };
+      events.push(diagnostic);
+      await diagnostics.emit(diagnostic);
+    };
+    const inspection = await inspectRecoveryTarget(attemptId);
+    if (inspection.disposition !== "safe_retry") {
+      if (inspection.disposition === "safe_resume") {
+        throw new WorkerRecoveryControlError(
+          "recovery_not_expired",
+          "safe_resume",
+          `Recovery target ${attemptId} has a live unstarted claim and is safe to resume, not retry.`,
+        );
+      }
+      throw new WorkerRecoveryControlError(
+        "recovery_manual_intervention",
+        "manual_intervention",
+        `Recovery target ${attemptId} may have side effects and requires manual intervention.`,
+      );
+    }
+    if (stopRequested) {
+      throw new WorkerRecoveryControlError(
+        "recovery_claim_conflict",
+        "recovery_claim_conflict",
+        "The worker is shutting down and cannot retry a claim.",
+      );
+    }
+
+    let retryAttempt: ExecutionAttempt;
+    try {
+      retryAttempt = await claimWorkerTask({
+        source: options.source,
+        store: options.store,
+        configuration: options.configuration,
+        request: inspection.attempt.request,
+        owner: options.owner,
+        leaseDurationMs: options.leaseDurationMs,
+        claimedAt: now(),
+        attemptId: `${inspection.attempt.attemptId}:retry`,
+      });
+    } catch (error) {
+      if (error instanceof WorkerClaimError) {
+        const stale = error.code === "stale_revision";
+        throw new WorkerRecoveryControlError(
+          stale ? "recovery_stale_revision" : "recovery_claim_refresh_failed",
+          stale ? "recovery_stale_revision" : "recovery_claim_refresh_failed",
+          `Safe retry claim refresh failed: ${error.message}`,
+        );
+      }
+      throw new WorkerRecoveryControlError(
+        "recovery_claim_conflict",
+        "recovery_claim_conflict",
+        `Safe retry could not acquire a new claim: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    const attempted = await processClaimedAttempt(retryAttempt, emit, {
+      reasonCode: "safe_retry",
+      message: `Retrying expired unstarted claim ${inspection.attempt.attemptId} as ${retryAttempt.attemptId}.`,
+    });
+    return completeCycle({ events, attempted });
   };
 
   const performCycle = async (): Promise<WorkerCycleResult> => {
@@ -840,6 +1119,55 @@ export const createWorkerService = (
     return cycleInFlight;
   };
 
+  const runUnlockedRecoveryCycle = (
+    attemptId: string,
+  ): Promise<WorkerCycleResult> => {
+    cycleInFlight ??= performRecoveryRetry(attemptId)
+      .catch((error) => {
+        if (!(error instanceof WorkerRecoveryControlError)) {
+          serviceMode = "unhealthy";
+        }
+        throw error;
+      })
+      .finally(() => {
+        cycleInFlight = undefined;
+      });
+    return cycleInFlight;
+  };
+
+  const recoveryCycles = new Map<string, Promise<WorkerCycleResult>>();
+  const runRecoveryCycle = (attemptId: string): Promise<WorkerCycleResult> => {
+    const existing = recoveryCycles.get(attemptId);
+    if (existing !== undefined) return existing;
+
+    const recovery = (async () => {
+      if (cycleInFlight !== undefined) await cycleInFlight;
+      if (loopLock !== undefined) {
+        return loopLock.then(() => runUnlockedRecoveryCycle(attemptId));
+      }
+      const release = await acquireServiceLock(options.lockFilePath);
+      try {
+        return await runUnlockedRecoveryCycle(attemptId);
+      } finally {
+        await release();
+      }
+    })();
+    recoveryCycles.set(attemptId, recovery);
+    void recovery.then(
+      () => {
+        if (recoveryCycles.get(attemptId) === recovery) {
+          recoveryCycles.delete(attemptId);
+        }
+      },
+      () => {
+        if (recoveryCycles.get(attemptId) === recovery) {
+          recoveryCycles.delete(attemptId);
+        }
+      },
+    );
+    return recovery;
+  };
+
   const runCycle = (): Promise<WorkerCycleResult> => {
     if (loopLock !== undefined) {
       return loopLock.then(() => runUnlockedCycle());
@@ -919,6 +1247,7 @@ export const createWorkerService = (
     readonly accepted: true;
     readonly action: Promise<void>;
     readonly attemptId?: string;
+    readonly reasonCode?: WorkerRecoveryReasonCode;
   }
 
   interface RejectedControl {
@@ -926,6 +1255,7 @@ export const createWorkerService = (
     readonly message: string;
     readonly accepted: false;
     readonly attemptId?: string;
+    readonly reasonCode?: WorkerRecoveryReasonCode;
   }
 
   type PreparedControl = AcceptedControl | RejectedControl;
@@ -933,9 +1263,116 @@ export const createWorkerService = (
   const rejectControl = (
     code: RejectedControl["code"],
     message: string,
-  ): RejectedControl => ({ code, message, accepted: false });
+    reasonCode?: WorkerRecoveryReasonCode,
+  ): RejectedControl => ({
+    code,
+    message,
+    accepted: false,
+    ...(reasonCode === undefined ? {} : { reasonCode }),
+  });
 
-  const prepareControl = (request: WorkerControlRequest): PreparedControl => {
+  const prepareControl = async (
+    request: WorkerControlRequest,
+  ): Promise<PreparedControl> => {
+    if (isRecoveryCommand(request)) {
+      const recoveryAction = recoveryActionFor(request);
+      if (recoveryAction === undefined) {
+        return rejectControl(
+          "recovery_action_required",
+          "A recovery action of retry or acknowledge is required.",
+          "recovery_action_required",
+        );
+      }
+      if (!serviceIsHealthy()) {
+        return rejectControl(
+          "service_unhealthy",
+          "The worker is unhealthy and cannot perform recovery.",
+          "recovery_claim_conflict",
+        );
+      }
+      if (serviceMode === "stopping") {
+        return rejectControl(
+          "recovery_claim_conflict",
+          "The worker is stopping and cannot perform recovery.",
+          "recovery_claim_conflict",
+        );
+      }
+      if (request.attemptId === undefined || request.attemptId.trim() === "") {
+        return rejectControl(
+          "recovery_target_required",
+          "Recovery requires an active attempt ID.",
+          "recovery_target_required",
+        );
+      }
+      if (recoveryAction === "acknowledge") {
+        const operator = operatorFor(request);
+        if (operator === undefined || operator.trim() === "") {
+          return rejectControl(
+            "recovery_operator_required",
+            "Manual-intervention acknowledgement requires an operator identity.",
+            "recovery_operator_required",
+          );
+        }
+      }
+
+      let inspection: RecoveryInspection;
+      try {
+        inspection = await inspectRecoveryTarget(request.attemptId);
+      } catch (error) {
+        if (error instanceof WorkerRecoveryControlError) {
+          return rejectControl(error.code, error.message, error.reasonCode);
+        }
+        return rejectControl(
+          "recovery_claim_conflict",
+          `Recovery state could not be inspected: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          "recovery_claim_conflict",
+        );
+      }
+
+      if (recoveryAction === "retry") {
+        if (inspection.disposition === "safe_resume") {
+          return rejectControl(
+            "recovery_not_expired",
+            `Recovery target ${request.attemptId} has a live unstarted claim and is safe to resume, not retry.`,
+            "safe_resume",
+          );
+        }
+        if (inspection.disposition === "manual_intervention") {
+          return rejectControl(
+            "recovery_manual_intervention",
+            `Recovery target ${request.attemptId} may have side effects and requires manual intervention.`,
+            "manual_intervention",
+          );
+        }
+        return {
+          code: "accepted",
+          message: `Safe retry requested for expired claim ${request.attemptId}.`,
+          accepted: true,
+          action: runRecoveryCycle(request.attemptId).then(() => undefined),
+          attemptId: request.attemptId,
+          reasonCode: "safe_retry",
+        };
+      }
+
+      if (inspection.disposition !== "manual_intervention") {
+        return rejectControl(
+          "recovery_acknowledgement_not_allowed",
+          `Recovery target ${request.attemptId} is classified as ${inspection.disposition}; acknowledgement is only valid for manual intervention.`,
+          inspection.disposition,
+        );
+      }
+      return {
+        code: "accepted",
+        message: `Manual intervention acknowledged for ${request.attemptId}; retained evidence was not changed.`,
+        accepted: true,
+        action: Promise.resolve(),
+        attemptId: request.attemptId,
+        reasonCode: "manual_intervention",
+      };
+    }
+
     switch (request.command) {
       case "run-now": {
         if (!serviceIsHealthy()) {
@@ -1101,6 +1538,10 @@ export const createWorkerService = (
         };
       }
     }
+    return rejectControl(
+      "invalid_request",
+      "The worker command is not supported.",
+    );
   };
 
   type ControlReservation =
@@ -1133,6 +1574,9 @@ export const createWorkerService = (
             ...(request.attemptId === undefined
               ? {}
               : { attemptId: request.attemptId }),
+            ...(isRecoveryCommand(request)
+              ? { reasonCode: "recovery_stale_revision" as const }
+              : {}),
           },
         };
       }
@@ -1145,10 +1589,13 @@ export const createWorkerService = (
             code: "reason_required",
             revision,
             message: "An operator reason is required for this command.",
+            ...(isRecoveryCommand(request)
+              ? { reasonCode: "recovery_invalid_request" as const }
+              : {}),
           },
         };
       }
-      const prepared = prepareControl(request);
+      const prepared = await prepareControl(request);
       if (!prepared.accepted) {
         return {
           outcome: {
@@ -1161,6 +1608,9 @@ export const createWorkerService = (
             ...(prepared.attemptId === undefined
               ? {}
               : { attemptId: prepared.attemptId }),
+            ...(prepared.reasonCode === undefined
+              ? {}
+              : { reasonCode: prepared.reasonCode }),
           },
         };
       }
@@ -1183,10 +1633,20 @@ export const createWorkerService = (
       command: request.command,
       expectedRevision: request.expectedRevision,
       revision: outcome.revision,
+      ...(request.reason === undefined ? {} : { reason: request.reason }),
       ...(request.attemptId === undefined
         ? {}
         : { attemptId: request.attemptId }),
+      ...(operatorFor(request) === undefined
+        ? {}
+        : { operator: operatorFor(request) }),
+      ...(recoveryActionFor(request) === undefined
+        ? {}
+        : { recoveryAction: recoveryActionFor(request) }),
       code: outcome.code,
+      ...(outcome.reasonCode === undefined
+        ? {}
+        : { reasonCode: outcome.reasonCode }),
       message: outcome.message,
     });
     retainedOutcomes.set(request.commandId, outcome);
@@ -1210,6 +1670,9 @@ export const createWorkerService = (
         code: "invalid_request",
         revision,
         message: "Command ID and expected revision are invalid.",
+        ...(isRecoveryCommand(request)
+          ? { reasonCode: "recovery_invalid_request" as const }
+          : {}),
       };
       return finishControl(request, outcome);
     }
@@ -1226,6 +1689,12 @@ export const createWorkerService = (
       ...(request.attemptId === undefined
         ? {}
         : { attemptId: request.attemptId }),
+      ...(operatorFor(request) === undefined
+        ? {}
+        : { operator: operatorFor(request) }),
+      ...(recoveryActionFor(request) === undefined
+        ? {}
+        : { recoveryAction: recoveryActionFor(request) }),
     });
 
     const reservation = await reserveControl(request);
@@ -1245,8 +1714,25 @@ export const createWorkerService = (
         ...(reservation.prepared.attemptId === undefined
           ? {}
           : { attemptId: reservation.prepared.attemptId }),
+        ...(reservation.prepared.reasonCode === undefined
+          ? {}
+          : { reasonCode: reservation.prepared.reasonCode }),
       });
     } catch (error) {
+      if (error instanceof WorkerRecoveryControlError) {
+        return finishControl(request, {
+          version: 1,
+          commandId: request.commandId,
+          command: request.command,
+          code: error.code,
+          revision: reservation.revision,
+          message: error.message,
+          ...(request.attemptId === undefined
+            ? {}
+            : { attemptId: request.attemptId }),
+          reasonCode: error.reasonCode,
+        });
+      }
       const message = redactedOperatorText(
         error instanceof Error ? error.message : String(error),
       );
@@ -1257,6 +1743,9 @@ export const createWorkerService = (
         code: "command_failed",
         revision: reservation.revision,
         message: `Worker command failed: ${message}`,
+        ...(isRecoveryCommand(request)
+          ? { reasonCode: "recovery_claim_conflict" as const }
+          : {}),
       });
     }
   };
@@ -1324,6 +1813,9 @@ export const createWorkerService = (
     pause: (request) => command({ ...request, command: "pause" }),
     resume: (request) => command({ ...request, command: "resume" }),
     cancel: (request) => command({ ...request, command: "cancel" }),
+    retry: (request) => command({ ...request, command: "retry" }),
+    acknowledge: (request) => command({ ...request, command: "acknowledge" }),
+    recover: (request) => command({ ...request, command: "recover" }),
   };
 
   return { runCycle, start, stop, status, control };
