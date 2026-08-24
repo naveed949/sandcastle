@@ -3,6 +3,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import {
   runWorkerDryRun,
+  type EligibilityDecision,
   type WorkerConfiguration,
 } from "./WorkerCoordinator.js";
 import { claimWorkerTask, WorkerClaimError } from "./WorkerClaimCoordinator.js";
@@ -27,6 +28,21 @@ export type WorkerOperationalState =
   | "failed"
   | "verified"
   | "published";
+
+/** Lifecycle mode of the continuous worker service itself. */
+export type WorkerServiceMode =
+  | "stopped"
+  | "starting"
+  | "running"
+  | "stopping"
+  | "unhealthy";
+
+/** Read-only lifecycle timing exposed to an operator surface. */
+export interface WorkerServiceStatus {
+  readonly mode: WorkerServiceMode;
+  readonly lastCompletedCycle?: string;
+  readonly nextExpectedCycle?: string;
+}
 
 /** One structured, secret-free operational event. */
 export interface WorkerDiagnostic {
@@ -123,6 +139,8 @@ export interface WorkerService {
   start(): Promise<void>;
   /** Stop polling and cancel an active execution through Sandcastle. */
   stop(): Promise<void>;
+  /** Return the service lifecycle mode and cycle timing without mutating state. */
+  status(): WorkerServiceStatus;
 }
 
 /** Central configuration and injected boundaries for one remote worker. */
@@ -200,6 +218,31 @@ const waitForPoll = (
       { once: true },
     );
   });
+
+const operationalStateFor = (
+  decision: EligibilityDecision,
+  retainedAttempt: ExecutionAttempt | undefined,
+): WorkerOperationalState => {
+  if (retainedAttempt?.status === "published") return "published";
+  if (retainedAttempt?.status === "verified") return "verified";
+  if (
+    retainedAttempt?.status === "failed" ||
+    retainedAttempt?.status === "interrupted"
+  ) {
+    return "blocked";
+  }
+  if (decision.eligible) return "ready";
+  if (decision.reasonCode === "unauthorized_repository") {
+    return "unauthorized";
+  }
+  if (
+    decision.reasonCode === "blocked" ||
+    decision.reasonCode === "unmet_dependency"
+  ) {
+    return "blocked";
+  }
+  return "ineligible";
+};
 
 const acquireServiceLock = async (
   lockFilePath: string,
@@ -285,6 +328,22 @@ export const createWorkerService = (
   let stopRequested = false;
   let pollController: AbortController | undefined;
   let executionController: AbortController | undefined;
+  let serviceMode: WorkerServiceMode = "stopped";
+  let lastCompletedCycle: string | undefined;
+  let nextExpectedCycle: string | undefined;
+  const serviceIsHealthy = (): boolean => serviceMode !== "unhealthy";
+
+  const completeCycle = (result: WorkerCycleResult): WorkerCycleResult => {
+    const completedAt = now();
+    lastCompletedCycle = completedAt;
+    nextExpectedCycle = undefined;
+    if (serviceMode === "running" || serviceMode === "starting") {
+      nextExpectedCycle = new Date(
+        Date.parse(completedAt) + options.pollIntervalMs,
+      ).toISOString();
+    }
+    return result;
+  };
 
   const execute = async (attempt: ExecutionAttempt) => {
     const controller = new AbortController();
@@ -407,7 +466,7 @@ export const createWorkerService = (
         executionIdentity: verifiedAttempt.executionIdentity,
         message: `Published ${verifiedAttempt.request.taskId} as draft ${publication.pullRequest.url}.`,
       });
-      return { events, attempted: true };
+      return completeCycle({ events, attempted: true });
     }
     const activeAttempt = persisted.attempts.find(
       (attempt) => attempt.status === "active",
@@ -421,7 +480,7 @@ export const createWorkerService = (
         reasonCode: "manual_intervention",
         message: `Attempt ${activeAttempt.attemptId} may have side effects; inspect its retained worktree and evidence before retrying.`,
       });
-      return { events, attempted: false };
+      return completeCycle({ events, attempted: false });
     }
     if (activeAttempt?.claim?.phase === "claimed") {
       const recovery = (
@@ -448,7 +507,7 @@ export const createWorkerService = (
             ? `Retrying expired unstarted claim ${activeAttempt.attemptId} as ${executableAttempt.attemptId}.`
             : `Resuming retained claim ${activeAttempt.attemptId}.`,
       });
-      return { events, attempted };
+      return completeCycle({ events, attempted });
     }
 
     const tasks = await options.source.discover({
@@ -474,22 +533,7 @@ export const createWorkerService = (
               (attempt) =>
                 attempt.executionIdentity === decision.executionIdentity,
             );
-      const state: WorkerOperationalState =
-        retainedAttempt?.status === "published"
-          ? "published"
-          : retainedAttempt?.status === "verified"
-            ? "verified"
-            : retainedAttempt?.status === "failed" ||
-                retainedAttempt?.status === "interrupted"
-              ? "blocked"
-              : decision.eligible
-                ? "ready"
-                : decision.reasonCode === "unauthorized_repository"
-                  ? "unauthorized"
-                  : decision.reasonCode === "blocked" ||
-                      decision.reasonCode === "unmet_dependency"
-                    ? "blocked"
-                    : "ineligible";
+      const state = operationalStateFor(decision, retainedAttempt);
       await emit({
         state,
         taskId: decision.taskId,
@@ -505,8 +549,9 @@ export const createWorkerService = (
             attempt.executionIdentity === candidate.executionIdentity,
         ),
     );
-    if (request === undefined) return { events, attempted: false };
-    if (stopRequested) return { events, attempted: false };
+    if (request === undefined)
+      return completeCycle({ events, attempted: false });
+    if (stopRequested) return completeCycle({ events, attempted: false });
 
     let attempt;
     try {
@@ -528,7 +573,7 @@ export const createWorkerService = (
           reasonCode: error.code,
           message: error.message,
         });
-        return { events, attempted: false };
+        return completeCycle({ events, attempted: false });
       }
       throw error;
     }
@@ -536,13 +581,18 @@ export const createWorkerService = (
     const attempted = await processClaimedAttempt(attempt, emit, {
       message: `Claimed ${request.taskId}.`,
     });
-    return { events, attempted };
+    return completeCycle({ events, attempted });
   };
 
   const runUnlockedCycle = (): Promise<WorkerCycleResult> => {
-    cycleInFlight ??= performCycle().finally(() => {
-      cycleInFlight = undefined;
-    });
+    cycleInFlight ??= performCycle()
+      .catch((error) => {
+        serviceMode = "unhealthy";
+        throw error;
+      })
+      .finally(() => {
+        cycleInFlight = undefined;
+      });
     return cycleInFlight;
   };
 
@@ -557,9 +607,14 @@ export const createWorkerService = (
       } finally {
         await release();
       }
-    })().finally(() => {
-      cycleInFlight = undefined;
-    });
+    })()
+      .catch((error) => {
+        serviceMode = "unhealthy";
+        throw error;
+      })
+      .finally(() => {
+        cycleInFlight = undefined;
+      });
     return cycleInFlight;
   };
 
@@ -568,21 +623,29 @@ export const createWorkerService = (
     start: () => {
       if (loopInFlight !== undefined) return loopInFlight;
       stopRequested = false;
+      serviceMode = "starting";
       const acquiredLock = acquireServiceLock(options.lockFilePath);
       loopLock = acquiredLock;
       loopInFlight = (async () => {
-        const release = await acquiredLock;
         try {
-          while (!stopRequested) {
-            await runUnlockedCycle();
-            if (stopRequested) break;
-            const controller = new AbortController();
-            pollController = controller;
-            await waitForPoll(options.pollIntervalMs, controller.signal);
-            if (pollController === controller) pollController = undefined;
+          const release = await acquiredLock;
+          try {
+            serviceMode = "running";
+            while (!stopRequested) {
+              await runUnlockedCycle();
+              if (stopRequested) break;
+              const controller = new AbortController();
+              pollController = controller;
+              await waitForPoll(options.pollIntervalMs, controller.signal);
+              if (pollController === controller) pollController = undefined;
+            }
+          } finally {
+            await release();
+            if (serviceIsHealthy()) serviceMode = "stopped";
           }
-        } finally {
-          await release();
+        } catch (error) {
+          serviceMode = "unhealthy";
+          throw error;
         }
       })().finally(() => {
         loopInFlight = undefined;
@@ -593,9 +656,17 @@ export const createWorkerService = (
     },
     stop: async () => {
       stopRequested = true;
+      if (loopInFlight !== undefined) serviceMode = "stopping";
       pollController?.abort(new WorkerServiceShutdownError());
       executionController?.abort(new WorkerServiceShutdownError());
       await (loopInFlight ?? cycleInFlight ?? Promise.resolve());
+      nextExpectedCycle = undefined;
+      if (serviceMode === "stopping") serviceMode = "stopped";
     },
+    status: () => ({
+      mode: serviceMode,
+      ...(lastCompletedCycle === undefined ? {} : { lastCompletedCycle }),
+      ...(nextExpectedCycle === undefined ? {} : { nextExpectedCycle }),
+    }),
   };
 };
