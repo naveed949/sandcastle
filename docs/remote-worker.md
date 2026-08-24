@@ -74,7 +74,7 @@ of scheduling authority.
 The guarded command endpoint is `POST /api/v1/commands` (the compatibility path
 `/api/v1/control` has the same fixed allowlist). Its JSON body must contain
 `commandId`, `expectedRevision`, `command` (`run-now`, `pause`, `resume`,
-`cancel`, `retry`, or `acknowledge` (or `recover` with `recoveryAction`), and a
+`cancel`, `retry`, `acknowledge`, or `recover` with `recoveryAction`), and a
 non-empty operator `reason`;
 cancellation and recovery additionally require `attemptId`. Manual-intervention
 acknowledgement also requires an operator identity. Requests are

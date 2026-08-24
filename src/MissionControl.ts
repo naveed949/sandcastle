@@ -380,41 +380,42 @@ const recoveryWarnings = async (
     ),
   );
   for (const attempt of state.attempts) {
-    if (attempt.status === "active" && attempt.claim !== undefined) {
-      if (attempt.claim.phase === "started") {
+    if (attempt.status === "active" && attempt.claim?.phase === "started") {
+      warnings.push({
+        attemptId: attempt.attemptId,
+        taskId: attempt.request.taskId,
+        reasonCode: "manual_intervention",
+        disposition: "manual_intervention",
+        availableActions: ["acknowledge"],
+        message:
+          "This attempt may have side effects and requires operator review.",
+      });
+      continue;
+    }
+    if (attempt.status === "active" && attempt.claim?.phase === "claimed") {
+      const recovery = expired.get(attempt.attemptId);
+      if (recovery !== undefined) {
         warnings.push({
           attemptId: attempt.attemptId,
           taskId: attempt.request.taskId,
-          reasonCode: "manual_intervention",
-          disposition: "manual_intervention",
-          availableActions: ["acknowledge"],
-          message:
-            "This attempt may have side effects and requires operator review.",
+          reasonCode: recovery.disposition,
+          disposition: recovery.disposition,
+          availableActions:
+            recovery.disposition === "safe_retry" ? ["retry"] : [],
+          message: "This expired claim is retained for worker recovery.",
         });
-      } else {
-        const recovery = expired.get(attempt.attemptId);
-        if (recovery !== undefined) {
-          warnings.push({
-            attemptId: attempt.attemptId,
-            taskId: attempt.request.taskId,
-            reasonCode: recovery.disposition,
-            disposition: recovery.disposition,
-            availableActions:
-              recovery.disposition === "safe_retry" ? ["retry"] : [],
-            message: "This expired claim is retained for worker recovery.",
-          });
-        } else {
-          warnings.push({
-            attemptId: attempt.attemptId,
-            taskId: attempt.request.taskId,
-            reasonCode: "safe_resume",
-            disposition: "safe_resume",
-            availableActions: [],
-            message:
-              "This live unstarted claim is safe to resume; retry is not permitted.",
-          });
-        }
+        continue;
       }
+      warnings.push({
+        attemptId: attempt.attemptId,
+        taskId: attempt.request.taskId,
+        reasonCode: "safe_resume",
+        disposition: "safe_resume",
+        availableActions: [],
+        message:
+          "This live unstarted claim is safe to resume; retry is not permitted.",
+      });
+      continue;
     }
     if (attempt.status === "interrupted") {
       warnings.push({

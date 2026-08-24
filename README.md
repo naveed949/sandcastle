@@ -491,11 +491,11 @@ systemd deployment, backup, upgrade, and failure inspection guidance.
 ### Mission Control production host
 
 `createMissionControlHost()` is the production composition root for the worker
-and its operator overview plus guarded runtime and recovery controls. It constructs the GitHub source, durable
-state store, repository manager, execution engine, draft publisher, diagnostics,
-and `WorkerService` from one central configuration. The same durable root also
-supplies the kernel-owned service lock, so the HTTP surface cannot start a
-second worker loop.
+and its operator overview plus guarded runtime and recovery controls. It
+constructs the GitHub source, durable state store, repository manager, execution
+engine, draft publisher, diagnostics, and `WorkerService` from one central
+configuration. The same durable root also supplies the kernel-owned service
+lock, so the HTTP surface cannot start a second worker loop.
 
 ```typescript
 import { codex, createMissionControlHost } from "@ai-hero/sandcastle";
@@ -568,8 +568,8 @@ source before a new lease is created. A live unstarted claim is shown as
 cannot be retried. `acknowledge` requires an operator identity and reason; it
 records the acknowledgement in the append-only audit without changing the
 attempt, outcome, evidence, lease, branch, record, or task state. Recovery
-rejections include stable `reasonCode` values. The
-request and outcome records are append-only JSONL under the durable
+rejections include stable `reasonCode` values. The request and outcome records
+are append-only JSONL under the durable
 `operator/commands.jsonl` path and redact protected worker material.
 The bundled overview polls that endpoint and adapts from desktop to tablet
 widths. It does not expose task bodies, central configuration, credentials, or

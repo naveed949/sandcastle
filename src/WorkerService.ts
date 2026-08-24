@@ -933,10 +933,13 @@ export const createWorkerService = (
       });
     } catch (error) {
       if (error instanceof WorkerClaimError) {
-        const stale = error.code === "stale_revision";
+        const reasonCode =
+          error.code === "stale_revision"
+            ? "recovery_stale_revision"
+            : "recovery_claim_refresh_failed";
         throw new WorkerRecoveryControlError(
-          stale ? "recovery_stale_revision" : "recovery_claim_refresh_failed",
-          stale ? "recovery_stale_revision" : "recovery_claim_refresh_failed",
+          reasonCode,
+          reasonCode,
           `Safe retry claim refresh failed: ${error.message}`,
         );
       }
@@ -1153,18 +1156,12 @@ export const createWorkerService = (
       }
     })();
     recoveryCycles.set(attemptId, recovery);
-    void recovery.then(
-      () => {
-        if (recoveryCycles.get(attemptId) === recovery) {
-          recoveryCycles.delete(attemptId);
-        }
-      },
-      () => {
-        if (recoveryCycles.get(attemptId) === recovery) {
-          recoveryCycles.delete(attemptId);
-        }
-      },
-    );
+    const forgetRecovery = (): void => {
+      if (recoveryCycles.get(attemptId) === recovery) {
+        recoveryCycles.delete(attemptId);
+      }
+    };
+    void recovery.then(forgetRecovery, forgetRecovery);
     return recovery;
   };
 
@@ -1271,106 +1268,112 @@ export const createWorkerService = (
     ...(reasonCode === undefined ? {} : { reasonCode }),
   });
 
-  const prepareControl = async (
+  const prepareRecoveryControl = async (
     request: WorkerControlRequest,
   ): Promise<PreparedControl> => {
-    if (isRecoveryCommand(request)) {
-      const recoveryAction = recoveryActionFor(request);
-      if (recoveryAction === undefined) {
+    const recoveryAction = recoveryActionFor(request);
+    if (recoveryAction === undefined) {
+      return rejectControl(
+        "recovery_action_required",
+        "A recovery action of retry or acknowledge is required.",
+        "recovery_action_required",
+      );
+    }
+    if (!serviceIsHealthy()) {
+      return rejectControl(
+        "service_unhealthy",
+        "The worker is unhealthy and cannot perform recovery.",
+        "recovery_claim_conflict",
+      );
+    }
+    if (serviceMode === "stopping") {
+      return rejectControl(
+        "recovery_claim_conflict",
+        "The worker is stopping and cannot perform recovery.",
+        "recovery_claim_conflict",
+      );
+    }
+    if (request.attemptId === undefined || request.attemptId.trim() === "") {
+      return rejectControl(
+        "recovery_target_required",
+        "Recovery requires an active attempt ID.",
+        "recovery_target_required",
+      );
+    }
+    if (recoveryAction === "acknowledge") {
+      const operator = operatorFor(request);
+      if (operator === undefined || operator.trim() === "") {
         return rejectControl(
-          "recovery_action_required",
-          "A recovery action of retry or acknowledge is required.",
-          "recovery_action_required",
+          "recovery_operator_required",
+          "Manual-intervention acknowledgement requires an operator identity.",
+          "recovery_operator_required",
         );
       }
-      if (!serviceIsHealthy()) {
-        return rejectControl(
-          "service_unhealthy",
-          "The worker is unhealthy and cannot perform recovery.",
-          "recovery_claim_conflict",
-        );
-      }
-      if (serviceMode === "stopping") {
-        return rejectControl(
-          "recovery_claim_conflict",
-          "The worker is stopping and cannot perform recovery.",
-          "recovery_claim_conflict",
-        );
-      }
-      if (request.attemptId === undefined || request.attemptId.trim() === "") {
-        return rejectControl(
-          "recovery_target_required",
-          "Recovery requires an active attempt ID.",
-          "recovery_target_required",
-        );
-      }
-      if (recoveryAction === "acknowledge") {
-        const operator = operatorFor(request);
-        if (operator === undefined || operator.trim() === "") {
-          return rejectControl(
-            "recovery_operator_required",
-            "Manual-intervention acknowledgement requires an operator identity.",
-            "recovery_operator_required",
-          );
-        }
-      }
+    }
 
-      let inspection: RecoveryInspection;
-      try {
-        inspection = await inspectRecoveryTarget(request.attemptId);
-      } catch (error) {
-        if (error instanceof WorkerRecoveryControlError) {
-          return rejectControl(error.code, error.message, error.reasonCode);
-        }
+    let inspection: RecoveryInspection;
+    try {
+      inspection = await inspectRecoveryTarget(request.attemptId);
+    } catch (error) {
+      if (error instanceof WorkerRecoveryControlError) {
+        return rejectControl(error.code, error.message, error.reasonCode);
+      }
+      return rejectControl(
+        "recovery_claim_conflict",
+        `Recovery state could not be inspected: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        "recovery_claim_conflict",
+      );
+    }
+
+    if (recoveryAction === "retry") {
+      if (inspection.disposition === "safe_resume") {
         return rejectControl(
-          "recovery_claim_conflict",
-          `Recovery state could not be inspected: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-          "recovery_claim_conflict",
+          "recovery_not_expired",
+          `Recovery target ${request.attemptId} has a live unstarted claim and is safe to resume, not retry.`,
+          "safe_resume",
         );
       }
-
-      if (recoveryAction === "retry") {
-        if (inspection.disposition === "safe_resume") {
-          return rejectControl(
-            "recovery_not_expired",
-            `Recovery target ${request.attemptId} has a live unstarted claim and is safe to resume, not retry.`,
-            "safe_resume",
-          );
-        }
-        if (inspection.disposition === "manual_intervention") {
-          return rejectControl(
-            "recovery_manual_intervention",
-            `Recovery target ${request.attemptId} may have side effects and requires manual intervention.`,
-            "manual_intervention",
-          );
-        }
-        return {
-          code: "accepted",
-          message: `Safe retry requested for expired claim ${request.attemptId}.`,
-          accepted: true,
-          action: runRecoveryCycle(request.attemptId).then(() => undefined),
-          attemptId: request.attemptId,
-          reasonCode: "safe_retry",
-        };
-      }
-
-      if (inspection.disposition !== "manual_intervention") {
+      if (inspection.disposition === "manual_intervention") {
         return rejectControl(
-          "recovery_acknowledgement_not_allowed",
-          `Recovery target ${request.attemptId} is classified as ${inspection.disposition}; acknowledgement is only valid for manual intervention.`,
-          inspection.disposition,
+          "recovery_manual_intervention",
+          `Recovery target ${request.attemptId} may have side effects and requires manual intervention.`,
+          "manual_intervention",
         );
       }
       return {
         code: "accepted",
-        message: `Manual intervention acknowledged for ${request.attemptId}; retained evidence was not changed.`,
+        message: `Safe retry requested for expired claim ${request.attemptId}.`,
         accepted: true,
-        action: Promise.resolve(),
+        action: runRecoveryCycle(request.attemptId).then(() => undefined),
         attemptId: request.attemptId,
-        reasonCode: "manual_intervention",
+        reasonCode: "safe_retry",
       };
+    }
+
+    if (inspection.disposition !== "manual_intervention") {
+      return rejectControl(
+        "recovery_acknowledgement_not_allowed",
+        `Recovery target ${request.attemptId} is classified as ${inspection.disposition}; acknowledgement is only valid for manual intervention.`,
+        inspection.disposition,
+      );
+    }
+    return {
+      code: "accepted",
+      message: `Manual intervention acknowledged for ${request.attemptId}; retained evidence was not changed.`,
+      accepted: true,
+      action: Promise.resolve(),
+      attemptId: request.attemptId,
+      reasonCode: "manual_intervention",
+    };
+  };
+
+  const prepareControl = async (
+    request: WorkerControlRequest,
+  ): Promise<PreparedControl> => {
+    if (isRecoveryCommand(request)) {
+      return prepareRecoveryControl(request);
     }
 
     switch (request.command) {
