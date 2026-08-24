@@ -181,6 +181,32 @@ Rollback by stopping the service, restoring the previous release link, and
 starting it again. Restore durable data only when data corruption is confirmed;
 retained recovery classifications should normally be handled in place.
 
+## Mission Control acceptance proof
+
+After deploying the documented systemd unit, run the retained remote probe from
+a maintenance window against a dedicated acceptance task set. It verifies live
+discovery, queue inspection, resumable SSE events, verification evidence,
+draft-only publication, pause/resume, cancellation, safe retry, and
+manual-intervention protection through the HTTP surface. It also checks
+duplicate command responses, publication retry identity, credential redaction,
+restart reconstruction from the same durable root, complete-root backup, and
+release rollback.
+
+Keep the HMAC-bound result at
+`/srv/sandcastle-worker/acceptance/mission-control.json`. Run the probe with:
+
+```bash
+SANDCASTLE_MISSION_CONTROL_ACCEPTANCE_FIXTURE=$PWD/scripts/mission-control-acceptance.fixture.mts \
+SANDCASTLE_MISSION_CONTROL_ACCEPTANCE_SCENARIO=/srv/sandcastle-worker/acceptance/mission-control-scenario.json \
+SANDCASTLE_MISSION_CONTROL_ACCEPTANCE_KEY=... \
+  npm run test:acceptance:mission-control
+```
+
+See [Mission Control remote deployment acceptance](mission-control-acceptance.md)
+for the scenario evidence contract and the complete release gate. A passed
+proof retains the POC limitations instead of implying concurrency, webhook,
+automatic-recovery, merge, or public-ingress support.
+
 ## Failure inspection
 
 Inspect recent state transitions with:

@@ -631,6 +631,28 @@ identities, invalid central configuration, and exact-task sibling access are
 rejected without changing the active policy. Policy administration never
 merges, closes, releases, deploys, verifies, or publishes work.
 
+### Mission Control deployment acceptance
+
+`runMissionControlAcceptanceProof()` is the retained release proof for the
+remote Mission Control host. Its live fixture exercises the running HTML,
+read-model, SSE, evidence, and guarded-command endpoints, then proves restart
+retention, credential redaction, duplicate-command idempotency, and
+draft-publication retry identity. It writes only a safe, HMAC-bound summary:
+
+```bash
+SANDCASTLE_MISSION_CONTROL_ACCEPTANCE_FIXTURE=$PWD/scripts/mission-control-acceptance.fixture.mts \
+SANDCASTLE_MISSION_CONTROL_ACCEPTANCE_SCENARIO=/srv/sandcastle-worker/acceptance/mission-control-scenario.json \
+SANDCASTLE_MISSION_CONTROL_ACCEPTANCE_KEY=... \
+  npm run test:acceptance:mission-control
+```
+
+Use a dedicated acceptance task set because the probe issues real `run-now`,
+pause/resume, cancellation, safe-retry, and manual-acknowledgement commands.
+The default systemd unit remains localhost-bound; use an authenticated VPN,
+SSH tunnel, or trusted reverse proxy for operator access. See
+[Mission Control remote deployment acceptance](docs/mission-control-acceptance.md)
+for the scenario contract and retained limitations.
+
 ### Consolidated retained POC gate
 
 `runWorkerPocGate()` is the final fail-closed acceptance boundary. It performs
@@ -659,7 +681,8 @@ SANDCASTLE_POC_GATE_SCENARIO=/absolute/path/to/poc-gate-scenario.json \
 ```
 
 To execute the complete release gate without allowing missing fixtures to be
-reported as skipped tests, configure all four live fixture variables and run:
+reported as skipped tests, configure every live fixture and scenario variable
+(plus both acceptance keys) and run:
 
 ```bash
 npm run test:acceptance:all

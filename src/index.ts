@@ -333,6 +333,29 @@ export type {
   MissionControlWorkerConfigurationUpdateResult,
   MissionControlPolicyAdministration,
 } from "./MissionControlPolicy.js";
+export {
+  MISSION_CONTROL_ACCEPTANCE_ARTIFACTS,
+  missionControlAcceptanceLimitations,
+  missionControlAcceptanceProofDigest,
+  runMissionControlAcceptanceProof,
+  MissionControlAcceptanceProofError,
+} from "./MissionControlAcceptanceProof.js";
+export type {
+  MissionControlAcceptanceProofErrorCode,
+  MissionControlAcceptanceHttpObservation,
+  MissionControlAcceptanceArtifact,
+  MissionControlAcceptanceCommandObservation,
+  MissionControlAcceptancePublicationObservation,
+  MissionControlAcceptanceDeploymentObservation,
+  MissionControlAcceptanceDurabilityObservation,
+  MissionControlAcceptanceCredentialObservation,
+  MissionControlAcceptanceEvidence,
+  MissionControlAcceptanceStatus,
+  MissionControlAcceptanceChecks,
+  MissionControlAcceptanceLimitation,
+  MissionControlAcceptanceProof,
+  RunMissionControlAcceptanceProofInput,
+} from "./MissionControlAcceptanceProof.js";
 export { runWorkerPocGate, WorkerPocGateError } from "./WorkerPocGate.js";
 export { createWorkerPocBoundaryAuditRecorder } from "./WorkerPocGateAudit.js";
 export { runWorkerRestartAcceptanceProof } from "./WorkerRestartAcceptanceProof.js";
