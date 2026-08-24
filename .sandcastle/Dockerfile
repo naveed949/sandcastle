@@ -25,8 +25,8 @@ ARG AGENT_GID=1000
 RUN groupmod -o -g $AGENT_GID node && usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
 USER ${AGENT_UID}:${AGENT_GID}
 
-# Install Claude Code CLI
-RUN curl -fsSL https://claude.ai/install.sh | bash
+# Install Codex CLI
+RUN npm install -g @openai/codex
 
 # Add Claude to PATH
 ENV PATH="/home/agent/.local/bin:$PATH"

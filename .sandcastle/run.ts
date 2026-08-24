@@ -9,9 +9,15 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
 
   // Phase 1: Plan — orchestrator agent analyzes issues and picks parallelizable work
   const plan = await sandcastle.run({
-    sandbox: docker(),
+    sandbox: docker({
+  mounts: [{
+    hostPath: `${process.env.HOME}/.codex/auth.json`,
+    sandboxPath: "/home/agent/.codex/auth.json",
+    readonly: true,
+  }],
+}),
     name: "Planner",
-    agent: sandcastle.claudeCode("claude-opus-4-8"),
+    agent: sandcastle.codex("gpt-5.6-terra", {effort: "medium",}),
     promptFile: "./.sandcastle/plan-prompt.md",
   });
 
@@ -59,7 +65,13 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
       await acquire();
       try {
         await using sandbox = await sandcastle.createSandbox({
-          sandbox: docker(),
+          sandbox: docker({
+  mounts: [{
+    hostPath: `${process.env.HOME}/.codex/auth.json`,
+    sandboxPath: "/home/agent/.codex/auth.json",
+    readonly: true,
+  }],
+}),
           branch: issue.branch,
           copyToWorktree: ["node_modules"],
           hooks: {
@@ -71,7 +83,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
 
         const result = await sandbox.run({
           name: "Implementer #" + issue.number,
-          agent: sandcastle.claudeCode("claude-opus-4-8"),
+          agent: sandcastle.codex("gpt-5.6-luna", {effort: "max",}),
           promptFile: "./.sandcastle/implement-prompt.md",
           promptArgs: {
             TASK_ID: String(issue.number),
@@ -83,7 +95,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
         if (result.commits.length > 0) {
           await sandbox.run({
             name: "Reviewer #" + issue.number,
-            agent: sandcastle.claudeCode("claude-opus-4-8"),
+            agent: sandcastle.codex("gpt-5.6-sol", {effort: "medium",}),
             promptFile: "./.sandcastle/review-prompt.md",
             promptArgs: {
               TASK_ID: String(issue.number),
@@ -140,10 +152,16 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
 
   // Phase 3: Merge — one agent merges all branches together
   await sandcastle.run({
-    sandbox: docker(),
+    sandbox: docker({
+  mounts: [{
+    hostPath: `${process.env.HOME}/.codex/auth.json`,
+    sandboxPath: "/home/agent/.codex/auth.json",
+    readonly: true,
+  }],
+}),
     name: "Merger",
     maxIterations: 10,
-    agent: sandcastle.claudeCode("claude-opus-4-8"),
+    agent: sandcastle.codex("gpt-5.6-terra"),
     promptFile: "./.sandcastle/merge-prompt.md",
     promptArgs: {
       BRANCHES: completedBranches.map((b) => `- ${b}`).join("\n"),
