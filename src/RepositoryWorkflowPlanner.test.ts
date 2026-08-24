@@ -11,6 +11,7 @@ import {
 import {
   createRepositoryWorkflowPlanStore,
   createRepositoryWorkflowPlanner,
+  expandRepositoryWorkflowPlannerPrompt,
   planOneEligibleTask,
   RepositoryWorkflowPlannerContextError,
   type RepositoryWorkflowPlanningInput,
@@ -199,6 +200,28 @@ describe("createRepositoryWorkflowPlanner", () => {
     expect(invoke).toHaveBeenCalledOnce();
   });
 
+  it("preserves placeholder-looking text inside the immutable task snapshot", () => {
+    const base = input();
+    const markedTask = {
+      ...task,
+      body: "Keep the {{DEPENDENCY_EVIDENCE}} marker as task content.",
+    };
+    const expanded = expandRepositoryWorkflowPlannerPrompt({
+      ...base,
+      taskSnapshot: markedTask,
+      attempt: {
+        ...base.attempt,
+        request: { ...base.attempt.request, task: markedTask },
+        claim: { ...base.attempt.claim!, refreshedSnapshots: [markedTask] },
+      },
+      eligibility: { ...base.eligibility, task: markedTask },
+    });
+
+    expect(expanded).toContain(
+      '"body": "Keep the {{DEPENDENCY_EVIDENCE}} marker as task content."',
+    );
+  });
+
   it("rejects reuse of a plan ID with different immutable input", async () => {
     const directory = await mkdtemp(
       join(tmpdir(), "repository-planner-plan-conflict-"),
@@ -304,6 +327,36 @@ describe("createRepositoryWorkflowPlanner", () => {
     expect(receivedSignal.aborted).toBe(true);
   });
 
+  it("preserves timeout classification when the invoker rejects on abort", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "repository-planner-timeout-abort-"),
+    );
+    directories.push(directory);
+    const planStore = createRepositoryWorkflowPlanStore({
+      store: createRepositoryWorkflowStore({
+        filePath: join(directory, "workflows.json"),
+      }),
+    });
+    const planner = createRepositoryWorkflowPlanner({
+      invoke: ({ signal }) =>
+        new Promise<never>((_, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => reject(new Error("agent observed abort")),
+            { once: true },
+          );
+        }),
+      planStore,
+      timeoutMs: 5,
+    });
+
+    await expect(planner.plan(input())).resolves.toMatchObject({
+      status: "timed_out",
+      recovery: "resumable",
+      error: { code: "planner_timeout" },
+    });
+  });
+
   it("fails the stage explicitly when the structured plan is malformed", async () => {
     const directory = await mkdtemp(
       join(tmpdir(), "repository-planner-invalid-"),
@@ -381,6 +434,46 @@ describe("createRepositoryWorkflowPlanner", () => {
       new RepositoryWorkflowPlannerContextError(
         "missing_context",
         "Planner requires claim-time task snapshot evidence.",
+      ),
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    expect(await planStore.list()).toEqual([]);
+  });
+
+  it("rejects unrelated claim-time snapshots before invoking the planner", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "repository-planner-unrelated-claim-context-"),
+    );
+    directories.push(directory);
+    const planStore = createRepositoryWorkflowPlanStore({
+      store: createRepositoryWorkflowStore({
+        filePath: join(directory, "workflows.json"),
+      }),
+    });
+    const invoke = vi.fn(async () => ({ stdout: "" }));
+    const planner = createRepositoryWorkflowPlanner({ invoke, planStore });
+    const unrelated = {
+      ...task,
+      number: 99,
+      title: "An unrelated task",
+      sourceRevision: "issue:99:rev-1",
+    };
+
+    await expect(
+      planner.plan({
+        ...input(),
+        attempt: {
+          ...input().attempt,
+          claim: {
+            ...input().attempt.claim!,
+            refreshedSnapshots: [task, unrelated],
+          },
+        },
+      }),
+    ).rejects.toMatchObject(
+      new RepositoryWorkflowPlannerContextError(
+        "invalid_context",
+        "Planner claim-time snapshots contain an unrelated task.",
       ),
     );
     expect(invoke).not.toHaveBeenCalled();

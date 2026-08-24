@@ -827,6 +827,19 @@ const validateInput = (
       "Planner task snapshot does not match the claim-time refresh.",
     );
   }
+  const authoritativeSnapshotIds = new Set([
+    workerTaskId(task),
+    ...task.dependencies.map(workerTaskId),
+    ...(task.parentPrd === undefined ? [] : [workerTaskId(task.parentPrd)]),
+  ]);
+  for (const snapshotId of claimSnapshotIds) {
+    if (!authoritativeSnapshotIds.has(snapshotId)) {
+      throw new RepositoryWorkflowPlannerContextError(
+        "invalid_context",
+        "Planner claim-time snapshots contain an unrelated task.",
+      );
+    }
+  }
   requirePositiveInteger(input.repositoryWorkflow.cycle, "workflow cycle");
   requirePositiveInteger(
     input.repositoryWorkflow.revision,
@@ -864,11 +877,11 @@ export const expandRepositoryWorkflowPlannerPrompt = (
     ),
     DEPENDENCY_EVIDENCE: JSON.stringify(dependencyEvidence, null, 2),
   };
-  let prompt = input.promptTemplate;
-  for (const [key, value] of Object.entries(replacements)) {
-    prompt = prompt.replaceAll(`{{${key}}}`, value);
-  }
-  return prompt;
+  return input.promptTemplate.replace(
+    /\{\{(REPOSITORY|TASK_ID|TASK_SNAPSHOT|REPOSITORY_PROFILE|BASE_REVISION|DEPENDENCY_EVIDENCE)\}\}/g,
+    (_match, marker: string) =>
+      replacements[marker as keyof typeof replacements]!,
+  );
 };
 
 const systemEvidenceFor = (
@@ -927,15 +940,27 @@ const invokeWithControls = async (
   const controller = new AbortController();
   let timer: NodeJS.Timeout | undefined;
   let removeAbortListener: (() => void) | undefined;
+  let controlError: PlannerCancellationError | PlannerTimeoutError | undefined;
+  const abortWith = (
+    error: PlannerCancellationError | PlannerTimeoutError,
+    reason: unknown = error,
+  ): PlannerCancellationError | PlannerTimeoutError => {
+    if (controlError === undefined) {
+      controlError = error;
+      controller.abort(reason);
+    }
+    return controlError;
+  };
   const cancellation = new Promise<never>((_, reject) => {
     if (signal?.aborted) {
-      reject(new PlannerCancellationError(signal.reason));
+      reject(abortWith(new PlannerCancellationError(signal.reason)));
       return;
     }
     if (signal !== undefined) {
       const onAbort = () => {
-        controller.abort(signal.reason);
-        reject(new PlannerCancellationError(signal.reason));
+        reject(
+          abortWith(new PlannerCancellationError(signal.reason), signal.reason),
+        );
       };
       signal.addEventListener("abort", onAbort, { once: true });
       removeAbortListener = () => signal.removeEventListener("abort", onAbort);
@@ -944,11 +969,19 @@ const invokeWithControls = async (
   if (signal?.aborted) {
     throw new PlannerCancellationError(signal.reason);
   }
-  const invocation = invoke({ prompt, signal: controller.signal });
+  const invocation = invoke({ prompt, signal: controller.signal }).then(
+    (result) => {
+      if (controlError !== undefined) throw controlError;
+      return result;
+    },
+    (error) => {
+      if (controlError !== undefined) throw controlError;
+      throw error;
+    },
+  );
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      controller.abort(new PlannerTimeoutError(timeoutMs));
-      reject(new PlannerTimeoutError(timeoutMs));
+      reject(abortWith(new PlannerTimeoutError(timeoutMs)));
     }, timeoutMs);
   });
   try {
