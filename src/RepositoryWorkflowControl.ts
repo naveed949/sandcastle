@@ -137,6 +137,12 @@ const normalizeRepository = (repository: string): string => {
   return normalized;
 };
 
+const throwIfWorkflowCancelled = (signal?: AbortSignal): void => {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  throw new Error("Repository workflow was cancelled.");
+};
+
 /** Operator control plane for independent repository workflows. */
 export const createRepositoryWorkflowControl = (
   options: RepositoryWorkflowControlOptions,
@@ -214,11 +220,7 @@ export const createRepositoryWorkflowControl = (
       const workflow = options.workflows[configured.workflowId];
       if (workflow === undefined)
         throw new Error(`Unknown workflow ${configured.workflowId}.`);
-      if (signal?.aborted) {
-        throw signal.reason instanceof Error
-          ? signal.reason
-          : new Error("Repository workflow was cancelled.");
-      }
+      throwIfWorkflowCancelled(signal);
       const id = createId();
       const startedAt = now();
       let claimed!: AuthorizedRepositoryWorkflow;
@@ -265,11 +267,7 @@ export const createRepositoryWorkflowControl = (
         };
       });
       try {
-        if (signal?.aborted) {
-          throw signal.reason instanceof Error
-            ? signal.reason
-            : new Error("Repository workflow was cancelled.");
-        }
+        throwIfWorkflowCancelled(signal);
         const cycle = await options.runtime.runCycle({
           repository: claimed.repository,
           featureBranch: claimed.featureBranch,

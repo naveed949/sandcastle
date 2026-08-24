@@ -10,13 +10,19 @@ export type RepositoryWorkflowCoordinatorMode =
   | "stopping"
   | "unhealthy";
 
+/** Operator-visible lifecycle state for the repository workflow coordinator. */
 export interface RepositoryWorkflowCoordinatorStatus {
+  /** Current coordinator lifecycle mode. */
   readonly mode: RepositoryWorkflowCoordinatorMode;
+  /** Repository whose workflow is currently executing, when one is active. */
   readonly activeRepository?: string;
+  /** Completion time of the most recent polling cycle. */
   readonly lastCycleAt?: string;
+  /** Most recent coordinator error. */
   readonly lastError?: string;
 }
 
+/** Host-owned scheduler for globally serialized repository workflows. */
 export interface RepositoryWorkflowCoordinator {
   /** The operator control surface, with dispatch gated by coordinator state. */
   readonly control: RepositoryWorkflowControl;
@@ -26,15 +32,21 @@ export interface RepositoryWorkflowCoordinator {
   start(): Promise<void>;
   /** Stop polling, cancel the active workflow, and await its durable outcome. */
   stop(): Promise<void>;
+  /** Return current lifecycle and active-dispatch health. */
   status(): RepositoryWorkflowCoordinatorStatus;
 }
 
+/** Dependencies and lifecycle settings for a repository workflow coordinator. */
 export interface RepositoryWorkflowCoordinatorOptions {
+  /** Durable repository workflow control plane used for dispatch. */
   readonly control: RepositoryWorkflowControl;
+  /** Delay between completed polling cycles. */
   readonly pollIntervalMs?: number;
   /** Maximum time to wait for a cancelled workflow to persist its outcome. */
   readonly shutdownTimeoutMs?: number;
+  /** Clock used for operator-visible cycle timestamps. */
   readonly now?: () => string;
+  /** Error observer for repository-specific and coordinator-wide failures. */
   readonly onError?: (repository: string, error: unknown) => void;
 }
 
@@ -88,22 +100,21 @@ export const createRepositoryWorkflowCoordinator = (
   let lastCycleAt: string | undefined;
   let lastError: string | undefined;
 
-  const clearTimer = (): void => {
+  function clearTimer(): void {
     if (timer !== undefined) clearTimeout(timer);
     timer = undefined;
-  };
+  }
 
-  const schedule = (milliseconds: number): void => {
+  function schedule(milliseconds: number): void {
     if (mode !== "running" || timer !== undefined) return;
     timer = setTimeout(() => {
       timer = undefined;
       void runCycle().catch(() => undefined);
     }, milliseconds);
     timer.unref();
-  };
+  }
 
-  let runCycle: () => Promise<void>;
-  runCycle = (): Promise<void> => {
+  function runCycle(): Promise<void> {
     if (cycleInFlight !== undefined) return cycleInFlight;
     if (mode !== "running") {
       return Promise.reject(
@@ -148,7 +159,7 @@ export const createRepositoryWorkflowCoordinator = (
         throw error;
       });
     return cycleInFlight;
-  };
+  }
 
   const start = (): Promise<void> => {
     if (mode === "running") return Promise.resolve();
