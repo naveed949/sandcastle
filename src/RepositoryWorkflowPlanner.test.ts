@@ -797,4 +797,80 @@ describe("createRepositoryWorkflowPlanner", () => {
     expect((await workerStore.read()).attempts[0]?.status).toBe("active");
     expect(source.read).toHaveBeenCalledOnce();
   });
+
+  it("retains authorization from the claim-time eligibility refresh", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "repository-planner-claim-authorization-"),
+    );
+    directories.push(directory);
+    const workerStore = createWorkerStateStore({
+      filePath: join(directory, "worker.json"),
+    });
+    const workflowStore = createRepositoryWorkflowStore({
+      filePath: join(directory, "workflows.json"),
+    });
+    const planStore = createRepositoryWorkflowPlanStore({
+      store: workflowStore,
+    });
+    const configuration = {
+      repositories: {
+        "acme/one": {
+          authorized: true,
+          baseBranch: "main",
+          profileId: "node-v1",
+        },
+      },
+      authorizedTasks: [
+        { repository: "acme/one", kind: "issue" as const, number: 23 },
+      ],
+      promptVersion: "worker-v1",
+      promptTemplates: { "worker-v1": "{{TASK_SNAPSHOT}}" },
+      profiles: {
+        "node-v1": {
+          setupCommands: [],
+          verificationCommands: ["npm test"],
+        },
+      },
+    };
+    const source = {
+      discover: vi.fn(async () => [task]),
+      read: vi.fn(async () => {
+        configuration.repositories["acme/one"].authorized = false;
+        return { task, relatedTasks: [] };
+      }),
+    };
+    const planner = createRepositoryWorkflowPlanner({
+      invoke: async () => ({
+        stdout: `<plan>${JSON.stringify({
+          version: 1,
+          taskIntent: "Plan the freshly authorized task.",
+          proposedWork: ["Retain claim-time authorization."],
+          verificationStrategy: ["Inspect the retained provenance."],
+          risks: [],
+          evidence: [],
+          needsHumanClarification: false,
+        })}</plan>`,
+      }),
+      planStore,
+    });
+
+    const result = await planOneEligibleTask({
+      repository: "acme/one",
+      repositoryWorkflow: {
+        workflowIdentity: "acme/one:workflow-v1",
+        cycle: 1,
+        revision: 1,
+      },
+      configuration,
+      source,
+      store: workerStore,
+      planner,
+      owner: "planner",
+      leaseDurationMs: 60_000,
+      promptVersion: "planner-v1",
+      promptTemplate: "Repository {{REPOSITORY}} Task {{TASK_SNAPSHOT}}",
+    });
+
+    expect(result.record?.input.authorization).toBe("task");
+  });
 });

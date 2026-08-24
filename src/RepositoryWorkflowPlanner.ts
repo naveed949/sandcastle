@@ -1257,12 +1257,40 @@ export const planOneEligibleTask = async (
     owner: options.owner,
     leaseDurationMs: options.leaseDurationMs,
   });
+  const claimSnapshots = attempt.claim?.refreshedSnapshots;
+  if (claimSnapshots === undefined) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "missing_context",
+      "Planner requires claim-time task snapshot evidence.",
+    );
+  }
+  const claimRefresh = runWorkerDryRun({
+    configuration: options.configuration,
+    tasks: claimSnapshots,
+  });
+  const claimDecision = claimRefresh.decisions.find(
+    (candidate) => candidate.taskId === attempt.request.taskId,
+  );
+  const claimRequest = claimRefresh.executionRequests.find(
+    (candidate) => candidate.taskId === attempt.request.taskId,
+  );
+  if (
+    claimDecision === undefined ||
+    !claimDecision.eligible ||
+    claimRequest === undefined ||
+    claimRequest.executionIdentity !== attempt.request.executionIdentity
+  ) {
+    throw new RepositoryWorkflowPlannerContextError(
+      "invalid_context",
+      "Planner claim-time eligibility does not match the claimed execution request.",
+    );
+  }
   const record = await options.planner.plan({
     repository,
     repositoryWorkflow: options.repositoryWorkflow,
     attempt,
-    taskSnapshot: request.task,
-    eligibility: decision,
+    taskSnapshot: claimRequest.task,
+    eligibility: claimDecision,
     promptVersion: options.promptVersion,
     promptTemplate: options.promptTemplate,
     signal: options.signal,
