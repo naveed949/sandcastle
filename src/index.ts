@@ -264,6 +264,8 @@ export type {
   WorkerCycleResult,
   WorkerService,
   WorkerServiceOptions,
+  WorkerConfigurationUpdateRequest,
+  WorkerConfigurationUpdateOutcome,
 } from "./WorkerService.js";
 export {
   createMissionControlHost,
@@ -282,6 +284,33 @@ export type {
   MissionControlListeningAddress,
   MissionControlHost,
 } from "./MissionControl.js";
+export {
+  createMissionControlPolicyAdministration,
+  normalizeMissionControlPolicy,
+  readMissionControlPolicyConfiguration,
+  writeMissionControlPolicyConfiguration,
+  MissionControlPolicyError,
+} from "./MissionControlPolicy.js";
+export type {
+  MissionControlRepositoryPolicyView,
+  MissionControlExecutionProfileView,
+  MissionControlPromptArtifactView,
+  MissionControlPolicySnapshot,
+  MissionControlPolicyInspection,
+  MissionControlPolicyValidation,
+  MissionControlPolicyDiffEntry,
+  MissionControlPolicyDryRunDecision,
+  MissionControlPolicyDryRunSummary,
+  MissionControlPolicyDryRunImpact,
+  MissionControlPolicyPreview,
+  MissionControlPolicyApplyRequest,
+  MissionControlPolicyApplyOutcomeCode,
+  MissionControlPolicyApplyOutcome,
+  MissionControlPolicyAdministrationOptions,
+  MissionControlWorkerConfigurationUpdateRequest,
+  MissionControlWorkerConfigurationUpdateResult,
+  MissionControlPolicyAdministration,
+} from "./MissionControlPolicy.js";
 export { runWorkerPocGate, WorkerPocGateError } from "./WorkerPocGate.js";
 export { createWorkerPocBoundaryAuditRecorder } from "./WorkerPocGateAudit.js";
 export { runWorkerRestartAcceptanceProof } from "./WorkerRestartAcceptanceProof.js";

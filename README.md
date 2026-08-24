@@ -567,6 +567,43 @@ widths. It does not expose task bodies, central configuration, credentials, or
 arbitrary filesystem content. Set `server.bindAddress` explicitly only when an
 operator-controlled private ingress requires a non-loopback interface.
 
+Mission Control also exposes staged, server-owned policy administration.
+`GET /api/v1/policy` returns the current repository grants, exact-task grants,
+dependency edges, execution-profile summaries, and prompt-artifact digests
+without returning prompt contents or protected command material. Submit a
+candidate to `POST /api/v1/policy/validate`, then
+`POST /api/v1/policy/preview` to receive a deterministic semantic diff and a
+redacted dry-run impact over retained task snapshots. Apply only the returned
+preview with `POST /api/v1/policy/apply`:
+
+```typescript
+const preview = await fetch("http://127.0.0.1:3000/api/v1/policy/preview", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ configuration: proposedPolicy }),
+}).then((response) => response.json());
+
+await fetch("http://127.0.0.1:3000/api/v1/policy/apply", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({
+    configuration: proposedPolicy,
+    previewId: preview.previewId,
+    commandId: "policy-change-2026-08-24",
+    expectedWorkerRevision: preview.workerRevision,
+    reason: "Authorize the reviewed task grant",
+  }),
+});
+```
+
+The policy file defaults to `policy/worker.json` under `workspaceRoot` and is
+written through a same-directory temporary file and rename. Policy previews,
+requests, and outcomes share the append-only operator audit by default; a
+successful apply returns an `auditReference`. Stale revisions, unpreviewed
+identities, invalid central configuration, and exact-task sibling access are
+rejected without changing the active policy. Policy administration never
+merges, closes, releases, deploys, verifies, or publishes work.
+
 ### Consolidated retained POC gate
 
 `runWorkerPocGate()` is the final fail-closed acceptance boundary. It performs
