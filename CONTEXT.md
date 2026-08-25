@@ -196,6 +196,24 @@ _Avoid_: "log file" (too generic), "output file"
 The display mode where Sandcastle renders an interactive UI in the terminal with spinners and styled status messages.
 _Avoid_: "stdout mode", "interactive mode", "CLI mode" (ambiguous with the CLI itself)
 
+### Mission Control
+
+**Mission Control**:
+A self-hosted background service and web UI that drives **Sandcastle** runs on cloned target repos to implement a **PRD**'s tickets in dependency order, landing all work on a feature branch and opening a final PR.
+_Avoid_: "MC", "dashboard", "orchestration server"
+
+**Project (Mission Control)**:
+A single submission to **Mission Control** -- a target repo URL, base branch, feature branch name, PRD issue, and a provided **config directory**. One Project produces one PR.
+_Avoid_: "job", "submission" (after creation)
+
+**Ticket frontier**:
+The set of a **Project**'s tickets whose blocking tickets are all done -- implementable right now.
+_Avoid_: "ready queue"
+
+**Reviewer pass**:
+A second agent invocation inside the same sandbox that reviews the implementation run's diff and returns a structured verdict; feedback feeds bounded fix iterations before merge.
+_Avoid_: "code review" (ambiguous with human PR review)
+
 **Agent stream event**:
 A single item in the **agent**'s output stream -- either a `text` chunk or a `toolCall` -- surfaced to the caller of `run()` so the stream can be forwarded to an external observability system. Available only in **log-to-file mode** via the `onAgentStreamEvent` callback on the `logging` option. Each event carries its `iteration` number and a `timestamp`.
 _Avoid_: "log event" (the log file contains more than just agent output), "display entry" (internal UI type)

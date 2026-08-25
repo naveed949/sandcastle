@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mission Control</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Mission<span>Control</span></h1>
+    <div class="preflight" id="preflight" title="Checking environment...">
+      <span class="dot amber" id="preflight-dot"></span>
+      <span id="preflight-label">checking…</span>
+    </div>
+  </header>
+
+  <main>
+    <section id="list-view">
+      <div style="display:flex; align-items:center; margin-top:8px;">
+        <h2 class="section" style="margin:0;">Projects</h2>
+        <button class="primary" id="btn-new" style="margin-left:auto;">+ New project</button>
+      </div>
+      <div class="grid" id="project-grid" style="margin-top:16px;"></div>
+    </section>
+
+    <section id="detail-view" style="display:none;">
+      <div class="detail-head">
+        <button class="back" id="btn-back" title="Back to projects">←</button>
+        <h2 id="detail-title"></h2>
+        <div class="head-actions">
+          <button class="danger" id="btn-cancel">Cancel</button>
+          <button id="btn-retry">Retry</button>
+          <a id="btn-pr" target="_blank"><button>Open PR ↗</button></a>
+        </div>
+      </div>
+      <div id="detail-status"></div>
+      <div id="stage-stepper" class="stepper"></div>
+      <div id="detail-banner"></div>
+
+      <h2 class="section">Tickets</h2>
+      <table class="tickets">
+        <thead><tr><th>#</th><th>Ticket</th><th>Status</th><th>Blocked by</th></tr></thead>
+        <tbody id="ticket-rows"></tbody>
+      </table>
+
+      <h2 class="section">Agents</h2>
+      <div class="grid" id="agent-grid"></div>
+
+      <h2 class="section" id="log-title">Pipeline output</h2>
+      <div class="term-bar">
+        <span id="run-info">no run yet</span>
+        <label class="toggle"><input type="checkbox" id="autoscroll" checked /> autoscroll</label>
+      </div>
+      <div class="terminal" id="terminal">&nbsp;</div>
+    </section>
+  </main>
+
+  <dialog id="new-project">
+    <form id="new-project-form">
+      <h3>New project</h3>
+      <label>Repo (URL or owner/repo)
+        <input name="repo_url" required placeholder="naveed949/sandcastle" />
+      </label>
+      <label>Base branch
+        <input name="base_branch" required value="main" />
+      </label>
+      <label>Feature branch
+        <input name="feature_branch" required placeholder="feat/my-prd" />
+      </label>
+      <label>PRD issue URL
+        <input name="prd_issue_url" required placeholder="https://github.com/owner/repo/issues/123" />
+      </label>
+      <label>.sandcastle bundle (.tar.gz — optional, uses bundled template otherwise)
+        <input name="sandcastle_dir" type="file" accept=".gz,.tgz,.tar.gz" />
+      </label>
+      <div class="error-text" id="form-error"></div>
+      <div class="form-actions">
+        <button type="button" id="btn-cancel-form">Cancel</button>
+        <button type="submit" class="primary" id="btn-submit">Submit</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toasts"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
