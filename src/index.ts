@@ -33,6 +33,132 @@ export type {
 } from "./createWorktree.js";
 export type { PromptArgs } from "./PromptArgumentSubstitution.js";
 export type { AgentStreamEvent } from "./AgentStreamEmitter.js";
+export { createRepositoryWorkflowRuntime } from "./RepositoryWorkflowRuntime.js";
+export type {
+  RepositoryWorkflowAgent,
+  RepositoryWorkflowDefinition,
+  RepositoryWorkflowIssue,
+  RepositoryWorkflowCycleInput,
+  RepositoryWorkflowAgentResult,
+  RepositoryWorkflowPlanner,
+  RepositoryWorkflowTaskRunner,
+  RepositoryWorkflowIntegrator,
+  RepositoryWorkflowIssueTracker,
+  RepositoryWorkflowTaskResult,
+  RepositoryWorkflowCycleResult,
+  RepositoryWorkflowRuntime,
+  RepositoryWorkflowRuntimeOptions,
+} from "./RepositoryWorkflowRuntime.js";
+export {
+  createRepositoryWorkflowControl,
+  createRepositoryWorkflowStore,
+  repositoryWorkflowIdentity,
+  RepositoryWorkflowStoreError,
+} from "./RepositoryWorkflowControl.js";
+export type {
+  RepositoryWorkflowMode,
+  RepositoryWorkflowRecoveryDisposition,
+  RepositoryWorkflowRunStatus,
+  RepositoryWorkflowClaim,
+  RepositoryWorkflowFailure,
+  AuthorizedRepositoryWorkflow,
+  RepositoryWorkflowRunRecord,
+  RepositoryWorkflowState,
+  RepositoryWorkflowStore,
+  RepositoryWorkflowStoreOptions,
+  RepositoryWorkflowStoreUpdateOptions,
+  AuthorizeRepositoryWorkflowInput,
+  RepositoryWorkflowMutationOptions,
+  RepositoryWorkflowRunOptions,
+  RepositoryWorkflowInspection,
+  RepositoryWorkflowQueueEntry,
+  RepositoryWorkflowProjectionTask,
+  RepositoryWorkflowProjectionEntry,
+  RepositoryWorkflowRecovery,
+  RepositoryWorkflowProjection,
+  RepositoryWorkflowControl,
+  RepositoryWorkflowControlOptions,
+} from "./RepositoryWorkflowControl.js";
+export { createRepositoryWorkflowCoordinator } from "./RepositoryWorkflowCoordinator.js";
+export type {
+  RepositoryWorkflowCoordinator,
+  RepositoryWorkflowCoordinatorMode,
+  RepositoryWorkflowCoordinatorOptions,
+  RepositoryWorkflowCoordinatorStatus,
+} from "./RepositoryWorkflowCoordinator.js";
+export {
+  createRepositoryWorkflowPlanStore,
+  createRepositoryWorkflowPlanner,
+  expandRepositoryWorkflowPlannerPrompt,
+  planOneEligibleTask,
+  RepositoryWorkflowPlannerContextError,
+} from "./RepositoryWorkflowPlanner.js";
+export { projectRepositoryWorkflowPlan } from "./RepositoryWorkflowPlanProjection.js";
+export {
+  createRepositoryWorkflowImplementer,
+  RepositoryWorkflowImplementerContextError,
+} from "./RepositoryWorkflowImplementer.js";
+export type {
+  RepositoryWorkflowImplementationStatus,
+  RepositoryWorkflowImplementationRecovery,
+  RepositoryWorkflowImplementationReasonCode,
+  RepositoryWorkflowImplementationInput,
+  RepositoryWorkflowImplementationIdentity,
+  RepositoryWorkflowImplementationRecord,
+} from "./RepositoryWorkflowImplementer.js";
+export {
+  createRepositoryWorkflowReviewStore,
+  createRepositoryWorkflowReviewer,
+  expandRepositoryWorkflowReviewerPrompt,
+  reviewAndRemediate,
+  RepositoryWorkflowReviewerContextError,
+} from "./RepositoryWorkflowReview.js";
+export type {
+  RepositoryWorkflowReviewStatus,
+  RepositoryWorkflowReviewRecovery,
+  RepositoryWorkflowReviewFinding,
+  RepositoryWorkflowReviewerOutput,
+  RepositoryWorkflowReviewRecord,
+  RepositoryWorkflowReviewProjection,
+  RepositoryWorkflowReviewerInvoker,
+  RepositoryWorkflowReviewStore,
+  RepositoryWorkflowReviewInput,
+  RepositoryWorkflowReviewerOptions,
+  RepositoryWorkflowReviewerStage,
+  RepositoryWorkflowRemediator,
+  RepositoryWorkflowReviewOutcome,
+  ReviewAndRemediateResult,
+  ReviewAndRemediateOptions,
+} from "./RepositoryWorkflowReview.js";
+export type {
+  RepositoryWorkflowPlanStatus,
+  RepositoryWorkflowPlanRecovery,
+  RepositoryWorkflowDependencyEvidence,
+  RepositoryWorkflowPlanEvidence,
+  RepositoryWorkflowPlanIdentity,
+  RepositoryWorkflowPlanBaseContext,
+  RepositoryWorkflowPlannerOutput,
+  RepositoryWorkflowPlan,
+  RepositoryWorkflowPlanInput,
+  RepositoryWorkflowPlanRecord,
+  RepositoryWorkflowPlanProjection,
+  RepositoryWorkflowPlannerInvocation,
+  RepositoryWorkflowPlannerInvocationResult,
+  RepositoryWorkflowPlannerInvoker,
+  RepositoryWorkflowPlanStore,
+  RepositoryWorkflowPlanStoreOptions,
+  RepositoryWorkflowPlanningInput,
+  RepositoryWorkflowPlannerOptions,
+  RepositoryWorkflowPlannerStage,
+  PlanOneEligibleTaskOptions,
+  PlanOneEligibleTaskResult,
+} from "./RepositoryWorkflowPlanner.js";
+export { createRepositoryWorkflowSupervisor } from "./RepositoryWorkflowSupervisor.js";
+export type {
+  RepositoryWorkflowSupervisorControl,
+  RepositoryWorkflowSupervisor,
+  RepositoryWorkflowSupervisorOptions,
+} from "./RepositoryWorkflowSupervisor.js";
 export {
   transferClaudeSession,
   transferCodexSession,
@@ -241,20 +367,125 @@ export type {
 export {
   createJsonlWorkerDiagnostics,
   createWorkerService,
+  acquireWorkerServiceLock,
   workerServicePaths,
   WorkerExecutionTimeoutError,
+  WorkerServiceOperatorCancellationError,
+  WorkerRecoveryControlError,
   WorkerServiceLockError,
   WorkerServiceShutdownError,
 } from "./WorkerService.js";
 export type {
   WorkerOperationalState,
+  WorkerServiceMode,
+  WorkerControlCommand,
+  WorkerRecoveryAction,
+  WorkerRecoveryDisposition,
+  WorkerRecoveryReasonCode,
+  WorkerControlOutcomeCode,
+  WorkerControlInput,
+  WorkerControlRequest,
+  WorkerControlOutcome,
+  WorkerControlAuditRecord,
+  WorkerServiceControl,
+  WorkerServiceStatus,
   WorkerDiagnostic,
   WorkerDiagnostics,
   WorkerServicePaths,
   WorkerCycleResult,
   WorkerService,
   WorkerServiceOptions,
+  WorkerConfigurationUpdateRequest,
+  WorkerConfigurationUpdateOutcome,
 } from "./WorkerService.js";
+export {
+  createMissionControlHost,
+  createMissionControlReadModel,
+  validateMissionControlConfiguration,
+  MissionControlConfigurationError,
+} from "./MissionControl.js";
+export type {
+  MissionControlServerOptions,
+  MissionControlConfiguration,
+  MissionControlHostBoundaries,
+  MissionControlHostOptions,
+  MissionControlOrchestrationMode,
+  MissionControlComponentHealth,
+  MissionControlOrchestrationHealth,
+  MissionControlActiveAttempt,
+  MissionControlRecoveryWarning,
+  MissionControlOperationalStateCounts,
+  MissionControlOverview,
+  MissionControlListeningAddress,
+  MissionControlHost,
+  MissionControlAttemptSummary,
+  MissionControlAttemptTimelineEntry,
+  MissionControlAttemptView,
+  MissionControlClaimView,
+  MissionControlCommandEvidence,
+  MissionControlEligibility,
+  MissionControlEventRecord,
+  MissionControlEvidenceContent,
+  MissionControlEvidenceReference,
+  MissionControlExecutionInspection,
+  MissionControlQueue,
+  MissionControlQueueEntry,
+  MissionControlReadModel,
+  MissionControlReadModelOptions,
+  MissionControlTaskInbox,
+  MissionControlTaskReference,
+  MissionControlTaskView,
+} from "./MissionControl.js";
+export {
+  createMissionControlPolicyAdministration,
+  normalizeMissionControlPolicy,
+  readMissionControlPolicyConfiguration,
+  writeMissionControlPolicyConfiguration,
+  MissionControlPolicyError,
+} from "./MissionControlPolicy.js";
+export type {
+  MissionControlRepositoryPolicyView,
+  MissionControlExecutionProfileView,
+  MissionControlPromptArtifactView,
+  MissionControlPolicySnapshot,
+  MissionControlPolicyInspection,
+  MissionControlPolicyValidation,
+  MissionControlPolicyDiffEntry,
+  MissionControlPolicyDryRunDecision,
+  MissionControlPolicyDryRunSummary,
+  MissionControlPolicyDryRunImpact,
+  MissionControlPolicyPreview,
+  MissionControlPolicyApplyRequest,
+  MissionControlPolicyApplyOutcomeCode,
+  MissionControlPolicyApplyOutcome,
+  MissionControlPolicyAdministrationOptions,
+  MissionControlWorkerConfigurationUpdateRequest,
+  MissionControlWorkerConfigurationUpdateResult,
+  MissionControlPolicyAdministration,
+} from "./MissionControlPolicy.js";
+export {
+  MISSION_CONTROL_ACCEPTANCE_ARTIFACTS,
+  missionControlAcceptanceLimitations,
+  missionControlAcceptanceProofDigest,
+  runMissionControlAcceptanceProof,
+  MissionControlAcceptanceProofError,
+} from "./MissionControlAcceptanceProof.js";
+export type {
+  MissionControlAcceptanceProofErrorCode,
+  MissionControlAcceptanceHttpObservation,
+  MissionControlAcceptanceArtifact,
+  MissionControlAcceptanceCommandObservation,
+  MissionControlAcceptancePublicationObservation,
+  MissionControlAcceptanceDeploymentObservation,
+  MissionControlAcceptanceDurabilityObservation,
+  MissionControlAcceptanceCredentialObservation,
+  MissionControlAcceptanceEvidence,
+  MissionControlAcceptanceStatus,
+  MissionControlAcceptanceChecks,
+  MissionControlAcceptanceLimitation,
+  MissionControlAcceptanceProof,
+  RunMissionControlAcceptanceProofInput,
+} from "./MissionControlAcceptanceProof.js";
 export { runWorkerPocGate, WorkerPocGateError } from "./WorkerPocGate.js";
 export { createWorkerPocBoundaryAuditRecorder } from "./WorkerPocGateAudit.js";
 export { runWorkerRestartAcceptanceProof } from "./WorkerRestartAcceptanceProof.js";

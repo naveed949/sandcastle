@@ -319,6 +319,83 @@ through the agent API. Run logs are forced into the qualified repository cache,
 and a dirty preserved worktree is retained as cleanup failure evidence instead
 of being reported as verified.
 
+### Plan-bound implementation stage
+
+Execute one accepted structured plan against its still-claimed attempt. The
+stage binds execution to the plan's frozen task revision, captured base
+commit, and repository profile; classifies stale revisions and base drift as
+retryable without side effects; never re-executes an attempt already started
+by a crashed run; and propagates stage timeout and operator cancellation to
+the agent and command subprocesses through one `AbortSignal`.
+
+```typescript
+import { createRepositoryWorkflowImplementer } from "@ai-hero/sandcastle";
+
+const implementer = createRepositoryWorkflowImplementer({
+  engine: execution,
+  store: state,
+  timeoutMs: 30 * 60_000,
+});
+
+const outcome = await implementer.implement({ plan, attempt });
+console.log(outcome.status, outcome.recovery, outcome.verification);
+```
+
+The implementer prompt template must reference an `{{ACCEPTED_PLAN}}` marker;
+the marker is expanded with the accepted plan JSON before the agent runs, and
+execution fails fast when the marker is present without a supplied plan. The
+workflow advances only on `verified`; cancelled and timed-out attempts are
+resumable through lease recovery, and classified failures are retryable with a
+fresh claim.
+
+### Independent review and bounded remediation
+
+Review verified implementation work with a read-only reviewer stage. The
+reviewer sees only text — frozen task snapshot, accepted plan, implementation
+diff, verification evidence, and repository policy — never a repository
+handle, so it cannot mutate the implementation worktree.
+
+```typescript
+import {
+  createRepositoryWorkflowReviewer,
+  createRepositoryWorkflowReviewStore,
+  reviewAndRemediate,
+} from "@ai-hero/sandcastle";
+
+const reviewer = createRepositoryWorkflowReviewer({
+  invoke, // your agent boundary; output arrives in a <review> tag
+  reviewStore: createRepositoryWorkflowReviewStore({ store: workflows }),
+});
+
+const result = await reviewAndRemediate({
+  plan,
+  attempt: verifiedAttempt,
+  implementation,
+  implementationDiff,
+  configuration,
+  source,
+  store: workerState,
+  reviewer,
+  implementer,
+  owner: "supervisor",
+  leaseDurationMs: 60_000,
+  reviewerPromptVersion: "reviewer-v1",
+  reviewerPromptTemplate: "<review> {{IMPLEMENTATION_DIFF}}",
+  maxRemediationIterations: 2,
+  deadlineMs: 30 * 60_000,
+});
+console.log(result.status, result.reviews.length);
+```
+
+Verdicts use a versioned schema (verdict, severity, findings, locations,
+rationale, required actions). Approval is gated deterministically: an approved
+verdict may not carry a blocking finding, and cancellation, timeout, malformed
+output, or reviewer failure never approve the task. Changes requested trigger
+at most `maxRemediationIterations` fresh claims and implementations, each
+linked to its prior reviews; exhausting iterations or the time budget enters a
+manual-intervention state instead of approving. Every review in the chain is
+persisted and projected to Mission Control.
+
 ### Verification-gated draft pull requests
 
 Publish a retained verified attempt through a separate credentialed boundary.
@@ -488,6 +565,260 @@ and `published` states.
 See [Remote worker operations](docs/remote-worker.md) for credential scope,
 systemd deployment, backup, upgrade, and failure inspection guidance.
 
+### Mission Control production host
+
+`createMissionControlHost()` is the production composition root for the worker,
+repository workflow coordinator, operator overview, and guarded runtime and
+recovery controls. It constructs the GitHub source, durable state store,
+repository manager, execution engine, draft publisher, diagnostics, and
+`WorkerService` from one central configuration. The same durable root also
+supplies the kernel-owned service lock. The host acquires that lock before it
+starts a workflow coordinator, so a second dispatcher cannot run alongside the
+authoritative process.
+
+```typescript
+import { codex, createMissionControlHost } from "@ai-hero/sandcastle";
+import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+
+const host = createMissionControlHost({
+  configuration: {
+    worker: configuration,
+    workspaceRoot: "/srv/sandcastle-worker",
+    owner: "dev-box-1",
+    pollIntervalMs: 60_000,
+    leaseDurationMs: 30 * 60_000,
+    executionTimeoutMs: 2 * 60 * 60_000,
+    github: { token: process.env.GITHUB_TOKEN },
+    agentRunOptions: {
+      agent: codex("gpt-5.6-luna"),
+      sandbox: docker(),
+    },
+    discovery: {
+      includeConfiguredRepositories: true,
+      includeAccountWide: true,
+    },
+    // Omit bindAddress to keep the default 127.0.0.1 binding.
+    server: { port: 3000 },
+  },
+});
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => void host.stop());
+}
+
+await host.start();
+```
+
+When repository workflows are enabled, create one
+`createRepositoryWorkflowCoordinator({ control })` and pass both its gated
+`control` and the coordinator as host boundaries. `host.start()` starts the
+worker and confirms its lock before starting the coordinator; `host.stop()`
+stops workflow dispatch, cancels the worker, waits for bounded cleanup, and
+then closes Mission Control and its event stream. The legacy polling supervisor
+accepts the same service-lock path and cannot dispatch while this host owns it.
+
+For an operator-ready Codex and Docker launcher, provide an explicit repository
+allowlist and a server-side GitHub token, then start the included script:
+
+```bash
+GITHUB_TOKEN=... \
+SANDCASTLE_REPOSITORIES=owner/repository,owner/another-repository \
+SANDCASTLE_REPOSITORY_PATHS='{"owner/repository":"/srv/repository","owner/another-repository":"/srv/another-repository"}' \
+SANDCASTLE_GITHUB_ACCOUNT=owner \
+npm run mission-control
+```
+
+The launcher authorizes only repositories named in `SANDCASTLE_REPOSITORIES`
+and maps each one to an existing local checkout through the required JSON
+object in `SANDCASTLE_REPOSITORY_PATHS`. Each checkout owns its workflow and
+prompts; this repository's `.sandcastle/workflow.ts` is the shared declaration
+used by both `.sandcastle/run.ts` and Mission Control. The host-owned
+coordinator runs one globally serialized repository workflow at a time. Agent
+logs and cycle results are retained under `.sandcastle/mission-control` by
+default. Integration commits remain local; pushing is a separate operator
+action.
+
+Repository workflows have their own durable mode, so pausing one repository
+does not pause the others. The operator API provides:
+
+- `GET` and `POST /api/v1/repositories` to list or authorize repositories.
+- `GET` and `DELETE /api/v1/repositories/:owner/:name` to inspect full retained
+  run/cycle/task/agent evidence or remove authorization.
+- `POST /api/v1/repositories/:owner/:name/pause`, `/resume`, or `/run` for
+  independent workflow control.
+
+Workflow authorization and dispatch are persisted through one transactional
+JSON state boundary. Each mutation advances a monotonic revision and accepts
+an optional `expectedRevision` compare-and-set guard; claims persist the
+repository-qualified workflow identity, owner, lease, cycle, and claim phase
+before runtime dispatch. Expired claims are classified as retryable before
+dispatch or manual intervention after dispatch, while transient failures use
+bounded backoff. The global ready queue is fair and deterministic: the least
+recently scheduled workflow wins, then normalized repository, cycle, and
+repository-qualified workflow identity break ties. Idle polls do not consume a
+workflow cycle budget.
+
+`GET /api/v1/workflows` (also available as
+`GET /api/v1/repository-workflows`) returns the scheduler's revision-bound
+projection, including repository, task stage, owner, timestamps, queue
+position, recovery state, and safe blocking reasons. Mission Control embeds the
+same projection in its overview; it does not calculate a competing queue.
+
+The planner stage is available through `planOneEligibleTask()` and
+`createRepositoryWorkflowPlanner()`. It first runs the worker's deterministic
+eligibility check and refresh-bound claim for one repository-qualified task,
+then sends only the immutable task snapshot, selected profile, frozen base
+revision, and dependency evidence to the agent. The agent must emit a versioned
+`<plan>` object containing task intent, proposed work, verification strategy,
+risks, and evidence. Authorization, dependency order, queue position, and merge
+policy are server-owned fields and are rejected if included in agent output.
+Claim-time task, eligibility, profile, and dependency provenance are checked
+again before invocation; claim-time snapshots must be unique and limited to
+the claimed task and its authoritative dependency or PRD context. Those
+retained snapshots include policy-normalized dependency edges, so centrally
+configured blockers remain reproducible in planner evidence. Missing or
+conflicting context fails closed.
+The planned result exposes that same claim-time eligibility decision, keeping
+returned authorization and eligibility evidence aligned with the retained
+claim and plan.
+Accepted plans and their input provenance are retained in the same workflow
+state and appear under the projection's `plans` collection. Missing context,
+malformed output, cancellation, and timeout do not advance implementation;
+cancellation and timeout remain resumable planner outcomes. Reusing a plan ID
+with different immutable input is rejected as a persistence conflict.
+
+Override the defaults with `SANDCASTLE_FEATURE_BRANCH`,
+`SANDCASTLE_CODEX_AUTH_PATH`, `SANDCASTLE_BASE_BRANCH`,
+`SANDCASTLE_MISSION_CONTROL_ROOT`, `SANDCASTLE_WORKER_OWNER`,
+`SANDCASTLE_POLL_INTERVAL_MS`, `SANDCASTLE_LEASE_DURATION_MS`,
+`SANDCASTLE_EXECUTION_TIMEOUT_MS`, `SANDCASTLE_SHUTDOWN_TIMEOUT_MS`,
+`SANDCASTLE_BIND_ADDRESS`, and `SANDCASTLE_PORT`.
+
+Configuration is validated before the host constructs a ready HTTP server or
+allows discovery, checkout, agent invocation, or publication. The versioned
+read-only endpoints are `GET /api/v1/overview` and `GET /api/v1/status`; they
+return worker mode, the monotonic command revision, active attempt, cycle
+timing, recovery warnings, current operational-state counts, and a secret-free
+`orchestration` health object identifying the Mission Control host authority and
+worker, workflow coordinator, HTTP, and event-stream component modes. Runtime
+controls use `POST /api/v1/commands` with one of `run-now`, `pause`, `resume`,
+`cancel`, `retry`, or `acknowledge` (or the generic `recover` command with a
+`recoveryAction`):
+
+```typescript
+const status = await fetch("http://127.0.0.1:3000/api/v1/status").then(
+  (response) => response.json(),
+);
+
+await fetch("http://127.0.0.1:3000/api/v1/commands", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({
+    command: "pause",
+    commandId: "maintenance-2026-08-24",
+    expectedRevision: status.revision,
+    reason: "maintenance window",
+  }),
+});
+```
+
+Every command has an idempotency key, expected revision, and operator reason.
+Cancellation also requires the active attempt ID. Stale revisions are rejected
+without worker mutation; duplicate command IDs return their retained outcome.
+Pause stops new polling at a cycle boundary while allowing an active agent
+invocation to finish, and resume reuses the existing single polling loop. The
+`retry` command requires an attempt classified as `safe_retry`: the claim must
+be expired, unstarted, and freshly revalidated against the authoritative task
+source before a new lease is created. A live unstarted claim is shown as
+`safe_resume`, while a started claim is shown as `manual_intervention` and
+cannot be retried. `acknowledge` requires an operator identity and reason; it
+records the acknowledgement in the append-only audit without changing the
+attempt, outcome, evidence, lease, branch, record, or task state. Recovery
+rejections include stable `reasonCode` values. The request and outcome records
+are append-only JSONL under the durable
+`operator/commands.jsonl` path and redact protected worker material.
+The bundled overview also shows the repository-qualified task inbox, the
+worker-emitted ready queue, retained attempts, and a reconnecting operational
+event stream. The versioned inspection endpoints are `GET /api/v1/tasks`,
+`GET /api/v1/queue`, `GET /api/v1/attempts`,
+`GET /api/v1/attempts/:attemptId`, and `GET /api/v1/events`. Attempt evidence
+is addressed by an opaque retained identifier returned by the attempt view;
+the scoped form is
+`GET /api/v1/tasks/:taskId/attempts/:attemptId/evidence/:evidenceId`.
+`Last-Event-ID` resumes `/api/v1/events` after the acknowledged event without
+replaying it. Queue order is projected from the worker's ordered diagnostics,
+and the browser does not calculate an alternative priority.
+
+Task and attempt responses include source revisions, base branch and commit,
+authorization and eligibility decisions, dependencies, parent PRD references,
+profile and prompt digests, lease metadata, lifecycle events, commits,
+verification summaries, and draft pull-request links when retained. Task
+bodies, prompt templates, credentials, raw durable paths, and arbitrary
+filesystem content are excluded. Evidence reads accept only identifiers that
+were retained for the task and attempt; durable-root checks reject traversal,
+missing files, and symbolic-link escapes. Set `server.bindAddress` explicitly
+only when an operator-controlled private ingress requires a non-loopback
+interface.
+
+Mission Control also exposes staged, server-owned policy administration.
+`GET /api/v1/policy` returns the current repository grants, exact-task grants,
+dependency edges, execution-profile summaries, and prompt-artifact digests
+without returning prompt contents or protected command material. Submit a
+candidate to `POST /api/v1/policy/validate`, then
+`POST /api/v1/policy/preview` to receive a deterministic semantic diff and a
+redacted dry-run impact over retained task snapshots. Apply only the returned
+preview with `POST /api/v1/policy/apply`:
+
+```typescript
+const preview = await fetch("http://127.0.0.1:3000/api/v1/policy/preview", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ configuration: proposedPolicy }),
+}).then((response) => response.json());
+
+await fetch("http://127.0.0.1:3000/api/v1/policy/apply", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({
+    configuration: proposedPolicy,
+    previewId: preview.previewId,
+    commandId: "policy-change-2026-08-24",
+    expectedWorkerRevision: preview.workerRevision,
+    reason: "Authorize the reviewed task grant",
+  }),
+});
+```
+
+The policy file defaults to `policy/worker.json` under `workspaceRoot` and is
+written through a same-directory temporary file and rename. Policy previews,
+requests, and outcomes share the append-only operator audit by default; a
+successful apply returns an `auditReference`. Stale revisions, unpreviewed
+identities, invalid central configuration, and exact-task sibling access are
+rejected without changing the active policy. Policy administration never
+merges, closes, releases, deploys, verifies, or publishes work.
+
+### Mission Control deployment acceptance
+
+`runMissionControlAcceptanceProof()` is the retained release proof for the
+remote Mission Control host. Its live fixture exercises the running HTML,
+read-model, SSE, evidence, and guarded-command endpoints, then proves restart
+retention, credential redaction, duplicate-command idempotency, and
+draft-publication retry identity. It writes only a safe, HMAC-bound summary:
+
+```bash
+SANDCASTLE_MISSION_CONTROL_ACCEPTANCE_FIXTURE=$PWD/scripts/mission-control-acceptance.fixture.mts \
+SANDCASTLE_MISSION_CONTROL_ACCEPTANCE_SCENARIO=/srv/sandcastle-worker/acceptance/mission-control-scenario.json \
+SANDCASTLE_MISSION_CONTROL_ACCEPTANCE_KEY=... \
+  npm run test:acceptance:mission-control
+```
+
+Use a dedicated acceptance task set because the probe issues real `run-now`,
+pause/resume, cancellation, safe-retry, and manual-acknowledgement commands.
+The default systemd unit remains localhost-bound; use an authenticated VPN,
+SSH tunnel, or trusted reverse proxy for operator access. See
+[Mission Control remote deployment acceptance](docs/mission-control-acceptance.md)
+for the scenario contract and retained limitations.
+
 ### Consolidated retained POC gate
 
 `runWorkerPocGate()` is the final fail-closed acceptance boundary. It performs
@@ -516,7 +847,8 @@ SANDCASTLE_POC_GATE_SCENARIO=/absolute/path/to/poc-gate-scenario.json \
 ```
 
 To execute the complete release gate without allowing missing fixtures to be
-reported as skipped tests, configure all four live fixture variables and run:
+reported as skipped tests, configure every live fixture and scenario variable
+(plus both acceptance keys) and run:
 
 ```bash
 npm run test:acceptance:all
@@ -1385,12 +1717,12 @@ The `codex()` factory accepts an optional second argument for provider-specific 
 agent: codex("gpt-5.4", { effort: "high" });
 ```
 
-| Option              | Type                                           | Default | Description                                                                                                                                                                                                           |
-| ------------------- | ---------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `effort`            | `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` | —       | Codex reasoning effort level via `model_reasoning_effort`                                                                                                                                                             |
-| `env`               | `Record<string, string>`                       | `{}`    | Environment variables injected by this agent provider                                                                                                                                                                 |
-| `captureSessions`   | `boolean`                                      | `true`  | Capture Codex rollout JSONL to host for resume                                                                                                                                                                        |
-| `approvalsReviewer` | `"user"` \| `"auto_review"`                    | —       | Maps to Codex's `approvals_reviewer` config. When `"auto_review"`, swaps `--dangerously-bypass-approvals-and-sandbox` for `-a on-request -s danger-full-access` so the reviewer agent evaluates each approval prompt. |
+| Option              | Type                                                                   | Default | Description                                                                                                                                                                                                           |
+| ------------------- | ---------------------------------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `effort`            | `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` \| `"ultra"` | —       | Codex reasoning effort level via `model_reasoning_effort`                                                                                                                                                             |
+| `env`               | `Record<string, string>`                                               | `{}`    | Environment variables injected by this agent provider                                                                                                                                                                 |
+| `captureSessions`   | `boolean`                                                              | `true`  | Capture Codex rollout JSONL to host for resume                                                                                                                                                                        |
+| `approvalsReviewer` | `"user"` \| `"auto_review"`                                            | —       | Maps to Codex's `approvals_reviewer` config. When `"auto_review"`, swaps `--dangerously-bypass-approvals-and-sandbox` for `-a on-request -s danger-full-access` so the reviewer agent evaluates each approval prompt. |
 
 ### `PiOptions`
 

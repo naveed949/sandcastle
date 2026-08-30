@@ -90,6 +90,22 @@ _Avoid_: "run" (ambiguous with the JS `run()` function), "cycle", "loop"
 A work item from the **issue tracker** that the **agent** selects and works on during an **iteration**.
 _Avoid_: "job", "work item", "ticket"
 
+**Authorized repository**:
+A repository that an **operator** has explicitly permitted Mission Control to monitor and in which it may dispatch eligible **tasks**.
+_Avoid_: "whitelisted repo", "configured repo" (does not state execution authority)
+
+**Repository workflow**:
+The operator-approved, repository-specific orchestration policy that selects eligible **tasks** and coordinates planner, implementer, reviewer, and publication activity while retaining Mission Control's control authority.
+_Avoid_: "worker" (a worker executes one task), "run script" (an implementation detail)
+
+**Repository workflow run**:
+One durable execution of a **repository workflow**, containing one or more **repository workflow cycles** and their agent, task, publication, and control evidence.
+_Avoid_: "worker run", "mission"
+
+**Repository workflow cycle**:
+One planner-led pass over an **authorized repository**, from discovery through the resulting task executions and guarded publication decisions. It may contain multiple agent **iterations**.
+_Avoid_: "iteration" (already means one agent invocation), "poll"
+
 **Completion signal**:
 The `<promise>COMPLETE</promise>` marker in the **agent**'s output indicating all actionable tasks are finished. A pure termination signal -- carries no payload. Distinct from **structured output**.
 _Avoid_: "done flag", "exit signal", conflating with **structured output**

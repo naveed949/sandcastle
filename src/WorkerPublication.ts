@@ -93,6 +93,8 @@ export interface WorkerPublisher {
 
 export interface WorkerPublisherOptions {
   readonly configuration: WorkerConfiguration;
+  /** Return the active policy after a staged Mission Control apply. */
+  readonly configurationProvider?: () => WorkerConfiguration;
   readonly workspaceRoot: string;
   readonly store: WorkerStateStore;
   readonly operations: WorkerPublicationOperations;
@@ -528,7 +530,8 @@ export const createWorkerPublisher = (
       assertRetainedEvidence(attempt, recordPath, result);
 
       const authorized = runWorkerDryRun({
-        configuration: options.configuration,
+        configuration:
+          options.configurationProvider?.() ?? options.configuration,
         tasks: [
           ...(attempt.claim?.refreshedSnapshots ?? []),
           ...(attempt.request.context.parentPrd === undefined

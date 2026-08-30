@@ -1,18 +1,38 @@
 import * as sandcastle from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+import { repositoryWorkflow } from "./workflow.js";
 
-const MAX_ITERATIONS = 10;
-const MAX_PARALLEL = 4;
+const ISSUE_REPOSITORY = "naveed949/sandcastle";
 
-for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
-  console.log(`\n=== Iteration ${iteration}/${MAX_ITERATIONS} ===\n`);
+const createDockerSandbox = () =>
+  docker({
+    env: { GH_REPO: ISSUE_REPOSITORY },
+    mounts: [
+      {
+        hostPath: `${process.env.HOME}/.codex/auth.json`,
+        sandboxPath: "/home/agent/.codex/auth.json",
+        readonly: true,
+      },
+    ],
+  });
+
+for (
+  let iteration = 1;
+  iteration <= repositoryWorkflow.maxCycles;
+  iteration++
+) {
+  console.log(
+    `\n=== Iteration ${iteration}/${repositoryWorkflow.maxCycles} ===\n`,
+  );
 
   // Phase 1: Plan — orchestrator agent analyzes issues and picks parallelizable work
   const plan = await sandcastle.run({
-    sandbox: docker(),
+    sandbox: createDockerSandbox(),
     name: "Planner",
-    agent: sandcastle.claudeCode("claude-opus-4-8"),
-    promptFile: "./.sandcastle/plan-prompt.md",
+    agent: sandcastle.codex(repositoryWorkflow.planner.model, {
+      effort: repositoryWorkflow.planner.effort,
+    }),
+    promptFile: repositoryWorkflow.planner.prompt,
   });
 
   const planMatch = plan.stdout.match(/<plan>([\s\S]*?)<\/plan>/);
@@ -42,7 +62,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
   let running = 0;
   const queue: (() => void)[] = [];
   const acquire = () =>
-    running < MAX_PARALLEL
+    running < repositoryWorkflow.maxParallel
       ? (running++, Promise.resolve())
       : new Promise<void>((resolve) => queue.push(resolve));
   const release = () => {
@@ -59,7 +79,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
       await acquire();
       try {
         await using sandbox = await sandcastle.createSandbox({
-          sandbox: docker(),
+          sandbox: createDockerSandbox(),
           branch: issue.branch,
           copyToWorktree: ["node_modules"],
           hooks: {
@@ -71,10 +91,12 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
 
         const result = await sandbox.run({
           name: "Implementer #" + issue.number,
-          agent: sandcastle.claudeCode("claude-opus-4-8"),
-          promptFile: "./.sandcastle/implement-prompt.md",
+          agent: sandcastle.codex(repositoryWorkflow.implementer.model, {
+            effort: repositoryWorkflow.implementer.effort,
+          }),
+          promptFile: repositoryWorkflow.implementer.prompt,
           promptArgs: {
-            TASK_ID: String(issue.number),
+            ISSUE_NUMBER: String(issue.number),
             ISSUE_TITLE: issue.title,
             BRANCH: issue.branch,
           },
@@ -83,10 +105,12 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
         if (result.commits.length > 0) {
           await sandbox.run({
             name: "Reviewer #" + issue.number,
-            agent: sandcastle.claudeCode("claude-opus-4-8"),
-            promptFile: "./.sandcastle/review-prompt.md",
+            agent: sandcastle.codex(repositoryWorkflow.reviewer.model, {
+              effort: repositoryWorkflow.reviewer.effort,
+            }),
+            promptFile: repositoryWorkflow.reviewer.prompt,
             promptArgs: {
-              TASK_ID: String(issue.number),
+              ISSUE_NUMBER: String(issue.number),
               ISSUE_TITLE: issue.title,
               BRANCH: issue.branch,
             },
@@ -140,11 +164,11 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
 
   // Phase 3: Merge — one agent merges all branches together
   await sandcastle.run({
-    sandbox: docker(),
+    sandbox: createDockerSandbox(),
     name: "Merger",
     maxIterations: 10,
-    agent: sandcastle.claudeCode("claude-opus-4-8"),
-    promptFile: "./.sandcastle/merge-prompt.md",
+    agent: sandcastle.codex(repositoryWorkflow.integrator.model),
+    promptFile: repositoryWorkflow.integrator.prompt,
     promptArgs: {
       BRANCHES: completedBranches.map((b) => `- ${b}`).join("\n"),
       ISSUES: completedIssues

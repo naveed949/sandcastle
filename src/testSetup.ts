@@ -19,7 +19,7 @@ const tmpDir = mkdtempSync(join(tmpdir(), "test-gitconfig-worker-"));
 const globalConfigPath = join(tmpDir, ".gitconfig");
 writeFileSync(
   globalConfigPath,
-  "[user]\n\temail = test@test.com\n\tname = Test\n",
+  `[user]\n\temail = test@test.com\n\tname = Test\n[safe]\n\tdirectory = ${process.cwd()}\n`,
 );
 process.env.GIT_CONFIG_GLOBAL = globalConfigPath;
 
