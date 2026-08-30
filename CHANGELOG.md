@@ -1,5 +1,27 @@
 # @ai-hero/sandcastle
 
+## 0.13.0
+
+### Minor Changes
+
+- 02f9239: Add a restartable single-worker polling service with durable diagnostics,
+  recovery classification, execution timeouts, and graceful cancellation.
+- ba3704b: Add retained cross-repository authorization and isolation acceptance proofs.
+- 21f6518: Persist worker task snapshots, execution requests, and lifecycle outcomes across restarts.
+- a654c91: Add a read-only GitHub task source for repository, exact-task, and account-wide discovery.
+- 5767d34: Add authorized, repository-qualified local worker execution with frozen-base validation, immutable prompt artifacts, sandbox enforcement, and retained verification evidence.
+- aa7aaf7: Add PRD-bound execution context, authoritative dependency configuration and refresh, and retained three-task dependency-chain acceptance proofs.
+- 9aebbff: Add a deterministic, read-only worker coordinator for authorization and dry-run execution requests.
+- e269f8e: Add a consolidated retained POC gate for deterministic discovery, authorization,
+  restart recovery, cross-repository isolation, dependency ordering, provenance,
+  and guarded publication boundaries.
+- 41d4403: Add revision-bound task claims with durable leases and explicit expiry recovery classification.
+- 318605e: Keep PRD and dependency snapshots through execution and publication, run worker
+  setup and verification inside the repository sandbox, require non-vacuous
+  verification with retained commits, and add a fail-closed complete acceptance
+  gate command.
+- 618fd77: Add verification-gated, idempotent GitHub branch and draft pull-request publication for retained worker attempts.
+
 ## 0.12.0
 
 ### Minor Changes
